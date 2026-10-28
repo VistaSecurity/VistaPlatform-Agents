@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 )
 
@@ -18,10 +19,10 @@ import (
 // stops sending the header silently loses agent-routed Add device.
 func TestGetNextJob_DeclaresDeviceDiscoveryCapability(t *testing.T) {
 	var header string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header = r.Header.Get(di.AgentCapabilitiesHeader)
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	defer srv.Close()
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})

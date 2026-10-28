@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // SubmitStatusError is a result submission the platform answered with a
@@ -76,6 +77,11 @@ func SubmitWithRetry(ctx context.Context, p RetryPolicy, submit func() error) er
 		}
 		var status *SubmitStatusError
 		if errors.As(err, &status) && !status.Retryable() {
+			return err
+		}
+		// A platform that does not speak this agent's managed protocol
+		// answers the same way five more times; the gate already said why.
+		if managedprotocol.IsIncompatible(err) || errors.Is(err, managedprotocol.ErrNotNegotiated) {
 			return err
 		}
 		if attempt == p.Attempts || ctx.Err() != nil {

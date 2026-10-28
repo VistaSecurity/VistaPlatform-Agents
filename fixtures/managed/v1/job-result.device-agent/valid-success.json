@@ -1,0 +1,60 @@
+{
+  "job_id": "bc789b6e-9298-4a71-8a7b-f4c495dae444",
+  "success": true,
+  "completed_at": "2026-01-02T03:04:05Z",
+  "assets": [
+    {
+      "hostname": "fw-a.example.test",
+      "ip_address": "198.51.100.20",
+      "port": 443,
+      "protocol": "TLS",
+      "protocol_version": "TLS 1.2",
+      "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "tls_versions": [
+        "TLS 1.2",
+        "TLS 1.3"
+      ],
+      "certificates": [
+        {
+          "subject_dn": "CN=app.example.test,O=Example Test",
+          "issuer_dn": "CN=Example Test CA,O=Example Test",
+          "serial_number": "1001",
+          "not_before": "2026-01-01T00:00:00Z",
+          "not_after": "2027-01-01T00:00:00Z",
+          "key_algorithm": "ECDSA",
+          "key_size": 256,
+          "signature_alg": "ECDSA-SHA256",
+          "is_ca": false,
+          "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+          "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "fingerprint_sha1": "0000000000000000000000000000000000000000",
+          "subject_alternative_names": [
+            "app.example.test"
+          ],
+          "key_usage": [
+            "DigitalSignature"
+          ],
+          "extended_key_usage": [
+            "ServerAuth"
+          ],
+          "chain_order": 0,
+          "fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "cert_validation_status": "self_signed",
+      "device_info": {
+        "vendor": "Fortinet",
+        "model": "FortiGate 60F",
+        "firmware_version": "v7.4.4"
+      }
+    }
+  ],
+  "device_identity": {
+    "vendor": "Fortinet",
+    "model": "FortiGate 60F"
+  },
+  "warnings": [],
+  "metadata": {
+    "device_type": "fortinet"
+  }
+}

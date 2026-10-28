@@ -1,12 +1,10 @@
 package api
 
 import (
-	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -19,6 +17,7 @@ import (
 	// Aliased: the sensor has its own `certificates` package, imported above.
 	sharedcerts "github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	"github.com/vistasecurity/vistaplatform-agents/shared/httpclient"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // SensorManagerClient handles communication with the sensor manager service
@@ -26,6 +25,17 @@ type SensorManagerClient struct {
 	config     *config.Config
 	httpClient *http.Client
 	baseURL    string
+	// gate is the platform's managed protocol (protocol.go); main shares the
+	// OutboundClient's through UseGate.
+	gate *managedprotocol.Gate
+}
+
+// UseGate makes this client record what it learns of the platform's protocol
+// in g, the gate the OutboundClient checks before it submits anything.
+func (c *SensorManagerClient) UseGate(g *managedprotocol.Gate) {
+	if g != nil {
+		c.gate = g
+	}
 }
 
 // NewSensorManagerClient creates a new sensor manager client
@@ -72,6 +82,7 @@ func NewSensorManagerClient(cfg *config.Config) *SensorManagerClient {
 		config:     cfg,
 		httpClient: httpClient,
 		baseURL:    cfg.ControlPlaneURL,
+		gate:       managedprotocol.NewGate(SensorCapabilities()),
 	}
 }
 
@@ -108,7 +119,10 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 		return nil, fmt.Errorf("failed to encode private key: %v", err)
 	}
 
-	// Registration request with CSR
+	// Registration request with CSR. Protocol 1 has no other kind.
+	if csrPEM == "" {
+		return nil, fmt.Errorf("refusing to register without a certificate signing request")
+	}
 	registration := models.SensorRegistration{
 		RegistrationKey:     c.config.RegistrationKey,
 		Name:                c.config.Name,
@@ -121,55 +135,62 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 		IPAddress:           c.getRegistrationIPAddress(),
 		CSR:                 csrPEM,            // Include CSR in registration request
 		SensorID:            sensorID.String(), // Proposed sensor ID
-		SupportsAgentSecret: true,              // this build stores the per-sensor secret (#2437)
-	}
-
-	jsonData, err := json.Marshal(registration)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal registration: %v", err)
+		AgentKind:           managedprotocol.AgentKindSensor,
+		Protocol:            managedprotocol.Offer(c.gate.Own()),
 	}
 
 	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/register", c.baseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	status, _, body, err := call(c.httpClient, c.gate, http.MethodPost, url, registration)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to send registration request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
-		if IsPermanentRegistrationStatus(resp.StatusCode) {
+	if status != http.StatusOK {
+		err := fmt.Errorf("registration failed with status %d: %s", status, string(body))
+		if IsPermanentRegistrationStatus(status) {
 			// A rejected key, a duplicate sensor id, an unknown route: retrying
 			// changes nothing, so the caller must stop rather than loop.
-			return nil, &RegistrationRejectedError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body)), err: err}
+			return nil, &RegistrationRejectedError{StatusCode: status, Body: strings.TrimSpace(string(body)), err: err}
 		}
 		return nil, err
 	}
 
 	var registrationResp struct {
-		SensorID             string              `json:"sensor_id"`
-		ClientCert           string              `json:"client_cert"`       // Signed certificate (no private key)
-		ServerCACert         string              `json:"server_ca_cert"`    // CA certificate for trust
-		ControlPlaneURL      string              `json:"control_plane_url"` // mTLS passthrough URL to switch to (#1033)
-		CertificateExpiresAt string              `json:"certificate_expires_at"`
-		ReportingInterval    int                 `json:"reporting_interval"` // Top-level field from server
-		Features             map[string]bool     `json:"features"`           // Top-level field from server
-		Config               models.SensorConfig `json:"config"`             // For backward compatibility
-		AgentSecret          string              `json:"agent_secret"`
-		AgentSecretVersion   int                 `json:"agent_secret_version"`
+		SensorID             string                    `json:"sensor_id"`
+		ClientCert           string                    `json:"client_cert"`       // Signed certificate (no private key)
+		ClientKey            string                    `json:"client_key"`        // never accepted: see below
+		ServerCACert         string                    `json:"server_ca_cert"`    // CA certificate for trust
+		ControlPlaneURL      string                    `json:"control_plane_url"` // mTLS passthrough URL to switch to (#1033)
+		CertificateExpiresAt string                    `json:"certificate_expires_at"`
+		ReportingInterval    int                       `json:"reporting_interval"` // Top-level field from server
+		Features             map[string]bool           `json:"features"`           // Top-level field from server
+		Config               models.SensorConfig       `json:"config"`             // For backward compatibility
+		AgentSecret          string                    `json:"agent_secret"`
+		AgentSecretVersion   int                       `json:"agent_secret_version"`
+		Protocol             *managedprotocol.Protocol `json:"protocol"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&registrationResp); err != nil {
+	if err := json.Unmarshal(body, &registrationResp); err != nil {
 		return nil, fmt.Errorf("failed to decode registration response: %v", err)
 	}
+
+	// Nothing from the answer is applied before it is known to be protocol 1.
+	caps, err := managedprotocol.Negotiate(registrationResp.Protocol, status, c.gate.Own())
+	if err != nil {
+		return nil, c.gate.Observe(err)
+	}
+	// The key pair is this sensor's; a platform that generated one has seen a
+	// private key it must never hold.
+	if registrationResp.ClientKey != "" {
+		return nil, &managedprotocol.ViolationError{Reason: "it carries a private key the platform generated (client_key); this sensor only ever uses the key it generated for its certificate signing request"}
+	}
+	if registrationResp.AgentSecret == "" {
+		return nil, &managedprotocol.ViolationError{Reason: "it carries no agent_secret, which protocol 1 always issues at enrollment"}
+	}
+	c.gate.Compatible(caps)
 
 	// Update sensor ID in config
 	c.config.SensorID = registrationResp.SensorID
@@ -252,108 +273,6 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 // safe fallback.
 func (c *SensorManagerClient) getRegistrationIPAddress() string {
 	return c.config.CurrentIPAddress()
-}
-
-// SubmitDiscoveries submits a batch of discoveries to the control plane
-func (c *SensorManagerClient) SubmitDiscoveries(discoveries []*models.CryptoDiscovery) error {
-	if len(discoveries) == 0 {
-		return nil
-	}
-
-	batch := models.DiscoveryBatch{
-		SensorID:    c.config.SensorID,
-		Discoveries: make([]models.CryptoDiscovery, len(discoveries)),
-		BatchID:     generateBatchID(),
-		Timestamp:   time.Now(),
-		Count:       len(discoveries),
-	}
-
-	// Convert pointers to values
-	for i, discovery := range discoveries {
-		batch.Discoveries[i] = *discovery
-	}
-
-	jsonData, err := json.Marshal(batch)
-	if err != nil {
-		return fmt.Errorf("failed to marshal discoveries: %v", err)
-	}
-
-	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/%s/discoveries", c.baseURL, c.config.SensorID)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send discoveries: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("submission failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// ReportHealth reports sensor health to the control plane
-func (c *SensorManagerClient) ReportHealth(health *models.SensorHealth) error {
-	jsonData, err := json.Marshal(health)
-	if err != nil {
-		return fmt.Errorf("failed to marshal health: %v", err)
-	}
-
-	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/%s/health", c.baseURL, c.config.SensorID)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send health report: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("health report failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// GetConfig retrieves sensor configuration from the control plane
-func (c *SensorManagerClient) GetConfig() (*models.SensorConfig, error) {
-	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/%s/config", c.baseURL, c.config.SensorID)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get config: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("config request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var config models.SensorConfig
-	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
-		return nil, fmt.Errorf("failed to decode config: %v", err)
-	}
-
-	return &config, nil
 }
 
 // Helper function to generate batch ID

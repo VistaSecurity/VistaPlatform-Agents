@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 // A job in flight at shutdown finishes and submits before Stop returns, and no
@@ -33,7 +34,7 @@ func TestStopWaitsForTheInFlightJobToSubmit(t *testing.T) {
 		resultDone atomic.Bool
 		resultSeen = make(chan struct{}, 1)
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/jobs"):
 			if polls.Add(1) > 1 {
@@ -53,7 +54,7 @@ func TestStopWaitsForTheInFlightJobToSubmit(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{}`))
 		}
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{

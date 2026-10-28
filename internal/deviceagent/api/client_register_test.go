@@ -9,14 +9,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 func TestOutboundClient_Register_BlockedTenant403DoesNotEnroll(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(`{"code":"tenant_suspended","error":"organization suspended"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{
@@ -36,7 +37,7 @@ func TestOutboundClient_Register_BlockedTenant403DoesNotEnroll(t *testing.T) {
 func TestOutboundClient_Register_setsAgentIDOnConfig(t *testing.T) {
 	agentID := uuid.New()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/device-interrogation-service/agents/register" || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
@@ -45,9 +46,10 @@ func TestOutboundClient_Register_setsAgentIDOnConfig(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"agent_id": agentID.String(),
+			"agent_id":     agentID.String(),
+			"agent_secret": "test-agent-secret",
 		})
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{
@@ -74,14 +76,15 @@ func TestOutboundClient_Register_setsAgentIDOnConfig(t *testing.T) {
 func TestOutboundClient_Register_switchesToAdvertisedControlPlaneURL(t *testing.T) {
 	agentID := uuid.New()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"agent_id":          agentID.String(),
+			"agent_secret":      "test-agent-secret",
 			"control_plane_url": "https://agents.example.com:8444",
 		})
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{

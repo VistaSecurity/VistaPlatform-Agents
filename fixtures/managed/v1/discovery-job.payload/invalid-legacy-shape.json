@@ -1,0 +1,12 @@
+{
+  "job_id": "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
+  "targets": [
+    "192.0.2.10"
+  ],
+  "protocols": [
+    "TLS"
+  ],
+  "ports": [
+    443
+  ]
+}

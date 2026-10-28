@@ -1,0 +1,21 @@
+{
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "device_discovery"
+    ]
+  },
+  "message": "Heartbeat received",
+  "config": {
+    "revision": "rev-2",
+    "values": {
+      "host_inventory_enabled": true,
+      "poll_interval_seconds": 45
+    }
+  },
+  "logs_request": {
+    "id": "lr-1",
+    "lines": 200,
+    "requested_at": "2026-01-02T03:04:05Z"
+  }
+}

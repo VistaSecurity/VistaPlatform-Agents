@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/unit-batch.response.schema.json",
+  "title": "Plan unit batch response",
+  "description": "The platform's answer to a unit report. A 409 with a stop code, or a 404, stops the run.",
+  "type": "object",
+  "required": [
+    "job_status",
+    "accepted",
+    "duplicate",
+    "stale",
+    "unknown"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "job_status": {
+      "type": "string"
+    },
+    "code": {
+      "type": "string"
+    },
+    "accepted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "duplicate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stale": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unknown": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

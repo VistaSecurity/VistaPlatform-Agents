@@ -9,6 +9,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // The executor's host-inventory branch: what it accepts, what it refuses, and
@@ -130,12 +131,19 @@ func TestExecute_HostInventoryRefusesAJobWithNoTarget(t *testing.T) {
 	}
 }
 
-// An unknown job type is still an error — adding host_inventory must not have
-// turned the default branch into a catch-all.
-func TestExecute_UnknownJobTypeIsStillAnError(t *testing.T) {
-	exec, _ := newTestExecutor()
-	if err := exec.Execute(context.Background(), &models.Job{ID: uuid.New(), Type: "not_a_thing"}); err == nil {
-		t.Fatal("an unknown job type was accepted")
+// An unknown job type is refused with unsupported_command (managed protocol
+// 1, D-P2) — adding host_inventory must not have turned the default branch
+// into a catch-all. Cloud collection is hosted and refused the same way.
+func TestExecute_UnknownJobTypeIsRefusedAsUnsupported(t *testing.T) {
+	for _, typ := range []string{"not_a_thing", "cloud_discovery"} {
+		exec, rec := newTestExecutor()
+		if err := exec.Execute(context.Background(), &models.Job{ID: uuid.New(), Type: typ}); err != nil {
+			t.Fatalf("%s: Execute = %v, want the refusal submitted as a result", typ, err)
+		}
+		got := rec.last()
+		if got == nil || got.Success || got.FailureCode != managedprotocol.CodeUnsupportedCommand {
+			t.Fatalf("%s: result = %+v, want a failure with code %s", typ, got, managedprotocol.CodeUnsupportedCommand)
+		}
 	}
 }
 

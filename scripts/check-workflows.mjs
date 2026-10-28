@@ -30,7 +30,9 @@
 //                   workflow triggered by a pull-request event, every
 //                   permission (top-level and per job) is `read` or `none`.
 //   secrets         a pull-request workflow names no secret other than
-//                   GITHUB_TOKEN and never passes `secrets: inherit`.
+//                   GITHUB_TOKEN (`secrets.X`, `secrets['X']`, or the whole
+//                   context, as in `toJSON(secrets)`), and no workflow passes
+//                   `secrets: inherit`.
 //   cache           no actions/cache anywhere, setup-go and setup-node say
 //                   `cache: false` / `package-manager-cache: false`, no setup
 //                   action enables a cache. A cache written by one run is
@@ -38,6 +40,30 @@
 //                   poisons a trusted build.
 //   checkout        actions/checkout says `persist-credentials: false`, so
 //                   the job token is not left in .git/config for later steps.
+//   artifact        actions/download-artifact never sets `run-id`,
+//                   `github-token` or `repository`: an artefact from another
+//                   run (a pull request's, say) must not reach this one.
+//   trusted         a workflow that holds any write permission (top-level or
+//                   per job, `id-token: write` included) is a trusted
+//                   workflow, and in it:
+//                     - the only triggers are push, schedule and
+//                       workflow_dispatch; a push names `branches` no wider
+//                       than [main] and/or `tags`, never every branch, never
+//                       `branches-ignore` / `tags-ignore`;
+//                     - top-level permissions grant no write; a job that
+//                       holds a write runs in an `environment` (whose branch
+//                       or tag policy is the protected-ref check GitHub
+//                       enforces) and does not call a reusable workflow;
+//                     - no secret other than GITHUB_TOKEN is named (signing
+//                       is keyless; there is no long-lived key to steal);
+//                     - actions/checkout sets neither `ref` nor `repository`,
+//                       so a job builds the commit that triggered it.
+//                   A reusable workflow (`workflow_call`) without writes of
+//                   its own runs inside its callers, which may be trusted:
+//                   it builds the bytes they sign. The last two points apply
+//                   to it as well.
+//                   Caches and cross-run artefacts are refused everywhere
+//                   (rules cache and artifact), trusted or not.
 //
 // Zero dependencies on purpose (Node >= 20): a guard that needs `npm install`
 // first can be defeated by the install. It therefore carries its own reader
@@ -64,6 +90,13 @@ export const HOSTED_LABELS = new Set([
 ]);
 
 export const FORBIDDEN_TRIGGERS = ['pull_request_target', 'workflow_run'];
+
+// The triggers a trusted (write-holding) workflow may have: all three run the
+// workflow file and code of a ref the repository's rules protect (push to a
+// protected branch or tag, the default branch for schedule, and for
+// workflow_dispatch a ref the job's environment policy must accept).
+export const TRUSTED_TRIGGERS = ['push', 'schedule', 'workflow_dispatch'];
+export const TRUSTED_PUSH_BRANCHES = ['main'];
 
 // Events whose workflow runs code a pull request proposed.
 export const PULL_REQUEST_TRIGGERS = ['pull_request', 'pull_request_review', 'pull_request_review_comment'];
@@ -601,6 +634,93 @@ function checkStep(step, where, add) {
   if (action === 'actions/checkout' && String(withs['persist-credentials']) !== 'false') {
     add('checkout', `${where}: actions/checkout must set "persist-credentials: false"`);
   }
+  if (action === 'actions/download-artifact') {
+    for (const k of ['run-id', 'github-token', 'repository']) {
+      if (k in withs) add('artifact', `${where}: actions/download-artifact must not set "${k}" (artefacts from another run cross the trust boundary)`);
+    }
+  }
+}
+
+// True when the text reads a secret other than GITHUB_TOKEN: by name, by
+// index, or the whole `secrets` context inside an expression.
+function namesForeignSecret(code) {
+  if (/secrets\s*\[/.test(code)) return true;
+  if ([...code.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].some((m) => m[1] !== 'GITHUB_TOKEN')) return true;
+  for (const [, expr] of code.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    if (/\bsecrets\b(?!\s*\.\s*GITHUB_TOKEN\b)/i.test(expr)) return true;
+  }
+  return false;
+}
+
+// The two trusted-workflow rules that also bind a reusable workflow: build the
+// commit that triggered the run, and name no secret but GITHUB_TOKEN.
+function checkSourceAndSecrets(jobs, code, what, add) {
+  for (const [jobId, job] of Object.entries(jobs || {})) {
+    if (!isMap(job)) continue;
+    const steps = Array.isArray(job.steps) ? job.steps : [];
+    steps.forEach((s, i) => {
+      if (!isMap(s) || typeof s.uses !== 'string') return;
+      if (s.uses.split('@')[0].toLowerCase() !== 'actions/checkout') return;
+      const withs = isMap(s.with) ? s.with : {};
+      for (const k of ['ref', 'repository']) {
+        if (k in withs) add('trusted', `job ${jobId} step ${i + 1}: actions/checkout sets "${k}"; ${what} builds the commit that triggered it`);
+      }
+    });
+  }
+  if (namesForeignSecret(code)) {
+    add('trusted', `${what} names a secret other than GITHUB_TOKEN (signing is keyless)`);
+  }
+}
+
+function writeScopes(perms) {
+  return permissionValues(perms).filter(([, v]) => !READ_ONLY.has(v));
+}
+
+// The rules for a workflow that holds write permissions (see the header).
+function checkTrusted(doc, jobs, triggers, code, add) {
+  for (const t of triggers) {
+    if (!TRUSTED_TRIGGERS.includes(t)) add('trusted', `"${t}" may not start a workflow that holds write permissions (allowed: ${TRUSTED_TRIGGERS.join(', ')})`);
+  }
+  if (triggers.includes('push')) {
+    const push = isMap(doc.on) ? doc.on.push : null;
+    if (!isMap(push)) {
+      add('trusted', 'push without branches or tags filters runs on every branch');
+    } else {
+      for (const k of Object.keys(push)) {
+        if (!['branches', 'tags', 'paths', 'paths-ignore'].includes(k)) add('trusted', `push filter "${k}" is not allowed (it widens the refs that can run this workflow)`);
+      }
+      const branches = push.branches === undefined || push.branches === null ? null : [].concat(push.branches);
+      const tags = push.tags === undefined || push.tags === null ? null : [].concat(push.tags);
+      if (branches === null && tags === null) add('trusted', 'push without branches or tags filters runs on every branch');
+      if (branches !== null) {
+        if (branches.length === 0) add('trusted', 'push.branches is empty');
+        for (const b of branches) {
+          if (!TRUSTED_PUSH_BRANCHES.includes(b)) add('trusted', `push.branches names "${b}"; only ${TRUSTED_PUSH_BRANCHES.join(', ')} is protected`);
+        }
+      }
+      if (tags !== null) {
+        if (tags.length === 0) add('trusted', 'push.tags is empty');
+        for (const t of tags) {
+          if (typeof t !== 'string' || /^[*!]/.test(t)) add('trusted', `push.tags pattern ${JSON.stringify(t)} must start with a literal prefix`);
+        }
+      }
+    }
+  }
+  for (const [scope, v] of writeScopes(doc.permissions)) {
+    add('trusted', `top-level permission ${scope}: ${v}; grant writes to the publishing job only`);
+  }
+  for (const [jobId, job] of Object.entries(jobs || {})) {
+    if (!isMap(job)) continue;
+    const writes = writeScopes(job.permissions);
+    if (writes.length > 0) {
+      const env = isMap(job.environment) ? job.environment.name : job.environment;
+      if (typeof env !== 'string' || env.trim() === '') {
+        add('trusted', `job ${jobId}: holds ${writes.map(([k, v]) => `${k}: ${v}`).join(', ')} outside an environment`);
+      }
+      if (typeof job.uses === 'string') add('trusted', `job ${jobId}: passes write permissions to a reusable workflow`);
+    }
+  }
+  checkSourceAndSecrets(jobs, code, 'a trusted workflow', add);
 }
 
 // Check one workflow file's text. Returns { violations: [{rule, message}] };
@@ -640,7 +760,7 @@ export function checkWorkflowText(text, { composite = false } = {}) {
     for (const [scope, v] of permissionValues(doc.permissions)) {
       if (!READ_ONLY.has(v)) add('permissions', `top-level permission ${scope}: ${v} in a workflow triggered by a pull request`);
     }
-    if (/secrets\s*\[/.test(code) || [...code.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].some((m) => m[1] !== 'GITHUB_TOKEN')) {
+    if (namesForeignSecret(code)) {
       add('secrets', 'a workflow triggered by a pull request names a secret');
     }
   }
@@ -667,6 +787,10 @@ export function checkWorkflowText(text, { composite = false } = {}) {
       if (isMap(s) && typeof s.uses === 'string' && !raw.some((u) => u.ref === s.uses)) checkPin(s.uses, '', `job ${jobId} step ${i + 1}`, add);
     });
   }
+  const trusted = writeScopes(doc.permissions).length > 0 ||
+    Object.values(jobs || {}).some((j) => isMap(j) && writeScopes(j.permissions).length > 0);
+  if (trusted) checkTrusted(doc, jobs, triggers, code, add);
+  else if (triggers.includes('workflow_call')) checkSourceAndSecrets(jobs, code, 'a reusable workflow (its callers sign what it builds)', add);
   return { violations };
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // Enrollment is one-shot. The registration key is single-use, and the private
@@ -94,6 +95,11 @@ func enrollmentLostMessage(agentID string, err error) string {
 // installers look for. A REJECTED registration (the key is invalid, expired or
 // already used) will never succeed on retry; anything else might.
 func logRegistrationFailure(err error) {
+	if managedprotocol.IsIncompatible(err) || managedprotocol.IsViolation(err) {
+		log.Printf("⛔ %v", err)
+		log.Printf("⛔ Install the agent version the platform lists under Discovery → Sensors & Agents, or upgrade the platform; the agent stops (exit %d) so it is not restarted into the same answer.", exitNeedsOperator)
+		return
+	}
 	var rejected *api.RegistrationRejectedError
 	if errors.As(err, &rejected) {
 		log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)

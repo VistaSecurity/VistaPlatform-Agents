@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 const retryTestSensorID = "11111111-2222-3333-4444-555555555555"
@@ -138,9 +139,18 @@ func retryTestSensor(baseURL string) *Sensor {
 	}
 	return &Sensor{
 		config:      cfg,
-		apiClient:   api.NewOutboundClient(cfg),
+		apiClient:   negotiatedClient(cfg),
 		discoveries: make([]*models.CryptoDiscovery, 0),
 	}
+}
+
+// negotiatedClient is the sensor's real client after a protocol-1 heartbeat
+// answer: submission is allowed. Tests about what is submitted start here; the
+// protocol rules themselves are tested against the fake control plane.
+func negotiatedClient(cfg *config.Config) *api.OutboundClient {
+	c := api.NewOutboundClient(cfg)
+	protocoltest.Open(c.Gate())
+	return c
 }
 
 func retryTestDiscovery(id string) *models.CryptoDiscovery {

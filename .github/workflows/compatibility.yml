@@ -1,0 +1,138 @@
+# Sign and publish compatibility records (ARTIFACT_COMPATIBILITY_ADR 4, OA-1).
+#
+# A record is a support claim: which platform versions and editions were
+# tested with one agents release's exact bytes. It reaches this repository as
+# a reviewed pull request adding compatibility/records/<record_id>.json; the
+# merge to main runs this workflow, which
+#   check   (contents: read) refuses a push that modifies, renames or deletes
+#           a record, downloads the release each new record names, verifies
+#           that release in full (scripts/verify-release.sh: signatures,
+#           provenance, every digest, its existing records), then checks the
+#           record against it (scripts/release/compat-check.mjs): schema,
+#           bound to that release's agents-release.json by digest, every
+#           artefact exactly as published, a record id never used before;
+#   sign    (the `compatibility` environment; contents and id-token: write)
+#           signs each record keyless with THIS workflow's identity, attaches
+#           the record and its bundle to the release it describes (never
+#           replacing an asset), and verifies the release again from GitHub.
+# It never edits a record and never builds or re-signs release bytes; the
+# release workflows never sign a tested claim. Separate identities make that
+# checkable:
+#   https://github.com/<owner>/<repo>/.github/workflows/compatibility.yml@refs/heads/main
+name: Compatibility records
+
+on:
+  push:
+    branches: [main]
+    paths: ['compatibility/records/**']
+
+permissions: {}
+
+concurrency:
+  group: compatibility
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      count: ${{ steps.added.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install cosign (pinned version and digest)
+        run: scripts/release/install-cosign.sh "$RUNNER_TEMP/cosign"
+      - name: Records this push added (and nothing else changed there)
+        id: added
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          node scripts/release/compat-check.mjs added "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/added.txt"
+          cat "$RUNNER_TEMP/added.txt"
+          echo "count=$(grep -c . "$RUNNER_TEMP/added.txt" || true)" >> "$GITHUB_OUTPUT"
+      - name: Verify each named release, then the record against it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/records"
+          while IFS= read -r rec; do
+            # Schema first: the tag below names a directory and a download.
+            node scripts/release/validate.mjs --record "$rec"
+            tag=$(jq -r .agents_release.tag "$rec")
+            dir="$RUNNER_TEMP/releases/$tag"
+            if [ ! -d "$dir" ]; then
+              mkdir -p "$dir"
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$dir"
+              scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$tag" --dir "$dir"
+            fi
+            node scripts/release/compat-check.mjs check "$rec" "$dir" compatibility/records
+            cp "$rec" "$RUNNER_TEMP/records/"
+          done < "$RUNNER_TEMP/added.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: steps.added.outputs.count != '0'
+        with:
+          name: records
+          path: ${{ runner.temp }}/records/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: sign and attach
+    needs: check
+    if: needs.check.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: compatibility
+    permissions:
+      contents: write   # attach the record to its release
+      id-token: write   # keyless cosign signature
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/compatibility.yml@${{ github.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The identity this job signs with
+        run: |
+          want="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/compatibility.yml@refs/heads/main"
+          [ "$IDENTITY" = "$want" ] || { echo "::error::signing identity $IDENTITY is not $want"; exit 1; }
+      - name: Install cosign (pinned version and digest)
+        run: scripts/release/install-cosign.sh "$RUNNER_TEMP/cosign"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: records
+          path: ${{ runner.temp }}/records
+      - name: Sign, attach, verify
+        run: |
+          for path in "$RUNNER_TEMP"/records/*.json; do
+            rec=$(basename "$path")
+            # The record must be byte-identical to the one on main that was checked.
+            cmp "$path" "compatibility/records/$rec"
+            tag=$(jq -r .agents_release.tag "$path")
+            asset="compatibility-${rec}"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qxF -e "$asset" -e "$asset.sigstore.json"; then
+              echo "::error::$tag already has $asset; a record is never replaced"
+              exit 1
+            fi
+            work="$RUNNER_TEMP/sign/$tag"
+            mkdir -p "$work"
+            cp "$path" "$work/$asset"
+            scripts/release/sign.sh "$IDENTITY" "$work" "$asset"
+            # Without --clobber, gh refuses an asset name that already exists.
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$work/$asset" "$work/$asset.sigstore.json"
+            scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$tag"
+          done

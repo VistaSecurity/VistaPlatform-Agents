@@ -42,28 +42,28 @@ func asCommandPayload(t *testing.T, p Payload) map[string]interface{} {
 
 func TestParsePayload_PlanRoundTrips(t *testing.T) {
 	plan := samplePlan()
-	got, err := ParsePayload(asCommandPayload(t, Payload{JobID: planJobID, TenantID: "t", Plan: plan}))
+	// The platform sends the job's options beside the plan (an automatic
+	// scan's marker); they are not the legacy shape and must not refuse it.
+	opts := map[string]interface{}{"automatic_scan": true}
+	got, err := ParsePayload(asCommandPayload(t, Payload{JobID: planJobID, TenantID: "t", Options: opts, Plan: plan}))
 	if err != nil {
 		t.Fatalf("a plan the platform writes was refused: %v", err)
 	}
 	if got.Plan == nil || !reflect.DeepEqual(*got.Plan, *plan) {
 		t.Fatalf("plan = %+v, want %+v", got.Plan, plan)
 	}
-	if len(got.Targets) != 0 {
-		t.Fatalf("a plan payload carries top-level targets %v", got.Targets)
+	if got.Options["automatic_scan"] != true {
+		t.Fatalf("options = %v, want them carried", got.Options)
 	}
 }
 
-// The silent failure the capability exists to prevent must be impossible even
-// if a plan reached a sensor too old to know "plan": such a sensor ignores the
-// key, and its strict parser — this one, minus the plan branch — then finds no
-// targets and refuses the command as malformed instead of running something
-// unrelated with protocols=[].
-func TestParsePayload_AnOldSensorRefusesAPlanPayload(t *testing.T) {
+// A discovery_job without a plan is not a job protocol 1 has: it is refused
+// as malformed, never run as something else.
+func TestParsePayload_APayloadWithoutAPlanIsRefused(t *testing.T) {
 	m := asCommandPayload(t, Payload{JobID: planJobID, Plan: samplePlan()})
-	delete(m, "plan") // what a sensor that does not know the key sees
-	if _, err := ParsePayload(m); !errors.Is(err, ErrMalformedPayload) || !strings.Contains(err.Error(), "targets is empty") {
-		t.Fatalf("an old sensor's reading of a plan payload = %v, want a malformed refusal", err)
+	delete(m, "plan")
+	if _, err := ParsePayload(m); !errors.Is(err, ErrMalformedPayload) || !strings.Contains(err.Error(), "no plan") {
+		t.Fatalf("a payload without its plan = %v, want a malformed refusal", err)
 	}
 }
 
@@ -80,7 +80,6 @@ func TestParsePayload_RefusesAMalformedPlan(t *testing.T) {
 		"skip not an address":    func(p *PlanPayload, _ map[string]interface{}) { p.Targets[0].SkipAddresses = []string{"host"} },
 		"pin not an address":     func(p *PlanPayload, _ map[string]interface{}) { p.Targets[1].PinnedAddresses = []string{"10.0.0.0/24"} },
 		"oversize range":         func(p *PlanPayload, _ map[string]interface{}) { p.Targets[0].Target = "10.0.0.0/19" },
-		"targets beside a plan":  func(_ *PlanPayload, m map[string]interface{}) { m["targets"] = []interface{}{"10.0.0.1"} },
 		"plan is not an object":  func(_ *PlanPayload, m map[string]interface{}) { m["plan"] = "scan everything" },
 		"target with empty name": func(p *PlanPayload, _ map[string]interface{}) { p.Targets[0].Target = " " },
 	} {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 // The real main(), re-executed in a child process: enrollment ends in
@@ -60,7 +61,7 @@ func exitStatus(err error) int {
 func registrationServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/agents/register") {
 			hits.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
@@ -68,7 +69,7 @@ func registrationServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 	return srv, &hits
 }

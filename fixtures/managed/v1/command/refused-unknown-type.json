@@ -1,0 +1,9 @@
+{
+  "id": "cmd-3",
+  "type": "rewrite_firmware",
+  "priority": 1,
+  "payload": {},
+  "requires_ack": true,
+  "expires_at": null,
+  "created_at": "2026-01-02T03:04:05Z"
+}

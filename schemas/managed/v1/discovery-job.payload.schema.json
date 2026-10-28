@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/discovery-job.payload.schema.json",
+  "title": "Discovery job payload (scan plan)",
+  "description": "The payload of a discovery_job command. The scan plan is the only shape (D-P5): the older protocols x ports payload (top-level targets, protocols, ports) is not protocol 1 and is refused with unsupported_command. Every address is checked against the owned-network scope before any packet.",
+  "type": "object",
+  "required": [
+    "job_id",
+    "plan"
+  ],
+  "additionalProperties": true,
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "targets"
+        ]
+      },
+      {
+        "required": [
+          "protocols"
+        ]
+      },
+      {
+        "required": [
+          "ports"
+        ]
+      }
+    ]
+  },
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "tenant_id": {
+      "type": "string"
+    },
+    "options": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The job's options as the platform recorded them (an automatic scan's marker, for one). Carried beside the plan; the plan is what runs."
+    },
+    "plan": {
+      "type": "object",
+      "required": [
+        "version",
+        "attempt",
+        "pace",
+        "targets"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pace": {
+          "enum": [
+            "polite",
+            "normal",
+            "fast"
+          ]
+        },
+        "ot_probe_protocols": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "target",
+              "target_id"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "class": {
+                "enum": [
+                  "private",
+                  "registered_prefix",
+                  "external"
+                ]
+              },
+              "prefix_id": {
+                "type": "string"
+              },
+              "depth": {
+                "enum": [
+                  "quick",
+                  "standard",
+                  "thorough",
+                  "custom",
+                  ""
+                ]
+              },
+              "sni_candidates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "addresses": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tcp_ports": {
+                "type": "string"
+              },
+              "udp_ports": {
+                "type": "string"
+              },
+              "tcp_port_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "udp_port_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "estimated_probes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "target_id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+              },
+              "pinned_addresses": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "skip_addresses": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "minItems": 1
+        },
+        "verify_certificate": {
+          "type": "object",
+          "required": [
+            "certificate_id",
+            "port"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "certificate_id": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "sni": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

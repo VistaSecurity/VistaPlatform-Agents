@@ -1,0 +1,10 @@
+{
+  "agent_id": "6f1f0a7e-1d3c-4f0e-9a52-0c3b6f3d2a11",
+  "client_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "server_ca_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNBLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "certificate_expires_at": "2027-01-02T03:04:05Z",
+  "message": "Certificate rotated",
+  "agent_secret": "c3ludGhldGljLXNlY29uZC1zZWNyZXQ=",
+  "agent_secret_version": 2,
+  "client_key": "-----BEGIN PRIVATE KEY-----\nU1lOVEhFVElDLUtFWS1OT1QtQS1SRUFMLUtFWQ==\n-----END PRIVATE KEY-----\n"
+}

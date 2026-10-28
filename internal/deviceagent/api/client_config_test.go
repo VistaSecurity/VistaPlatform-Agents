@@ -14,7 +14,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // fakeApplier records what the client handed it and answers what it is running.
@@ -44,12 +46,12 @@ func (f *fakeApplier) Apply(revision string, values agentconfig.Values) {
 // run comes back and is applied.
 func TestHeartbeatCarriesTheReportAndAppliesTheAnswer(t *testing.T) {
 	var got map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &got)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"message":"Heartbeat received","config":{"revision":"rev-9","values":{"host_inventory_enabled":true,"poll_interval_seconds":45}}}`))
-	}))
+	})))
 	defer srv.Close()
 
 	applier := &fakeApplier{
@@ -95,10 +97,10 @@ func TestHeartbeatCarriesTheReportAndAppliesTheAnswer(t *testing.T) {
 // An older platform sends no config block. The agent must keep what it has
 // rather than treat the silence as an instruction to revert.
 func TestHeartbeatWithNoConfigBlockChangesNothing(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"message":"Heartbeat received"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	applier := &fakeApplier{revision: "rev-8"}
@@ -113,14 +115,15 @@ func TestHeartbeatWithNoConfigBlockChangesNothing(t *testing.T) {
 	}
 }
 
-// A malformed answer must not cost the agent its heartbeat. Liveness reporting
-// is more important than a config update, and an agent that stops beating over
-// a bad payload looks dead.
+// A malformed config block must not cost the agent its heartbeat. Liveness
+// reporting is more important than a config update, and an agent that stops
+// beating over a bad payload looks dead. (An answer that is not a JSON object
+// at all names no protocol, and is a refusal: TestAnEmptyBodyIsARefusal.)
 func TestAMalformedConfigAnswerDoesNotFailTheHeartbeat(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"config": "not an object"`))
-	}))
+		_, _ = w.Write([]byte(`{"config": "not an object"}`))
+	})))
 	defer srv.Close()
 
 	applier := &fakeApplier{}
@@ -140,12 +143,12 @@ func TestAMalformedConfigAnswerDoesNotFailTheHeartbeat(t *testing.T) {
 // is wired.
 func TestWithoutAnApplierTheHeartbeatBodyIsUnchanged(t *testing.T) {
 	var got map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &got)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
-	}))
+	})))
 	defer srv.Close()
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
@@ -159,10 +162,10 @@ func TestWithoutAnApplierTheHeartbeatBodyIsUnchanged(t *testing.T) {
 	}
 }
 
-// An empty 200 body is the normal answer from an older platform. It must not
-// produce a warning on every beat for the life of the process — and it must not
-// be mistaken for an instruction.
-func TestAnEmptyBodyIsNotAnError(t *testing.T) {
+// An empty 200 body is an older platform's answer: it names no managed
+// protocol, so it is refused (managed protocol 1, D-P2) — never mistaken for an
+// instruction — and the refusal line is logged once, not on every beat.
+func TestAnEmptyBodyIsARefusal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -176,13 +179,18 @@ func TestAnEmptyBodyIsNotAnError(t *testing.T) {
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
 	c.SetConfigApplier(applier)
 
-	if err := c.SendHeartbeat(); err != nil {
-		t.Fatalf("SendHeartbeat: %v", err)
+	for beat := 0; beat < 3; beat++ {
+		if err := c.SendHeartbeat(); !managedprotocol.IsIncompatible(err) {
+			t.Fatalf("SendHeartbeat = %v, want the protocol refusal", err)
+		}
 	}
 	if applier.applyCalls != 0 {
 		t.Errorf("Apply ran on an empty body")
 	}
-	if strings.Contains(logged.String(), "Could not read the configuration") {
-		t.Errorf("an empty body logged a warning: %q", logged.String())
+	if n := strings.Count(logged.String(), "this agent supports 1"); n != 1 {
+		t.Errorf("the refusal line was logged %d times over three beats, want once: %q", n, logged.String())
+	}
+	if c.Gate().Problem() == "" {
+		t.Error("the refusal is not reported on the next heartbeat (protocol_error)")
 	}
 }

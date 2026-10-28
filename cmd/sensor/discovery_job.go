@@ -10,13 +10,13 @@ package main
 // a time on the shared scan engine (plan_job.go): every host is reported as it
 // finishes, then completion, then the acknowledgement.
 //
-// Only a PLANNED job is run (#2250 WP5). This sensor reports
-// sensordispatch.ScanPlanCapability, and the platform sends the older
-// protocols × ports payload only to a sensor that does not; that payload
-// reaching this sensor means a platform older than the sensor, so it is
-// refused with a reason that says so rather than half-run.
+// Only a PLANNED job is run: in managed protocol 1 the scan plan is the only
+// job shape (D-P5). The older protocols × ports payload is not parsed at all;
+// one reaching this sensor is acknowledged as refused with
+// unsupported_command, like any other work this sensor does not run.
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch"
 )
 
@@ -35,9 +36,8 @@ import (
 const discoveryJobQueueDepth = sensordispatch.JobQueueDepth
 
 // legacyPayloadRefusal is the reason a protocols × ports command is refused.
-const legacyPayloadRefusal = "this sensor runs scans only from a scan plan (" + sensordispatch.ScanPlanCapability +
-	"); the command carried the older protocols × ports payload, which only a platform older than this sensor sends. " +
-	"Nothing was scanned: upgrade the platform to match this sensor, then run the scan again"
+const legacyPayloadRefusal = "this sensor runs scans only from a scan plan, the only discovery job shape of managed protocol " +
+	"1; the command carried the older protocols × ports payload, which protocol 1 does not have. Nothing was scanned"
 
 // startDiscoveryJobWorker creates the queue and starts the single worker.
 // Idempotent, so a restart-in-place cannot start two.
@@ -60,13 +60,16 @@ func (s *Sensor) startDiscoveryJobWorker() {
 // accepted — the worker acknowledges that one when the job finishes.
 func (s *Sensor) handleDiscoveryJob(command models.Command) *models.CommandResponse {
 	payload, err := sensordispatch.ParsePayload(command.Payload)
+	if errors.Is(err, sensordispatch.ErrLegacyPayload) {
+		log.Printf("❌ Discovery job command %s refused: protocols × ports payload, which managed protocol 1 does not have", command.ID)
+		return s.unsupportedCommand(command, legacyPayloadRefusal)
+	}
 	if err != nil {
 		log.Printf("❌ Discovery job command %s refused: %v", command.ID, err)
 		return s.discoveryJobRefusal(command, err.Error())
 	}
-	if payload.Plan == nil {
-		log.Printf("❌ Discovery job command %s refused: protocols × ports payload (job %s) — the platform is older than this sensor", command.ID, payload.JobID)
-		return s.discoveryJobRefusal(command, legacyPayloadRefusal)
+	if payload.Plan.VerifyCertificate != nil && !s.capabilityNegotiated(sensordispatch.VerifyCertificateCapability) {
+		return s.unsupportedCommand(command, "the platform did not negotiate "+sensordispatch.VerifyCertificateCapability+" with this sensor")
 	}
 	s.mu.RLock()
 	queue := s.jobQueue
@@ -81,6 +84,26 @@ func (s *Sensor) handleDiscoveryJob(command models.Command) *models.CommandRespo
 	default:
 		return s.discoveryJobRefusal(command, fmt.Sprintf("%s: %d discovery jobs already queued", sensordispatch.SensorBusyPrefix, cap(queue)))
 	}
+}
+
+// unsupportedCommand acknowledges work this sensor does not run (an unknown
+// command type, the legacy payload, work whose capability the platform did
+// not negotiate) as refused with code unsupported_command (managed protocol 1,
+// D-P2). Nothing was run.
+func (s *Sensor) unsupportedCommand(command models.Command, reason string) *models.CommandResponse {
+	resp := s.discoveryJobRefusal(command, reason)
+	resp.ResponseData["code"] = managedprotocol.CodeUnsupportedCommand
+	return resp
+}
+
+// capabilityNegotiated reports whether the platform's last answer negotiated
+// capability c with this sensor. A sensor with no control-plane client (a
+// test, test mode) has nothing to negotiate with.
+func (s *Sensor) capabilityNegotiated(c string) bool {
+	if s.apiClient == nil {
+		return true
+	}
+	return s.apiClient.Gate().Has(c)
 }
 
 func (s *Sensor) discoveryJobRefusal(command models.Command, reason string) *models.CommandResponse {
@@ -108,17 +131,17 @@ func (s *Sensor) runDiscoveryJobs(queue <-chan models.Command) {
 // that is not is acknowledged as refused rather than dropped.
 func (s *Sensor) executeDiscoveryJob(command models.Command) {
 	payload, err := sensordispatch.ParsePayload(command.Payload)
-	if err == nil && payload.Plan != nil {
+	if err == nil {
 		s.executePlanJob(command, payload)
 		return
 	}
-	reason := legacyPayloadRefusal
-	if err != nil {
-		reason = err.Error()
+	refusal := s.discoveryJobRefusal(command, err.Error())
+	if errors.Is(err, sensordispatch.ErrLegacyPayload) {
+		refusal = s.unsupportedCommand(command, legacyPayloadRefusal)
 	}
-	log.Printf("❌ Discovery job command %s refused at run time: %s", command.ID, reason)
+	log.Printf("❌ Discovery job command %s refused at run time: %s", command.ID, refusal.Message)
 	if client := s.planClientFor(); client != nil {
-		if aerr := client.AcknowledgeCommand(command.ID, s.discoveryJobRefusal(command, reason)); aerr != nil {
+		if aerr := client.AcknowledgeCommand(command.ID, refusal); aerr != nil {
 			log.Printf("❌ Failed to acknowledge discovery job command %s: %v", command.ID, aerr)
 		}
 	}

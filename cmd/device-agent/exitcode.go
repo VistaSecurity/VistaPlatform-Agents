@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // exitNeedsOperator is the exit status for a start that can only be fixed by a
@@ -25,6 +26,11 @@ var exitProcess = os.Exit
 func registrationFailureExitCode(err error) int {
 	var rejected *api.RegistrationRejectedError
 	if errors.As(err, &rejected) {
+		return exitNeedsOperator
+	}
+	// The agent and the platform do not share managed protocol 1 (or the
+	// platform broke it): the same answer every restart, so stop.
+	if managedprotocol.IsIncompatible(err) || managedprotocol.IsViolation(err) {
 		return exitNeedsOperator
 	}
 	return 1

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/heartbeat.response.schema.json",
+  "title": "Heartbeat response",
+  "description": "The platform's answer to either agent's heartbeat. protocol is required: an answer without it, or with another version, is refused and nothing in it (commands, config, owned networks, a log request) is acted on. A config or owned_networks block that is absent means 'keep what you have', never 'revert'.",
+  "type": "object",
+  "required": [
+    "protocol"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "protocol": {
+      "$ref": "defs/protocol.json"
+    },
+    "sensor_id": {
+      "type": "string"
+    },
+    "commands": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "command.schema.json"
+      }
+    },
+    "config": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "revision",
+        "values"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "values": {
+          "$ref": "defs/config-values.json"
+        },
+        "restart_requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "restart_request_age_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "owned_networks": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "prefixes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "endpoints": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "incomplete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "logs_request": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "id",
+        "lines"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

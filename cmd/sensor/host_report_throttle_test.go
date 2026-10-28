@@ -138,7 +138,7 @@ func TestSendHeartbeat_HostBlock_FailedSendDoesNotCommitThrottle(t *testing.T) {
 		captured = &health
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"commands":[]}`))
+		_, _ = w.Write([]byte(`{"protocol":{"version":1,"capabilities":[]},"commands":[]}`))
 	}))
 	defer up.Close()
 	sensor.config.ControlPlaneURL = up.URL

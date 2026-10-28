@@ -5,7 +5,9 @@ package main
 // registration key is no longer kept once that secret is on disk. These tests run
 // the REAL client against a fake platform, then the real persistence
 // (saveCertificates + saveConfigFile) and the real config loader, and open
-// envelopes sealed the way the platform seals them (shared/agentcreds).
+// envelopes sealed the way the platform seals them (shared/agentcreds). Managed
+// protocol 1 always issues the secret and never derives a key from the
+// registration key (D-P7).
 
 import (
 	"crypto/rand"
@@ -29,7 +31,9 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentcreds"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 const testRegKey = "REG-0123456789abcdef0123456789abcdef"
@@ -66,7 +70,7 @@ func newFakePlatform(t *testing.T, issue bool, secrets ...string) *fakePlatform 
 	}
 	caCert, _ := x509.ParseCertificate(der)
 	f := &fakePlatform{t: t, caKey: caKey, caCert: caCert, secrets: secrets, issue: issue}
-	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	f.srv = httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(f.serve)))
 	t.Cleanup(f.srv.Close)
 	return f
 }
@@ -167,8 +171,12 @@ func TestAgentSecret_EnrolmentDropsTheRegistrationKey(t *testing.T) {
 	if err := client.Register("test"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if got := p.sawRequest[0]["supports_agent_secret"]; got != true {
-		t.Fatalf("registration request supports_agent_secret = %v, want true", got)
+	proto, _ := p.sawRequest[0]["protocol"].(map[string]any)
+	if proto["version"] != float64(managedprotocol.Version) || p.sawRequest[0]["agent_kind"] != managedprotocol.AgentKindDeviceAgent {
+		t.Fatalf("registration request protocol = %v, agent_kind = %v; want protocol 1 from a device agent", p.sawRequest[0]["protocol"], p.sawRequest[0]["agent_kind"])
+	}
+	if _, asked := p.sawRequest[0]["supports_agent_secret"]; asked {
+		t.Fatal("registration request still asks for an agent secret; protocol 1 always issues one")
 	}
 	persist(t, cfg, path)
 
@@ -207,32 +215,27 @@ func TestAgentSecret_EnrolmentDropsTheRegistrationKey(t *testing.T) {
 	}
 }
 
-// An older platform issues no secret: the agent must keep the registration key,
-// because it is still what opens the platform's envelopes.
-func TestAgentSecret_OlderPlatformKeepsTheRegistrationKey(t *testing.T) {
+// A platform that enrols without issuing the secret protocol 1 always issues has
+// broken the protocol: nothing from the answer is applied, and the agent stops
+// (exit 78) rather than run with credentials it could never open.
+func TestAgentSecret_EnrolmentWithoutASecretIsRefused(t *testing.T) {
 	p := newFakePlatform(t, false)
-	cfg, client, path := newEnrolling(t, p)
-	if err := client.Register("test"); err != nil {
-		t.Fatalf("Register: %v", err)
+	cfg, client, _ := newEnrolling(t, p)
+	err := client.Register("test")
+	if !managedprotocol.IsViolation(err) || !strings.Contains(err.Error(), "agent_secret") {
+		t.Fatalf("Register = %v, want a protocol violation naming agent_secret", err)
 	}
-	persist(t, cfg, path)
-
-	body, _ := os.ReadFile(path)
-	if !strings.Contains(string(body), testRegKey) {
-		t.Fatalf("the registration key was dropped though no agent secret exists:\n%s", body)
+	if code := registrationFailureExitCode(err); code != exitNeedsOperator {
+		t.Fatalf("exit code = %d, want %d", code, exitNeedsOperator)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.DataPath, "certs", agentcreds.SecretFileName)); err == nil {
-		t.Fatal("a secret file was written though none was issued")
-	}
-	env, jobID := sealedFor(t, testRegKey)
-	if !opens(reload(t, path), env, jobID) {
-		t.Fatal("registration-key envelope does not open")
+	if cfg.AgentID != "" || cfg.Security.ClientCert != "" {
+		t.Fatalf("the refused answer was applied: agent %q, cert held %v", cfg.AgentID, cfg.Security.ClientCert != "")
 	}
 }
 
 // A config written by a build that predates agent secrets (registration key, no
-// secret) still opens envelopes sealed under the registration key.
-func TestAgentSecret_PreChangeConfigStillDecrypts(t *testing.T) {
+// secret) opens nothing: protocol 1 derives no key from the registration key.
+func TestAgentSecret_PreChangeConfigOpensNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent-config.yaml")
 	if err := os.WriteFile(path, []byte("agent_id: \"6f1f0a7e-1d3c-4f0e-9a52-0c3b6f3d2a11\"\nplatform_url: \"https://p.example.test\"\nregistration_key: \""+testRegKey+"\"\ndata_path: \""+dir+"\"\n"), 0o600); err != nil {
@@ -240,8 +243,8 @@ func TestAgentSecret_PreChangeConfigStillDecrypts(t *testing.T) {
 	}
 	cfg := reload(t, path)
 	env, jobID := sealedFor(t, testRegKey)
-	if !opens(cfg, env, jobID) {
-		t.Fatal("a pre-change config can no longer open registration-key envelopes")
+	if opens(cfg, env, jobID) {
+		t.Fatal("an envelope sealed under the registration key opened")
 	}
 }
 
@@ -258,8 +261,8 @@ func TestAgentSecret_RotationWindow(t *testing.T) {
 	if err := client.RotateCertificate(); err != nil {
 		t.Fatalf("RotateCertificate: %v", err)
 	}
-	if got := p.sawRequest[1]["supports_agent_secret"]; got != true {
-		t.Fatalf("rotation request supports_agent_secret = %v, want true", got)
+	if _, asked := p.sawRequest[1]["supports_agent_secret"]; asked {
+		t.Fatal("rotation request still asks for an agent secret; protocol 1 always issues one")
 	}
 	persist(t, cfg, path)
 
@@ -292,53 +295,6 @@ func TestAgentSecret_RotationWindow(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(cfg.DataPath, "certs", agentcreds.SecretFileName))
 	if strings.Contains(string(data), "agent-secret-one") {
 		t.Fatalf("the replaced secret is still on disk after its window:\n%s", data)
-	}
-}
-
-// The migration: an agent enrolled before agent secrets existed receives its
-// first secret at certificate rotation and switches, with no re-enrolment. The
-// registration key it held is dropped from the config but keeps opening
-// in-flight envelopes for the window.
-func TestAgentSecret_MigrationAtFirstRotation(t *testing.T) {
-	p := newFakePlatform(t, false) // enrolled before secrets existed
-	cfg, client, path := newEnrolling(t, p)
-	if err := client.Register("test"); err != nil {
-		t.Fatal(err)
-	}
-	persist(t, cfg, path)
-	if body, _ := os.ReadFile(path); !strings.Contains(string(body), testRegKey) {
-		t.Fatal("setup: the pre-change agent should hold its registration key")
-	}
-
-	p.mu.Lock()
-	p.issue, p.secrets = true, []string{"first-secret"}
-	p.mu.Unlock()
-	re := reload(t, path)
-	rc := api.NewOutboundClient(re)
-	rc.SetAgentVersion("test")
-	if err := rc.RotateCertificate(); err != nil {
-		t.Fatalf("RotateCertificate: %v", err)
-	}
-	persist(t, re, path)
-
-	body, _ := os.ReadFile(path)
-	if strings.Contains(string(body), testRegKey) || strings.Contains(string(body), "registration_key:") {
-		t.Fatalf("the registration key is still in the config after migration:\n%s", body)
-	}
-	after := reload(t, path)
-	regEnv, jobID := sealedFor(t, testRegKey)
-	newEnv, _ := sealedFor(t, "first-secret")
-	if !opens(after, newEnv, jobID) {
-		t.Fatal("the issued secret does not open")
-	}
-	if !opens(after, regEnv, jobID) {
-		t.Fatal("an in-flight envelope sealed under the registration key no longer opens inside the migration window")
-	}
-	st := after.AgentSecretState()
-	st.PreviousUntil = time.Now().Add(-time.Second)
-	after.SetAgentSecretState(st)
-	if opens(after, regEnv, jobID) {
-		t.Fatal("the registration key still opens envelopes after the migration window")
 	}
 }
 

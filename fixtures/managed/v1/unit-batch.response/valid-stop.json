@@ -1,0 +1,8 @@
+{
+  "job_status": "cancelled",
+  "code": "discovery_job_cancelled",
+  "accepted": 0,
+  "duplicate": 0,
+  "stale": 0,
+  "unknown": 0
+}

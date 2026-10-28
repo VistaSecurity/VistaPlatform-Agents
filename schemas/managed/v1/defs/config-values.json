@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/config-values.json",
+  "title": "Managed setting values",
+  "description": "The desired-state settings exchanged on the heartbeat (shared/agentconfig Values): a map of setting name to a boolean, an integer or a string.",
+  "type": "object",
+  "propertyNames": {
+    "pattern": "^[a-z][a-z0-9_]*$"
+  },
+  "additionalProperties": {
+    "type": [
+      "boolean",
+      "integer",
+      "string",
+      "null"
+    ]
+  }
+}

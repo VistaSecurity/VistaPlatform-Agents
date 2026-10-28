@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/unit-batch.schema.json",
+  "title": "Plan unit batch",
+  "description": "POST /api/v1/sensor-manager/sensors/{id}/discovery-jobs/{job}/units: the hosts finished since the last report (at most 512), or none as a progress ping (an empty list, never null).",
+  "type": "object",
+  "required": [
+    "units"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "address",
+          "attempt",
+          "host"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "address": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "failed": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "deadline_hit": {
+            "type": "boolean"
+          },
+          "deadline_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "host": {
+            "type": "object",
+            "required": [
+              "liveness",
+              "ports_requested",
+              "open_count",
+              "closed",
+              "filtered",
+              "local_errors",
+              "not_probed"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "liveness": {
+                "type": "string"
+              },
+              "liveness_evidence": {
+                "type": "string"
+              },
+              "ports_requested": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "open": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "open_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "closed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "filtered": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "local_errors": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "not_probed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "skipped_ot": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "responds_on_all_ports": {
+                "type": "boolean"
+              },
+              "ot_suspect": {
+                "type": "boolean"
+              },
+              "ot_suspect_port": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "tcp": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "addr",
+                "port",
+                "transport",
+                "state"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "addr": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "transport": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "protocol": {
+                  "type": "string"
+                },
+                "service_hint": {
+                  "type": "string"
+                },
+                "identified": {
+                  "type": "boolean"
+                },
+                "result": {},
+                "metadata": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "udp": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "addr",
+                "port",
+                "transport",
+                "state"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "addr": {
+                  "type": "string"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535
+                },
+                "transport": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "protocol": {
+                  "type": "string"
+                },
+                "service_hint": {
+                  "type": "string"
+                },
+                "identified": {
+                  "type": "boolean"
+                },
+                "result": {},
+                "metadata": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "verification": {
+            "type": "object",
+            "required": [
+              "outcome",
+              "address",
+              "port",
+              "observed_at"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "type": "string"
+              },
+              "error_class": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "sni": {
+                "type": "string"
+              },
+              "tls_version": {
+                "type": "string"
+              },
+              "cipher_suite": {
+                "type": "string"
+              },
+              "certificate": {
+                "$ref": "defs/certificate.json"
+              },
+              "served_chain": {
+                "type": "array",
+                "items": {
+                  "$ref": "defs/certificate.json"
+                }
+              },
+              "observed_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      },
+      "maxItems": 512
+    }
+  }
+}

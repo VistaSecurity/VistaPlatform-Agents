@@ -3,8 +3,8 @@ package main
 // The sensor's dispatch case (#1839): a malformed command is acknowledged as
 // FAILED on the spot, a well-formed planned one is queued for the single
 // worker and acknowledged later, an overflowing queue refuses rather than
-// piling up, and a protocols × ports command — which only a platform older
-// than this sensor sends — is refused with a reason (#2250 WP5).
+// piling up, and a protocols × ports command — which managed protocol 1 does
+// not have (D-P5) — is refused with unsupported_command.
 
 import (
 	"strings"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch"
 )
 
@@ -31,7 +32,8 @@ func goodCommand(id string) models.Command {
 	return planCommand(id, dispatchTestJobID, planTarget("10.0.0.10", "443"))
 }
 
-// legacyCommand is the protocols × ports payload an older platform sends.
+// legacyCommand is the protocols × ports payload, which protocol 1 does not
+// have.
 func legacyCommand(id string) models.Command {
 	return models.Command{ID: id, Type: sensordispatch.CommandType, Payload: map[string]interface{}{
 		"job_id":    dispatchTestJobID,
@@ -48,9 +50,8 @@ func TestHandleDiscoveryJob_MalformedPayloadIsRefusedNotSilentlyDropped(t *testi
 		payload map[string]interface{}
 	}{
 		{"empty", nil},
-		{"no targets", map[string]interface{}{"job_id": dispatchTestJobID}},
-		{"job id not a uuid", map[string]interface{}{"job_id": "job-1", "targets": []interface{}{"10.0.0.10"}}},
-		{"plan and targets both", map[string]interface{}{"job_id": dispatchTestJobID, "targets": []interface{}{"10.0.0.10"}, "plan": goodCommand("x").Payload["plan"]}},
+		{"no plan", map[string]interface{}{"job_id": dispatchTestJobID}},
+		{"job id not a uuid", map[string]interface{}{"job_id": "job-1", "plan": goodCommand("x").Payload["plan"]}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,30 +72,47 @@ func TestHandleDiscoveryJob_MalformedPayloadIsRefusedNotSilentlyDropped(t *testi
 	}
 }
 
-// #2250 WP5: this sensor has no protocols × ports executor. A well-formed
-// legacy command is refused at once, through the same refusal path, with a
-// reason telling the operator to upgrade the platform — never queued, never
-// half-run. Mutation: drop the payload.Plan == nil refusal in
-// handleDiscoveryJob and the command is queued, turning this red.
-func TestHandleDiscoveryJob_LegacyPayloadIsRefusedWithTheUpgradeReason(t *testing.T) {
-	s := dispatchSensor(t)
-	result := s.handleDiscoveryJob(legacyCommand("cmd-legacy"))
-	if result == nil {
-		t.Fatal("a protocols × ports command was accepted by a sensor with no executor for it")
-	}
-	if result.Status != "error" || result.CommandID != "cmd-legacy" {
-		t.Fatalf("ack = %+v, want a failed ack for cmd-legacy", result)
-	}
-	for _, want := range []string{"scan plan", "protocols × ports", "upgrade the platform"} {
-		if !strings.Contains(result.Message, want) {
-			t.Errorf("refusal %q lacks %q", result.Message, want)
+// Managed protocol 1 (D-P5): the scan plan is the only job shape. A
+// protocols × ports command — alone, or with a plan beside it — is refused at
+// once with unsupported_command, never queued, never half-run. Mutation: let
+// sensordispatch.ParsePayload accept the legacy keys, or drop the
+// ErrLegacyPayload branch in handleDiscoveryJob, and this turns red.
+func TestHandleDiscoveryJob_LegacyPayloadIsRefusedAsUnsupported(t *testing.T) {
+	withPlan := legacyCommand("cmd-legacy-plan")
+	withPlan.Payload["plan"] = goodCommand("x").Payload["plan"]
+	for _, cmd := range []models.Command{legacyCommand("cmd-legacy"), withPlan} {
+		s := dispatchSensor(t)
+		result := s.handleDiscoveryJob(cmd)
+		if result == nil {
+			t.Fatalf("%s: a protocols × ports command was accepted", cmd.ID)
+		}
+		if result.Status != "error" || result.CommandID != cmd.ID {
+			t.Fatalf("ack = %+v, want a failed ack for %s", result, cmd.ID)
+		}
+		if code, _ := result.ResponseData["code"].(string); code != managedprotocol.CodeUnsupportedCommand {
+			t.Errorf("%s: ack code = %v, want %s", cmd.ID, result.ResponseData["code"], managedprotocol.CodeUnsupportedCommand)
+		}
+		for _, want := range []string{"scan plan", "protocols × ports", "Nothing was scanned"} {
+			if !strings.Contains(result.Message, want) {
+				t.Errorf("refusal %q lacks %q", result.Message, want)
+			}
+		}
+		if refused, _ := result.ResponseData["refused"].(bool); !refused {
+			t.Errorf("ack data = %v, want refused=true (the platform fails the job on it)", result.ResponseData)
+		}
+		if len(s.jobQueue) != 0 {
+			t.Error("a protocols × ports command was queued")
 		}
 	}
-	if refused, _ := result.ResponseData["refused"].(bool); !refused {
-		t.Errorf("ack data = %v, want refused=true (the platform fails the job on it)", result.ResponseData)
-	}
-	if len(s.jobQueue) != 0 {
-		t.Error("a protocols × ports command was queued")
+}
+
+// An unknown command type is acknowledged as refused with unsupported_command
+// (D-P2), not silently dropped and not run.
+func TestProcessCommand_UnknownTypeIsUnsupported(t *testing.T) {
+	s := dispatchSensor(t)
+	got := s.unsupportedCommand(models.Command{ID: "cmd-x", Type: "rewrite_firmware"}, "Unknown command type: rewrite_firmware")
+	if got.Status != "error" || got.ResponseData["code"] != managedprotocol.CodeUnsupportedCommand || got.CommandID != "cmd-x" {
+		t.Fatalf("ack = %+v, want an unsupported_command refusal of cmd-x", got)
 	}
 }
 

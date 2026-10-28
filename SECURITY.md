@@ -1,14 +1,3 @@
-<!--
-DRAFT FOR COUNSEL REVIEW. Installed from the draft prepared under work order WO-01 so
-that the staging repository starts with its intake policy; the text is unchanged except
-for the platform intake URL, which follows the repository names proposed in
-D02. Placeholders in [BRACKETS] are owner decisions. Remove this comment, and
-the banner below, when counsel has approved the text and before the
-repository is made public.
--->
-
-> **DRAFT FOR COUNSEL REVIEW.** Not yet approved; do not rely on it.
-
 # Security policy
 
 The Vista Platform agents run inside the networks of the organizations that
@@ -25,7 +14,7 @@ Report privately through either channel:
 - **GitHub private vulnerability reporting** on this repository (Security tab,
   "Report a vulnerability"). Preferred: the report, the fix and any CVE stay in
   one place.
-- **E-mail**: [SECURITY CONTACT ADDRESS]. If you want to encrypt the report,
+- **E-mail**: <security@vistasecurity.io>. If you want to encrypt the report,
   ask for a key in a first message with no details in it.
 
 **Is it the agents or the platform?** This repository covers the sensor, the
@@ -86,7 +75,8 @@ no paid bounty.
 
 ## Supported versions
 
-Security fixes land in the latest tagged release. Nightly builds are previews:
-they receive fixes by being rebuilt, never by backport, and are not supported
-for production use. [OWNER DECISION: whether the release paired with the
-current platform release also receives backported fixes.]
+Security fixes land in the latest tagged release. Earlier releases do not
+receive backported fixes: upgrade to the latest release. Nightly builds are
+previews: they receive fixes by being rebuilt, never by backport, and are not
+supported for production use. This is our current practice, stated so you can
+plan around it; it is not a service commitment.

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/completion.schema.json",
+  "title": "Discovery job completion",
+  "description": "POST /api/v1/sensor-manager/sensors/{id}/discovery-jobs/{job}/complete: the counts and the verdict; the results went through the discovery batch.",
+  "type": "object",
+  "required": [
+    "status",
+    "total_targets",
+    "successful_targets",
+    "failed_targets",
+    "discoveries_submitted"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    },
+    "error_message": {
+      "type": "string"
+    },
+    "total_targets": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "successful_targets": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed_targets": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "discoveries_submitted": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

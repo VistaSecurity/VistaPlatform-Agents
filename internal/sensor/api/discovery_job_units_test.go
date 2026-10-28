@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch/planrun"
 )
@@ -29,6 +30,7 @@ func TestReportDiscoveryJobUnits_MapsTheAnswer(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewOutboundClient(&config.Config{SensorID: "22222222-2222-2222-2222-222222222222", ControlPlaneURL: srv.URL})
+	protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 	const job = "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42"
 
 	status, body = http.StatusOK, `{"job_status":"awaiting_sensor","accepted":0,"duplicate":0,"stale":0,"unknown":0}`

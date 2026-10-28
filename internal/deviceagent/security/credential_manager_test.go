@@ -2,6 +2,7 @@ package security
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -50,23 +51,42 @@ func TestEncryptDecryptCredentials(t *testing.T) {
 	}
 }
 
-func TestDecryptCredentials_BackwardCompat(t *testing.T) {
-	// Pre-decrypted credentials (no encrypted_data field) should pass through
+// Managed protocol 1 (D-P7): credentials travel sealed only. A plaintext map
+// is refused — whatever secrets the agent holds — and never passed through.
+func TestDecryptCredentials_UnsealedIsRefused(t *testing.T) {
 	plaintext := map[string]interface{}{
 		"username": "admin",
 		"password": "secret",
 	}
+	for _, secrets := range [][]string{nil, {"agent-secret"}} {
+		result, err := DecryptCredentials(plaintext, "any-key", secrets...)
+		if !errors.Is(err, ErrUnsealedCredentials) || result != nil {
+			t.Fatalf("DecryptCredentials(plaintext, %v) = %v, %v; want ErrUnsealedCredentials", secrets, result, err)
+		}
+	}
+}
 
-	result, err := DecryptCredentials(plaintext, "any-key", "")
+// No key is derived without an agent secret: neither the job-id-only key nor
+// a registration key (the agent has none to pass).
+func TestDecryptCredentials_NoAgentSecretOpensNothing(t *testing.T) {
+	envelope, err := EncryptCredentials(map[string]interface{}{"password": "secret"}, "job-1", "")
 	if err != nil {
-		t.Fatalf("DecryptCredentials failed for plaintext: %v", err)
+		t.Fatal(err)
 	}
+	for _, secrets := range [][]string{nil, {""}} {
+		if got, err := DecryptCredentials(envelope, "job-1", secrets...); !errors.Is(err, ErrNoAgentSecret) || got != nil {
+			t.Fatalf("DecryptCredentials(job-id-only envelope, %q) = %v, %v; want ErrNoAgentSecret", secrets, got, err)
+		}
+	}
+}
 
-	if result["username"] != "admin" {
-		t.Errorf("username mismatch: got %v, want admin", result["username"])
-	}
-	if result["password"] != "secret" {
-		t.Errorf("password mismatch: got %v, want secret", result["password"])
+// A job with no credentials at all has nothing to open.
+func TestDecryptCredentials_NoCredentialsIsEmpty(t *testing.T) {
+	for _, in := range []map[string]interface{}{nil, {}} {
+		got, err := DecryptCredentials(in, "job-1")
+		if err != nil || len(got) != 0 {
+			t.Fatalf("DecryptCredentials(%v) = %v, %v; want an empty map", in, got, err)
+		}
 	}
 }
 
@@ -77,13 +97,13 @@ func TestDecryptCredentials_WrongKey(t *testing.T) {
 	}
 
 	// Encrypt with one key
-	envelope, err := EncryptCredentials(original, "correct-key", "")
+	envelope, err := EncryptCredentials(original, "correct-key", "agent-secret")
 	if err != nil {
 		t.Fatalf("EncryptCredentials failed: %v", err)
 	}
 
 	// Decrypt with wrong key should fail
-	_, err = DecryptCredentials(envelope, "wrong-key", "")
+	_, err = DecryptCredentials(envelope, "wrong-key", "agent-secret")
 	if err == nil {
 		t.Fatal("expected error when decrypting with wrong key, got nil")
 	}
@@ -94,7 +114,7 @@ func TestDecryptCredentials_InvalidBase64(t *testing.T) {
 		"encrypted_data": "not-valid-base64!!!",
 	}
 
-	_, err := DecryptCredentials(envelope, "any-key", "")
+	_, err := DecryptCredentials(envelope, "any-key", "agent-secret")
 	if err == nil {
 		t.Fatal("expected error for invalid base64, got nil")
 	}
@@ -105,7 +125,7 @@ func TestDecryptCredentials_TruncatedCiphertext(t *testing.T) {
 		"encrypted_data": "AAAA", // valid base64 but too short for GCM
 	}
 
-	_, err := DecryptCredentials(envelope, "any-key", "")
+	_, err := DecryptCredentials(envelope, "any-key", "agent-secret")
 	if err == nil {
 		t.Fatal("expected error for truncated ciphertext, got nil")
 	}
@@ -192,18 +212,18 @@ func TestEncryptDecrypt_Uniqueness(t *testing.T) {
 	original := map[string]interface{}{"password": "test"}
 	jobKey := "key"
 
-	env1, _ := EncryptCredentials(original, jobKey, "")
-	env2, _ := EncryptCredentials(original, jobKey, "")
+	env1, _ := EncryptCredentials(original, jobKey, "agent-secret")
+	env2, _ := EncryptCredentials(original, jobKey, "agent-secret")
 
 	if env1["encrypted_data"] == env2["encrypted_data"] {
 		t.Fatal("two encryptions of same plaintext produced identical ciphertext (nonce reuse)")
 	}
 
 	// But both should decrypt to the same value
-	dec1, _ := DecryptCredentials(env1, jobKey, "")
-	dec2, _ := DecryptCredentials(env2, jobKey, "")
+	dec1, _ := DecryptCredentials(env1, jobKey, "agent-secret")
+	dec2, _ := DecryptCredentials(env2, jobKey, "agent-secret")
 
-	if dec1["password"] != dec2["password"] {
+	if dec1["password"] != "test" || dec2["password"] != "test" {
 		t.Fatal("different ciphertexts decrypted to different plaintexts")
 	}
 }

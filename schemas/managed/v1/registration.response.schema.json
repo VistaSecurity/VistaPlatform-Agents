@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/registration.response.schema.json",
+  "title": "Registration response",
+  "description": "The platform's answer to a registration (200 sensor, 201 device agent). It must name protocol 1; the agent applies nothing from an answer that does not, or that carries a private key (client_key) or no agent_secret. The agent merges server_ca_cert into its pinned anchor and switches to control_plane_url only when it is https://host[:port].",
+  "allOf": [
+    {
+      "type": "object",
+      "required": [
+        "protocol",
+        "client_cert",
+        "agent_secret"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "protocol": {
+          "$ref": "defs/protocol.json"
+        },
+        "sensor_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "agent_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "client_cert": {
+          "type": "string",
+          "pattern": "^-----BEGIN CERTIFICATE-----"
+        },
+        "server_ca_cert": {
+          "type": "string",
+          "pattern": "^-----BEGIN CERTIFICATE-----"
+        },
+        "certificate_expires_at": {
+          "type": "string"
+        },
+        "control_plane_url": {
+          "type": "string",
+          "pattern": "^(https://[^/\\s]+/?)?$"
+        },
+        "agent_secret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_secret_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reporting_interval": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "required": [
+            "sensor_id"
+          ]
+        },
+        {
+          "required": [
+            "agent_id"
+          ]
+        }
+      ]
+    },
+    {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "client_key"
+            ]
+          },
+          {
+            "required": [
+              "private_key"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

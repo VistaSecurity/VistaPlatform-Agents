@@ -1,0 +1,61 @@
+{
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "discoveries": [
+    {
+      "id": "d-1",
+      "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "source_ip": "192.0.2.10",
+      "dest_ip": "203.0.113.5",
+      "port": 443,
+      "protocol": "TLS",
+      "version": "",
+      "cipher_suite": "TLS_AES_128_GCM_SHA256",
+      "key_size": 0,
+      "discovery_method": "active",
+      "discovery_type": "tls_handshake",
+      "confidence": 0.9,
+      "raw_metadata": {
+        "certificates": [
+          {
+            "subject_dn": "CN=app.example.test,O=Example Test",
+            "issuer_dn": "CN=Example Test CA,O=Example Test",
+            "serial_number": "1001",
+            "not_before": "2026-01-01T00:00:00Z",
+            "not_after": "2027-01-01T00:00:00Z",
+            "key_algorithm": "ECDSA",
+            "key_size": 256,
+            "signature_alg": "ECDSA-SHA256",
+            "is_ca": false,
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+            "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "fingerprint_sha1": "0000000000000000000000000000000000000000",
+            "subject_alternative_names": [
+              "app.example.test"
+            ],
+            "key_usage": [
+              "DigitalSignature"
+            ],
+            "extended_key_usage": [
+              "ServerAuth"
+            ],
+            "chain_order": 0,
+            "private_key": "-----BEGIN PRIVATE KEY-----\nU1lOVEhFVElDLUtFWS1OT1QtQS1SRUFMLUtFWQ==\n-----END PRIVATE KEY-----\n"
+          }
+        ],
+        "protocol_version": "TLS 1.3",
+        "job_id": "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
+        "cert_has_sct": false
+      },
+      "service_hints": {
+        "service_name": "https",
+        "confidence": "high",
+        "identification_method": "port_heuristic"
+      },
+      "created_at": "2026-01-02T03:04:05Z"
+    }
+  ],
+  "batch_id": "5d0c1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f",
+  "timestamp": "2026-01-02T03:04:05Z",
+  "count": 1
+}

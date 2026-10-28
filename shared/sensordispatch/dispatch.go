@@ -47,19 +47,20 @@ const MetadataJobIDKey = "job_id"
 
 // Payload is what a discovery_job command carries. It is everything the sensor
 // needs to run the job without asking the platform anything else.
+//
+// In managed protocol 1 the scan plan is the only job shape (D-P5): the older
+// protocols × ports payload (top-level targets, protocols, ports) is not a
+// shape this package reads, and ParsePayload refuses it with ErrLegacyPayload.
 type Payload struct {
-	JobID     string                 `json:"job_id"`
-	TenantID  string                 `json:"tenant_id"`
-	Targets   []string               `json:"targets"`
-	Protocols []string               `json:"protocols"`
-	Ports     []int                  `json:"ports"`
-	Options   map[string]interface{} `json:"options,omitempty"`
-	// Plan is a planned scan's per-target plan (#2170 WP2b, plan.go). Only a
-	// sensor that reports ScanPlanCapability is ever handed one. A plan
-	// payload carries NO top-level targets, so a sensor too old to know
-	// "plan" — whose parser requires targets — refuses it as malformed
-	// instead of running something unrelated with protocols=[].
-	Plan *PlanPayload `json:"plan,omitempty"`
+	JobID    string `json:"job_id"`
+	TenantID string `json:"tenant_id"`
+	// Options are the job's options as the platform recorded them (an
+	// automatic scan's marker, for one). The platform sends them beside a
+	// plan; the plan is what the sensor runs.
+	Options map[string]interface{} `json:"options,omitempty"`
+	// Plan is the planned scan's per-target plan (#2170 WP2b, plan.go).
+	// Required.
+	Plan *PlanPayload `json:"plan"`
 }
 
 // ToMap renders the payload as the generic map sensor_commands.payload stores
@@ -68,9 +69,6 @@ func (p Payload) ToMap() map[string]interface{} {
 	out := map[string]interface{}{
 		"job_id":    p.JobID,
 		"tenant_id": p.TenantID,
-		"targets":   append([]string(nil), p.Targets...),
-		"protocols": append([]string(nil), p.Protocols...),
-		"ports":     append([]int(nil), p.Ports...),
 	}
 	if len(p.Options) > 0 {
 		opts := make(map[string]interface{}, len(p.Options))
@@ -91,13 +89,22 @@ func (p Payload) ToMap() map[string]interface{} {
 // silence.
 var ErrMalformedPayload = errors.New("malformed discovery_job payload")
 
+// ErrLegacyPayload is returned for the protocols × ports payload, which
+// managed protocol 1 does not have. The sensor acknowledges it as refused with
+// unsupported_command; nothing is scanned.
+var ErrLegacyPayload = errors.New("discovery_job payload is the protocols × ports shape, which managed protocol 1 does not have")
+
+// legacyPayloadKeys are the top-level keys only the protocols × ports payload
+// carried. (options rode with both shapes and still rides with a plan.)
+var legacyPayloadKeys = []string{"targets", "protocols", "ports"}
+
 // ParsePayload validates a command payload as it arrives at the sensor.
 //
-// Strict on purpose. A job with no targets, a port outside 1–65535 or an
-// unparseable job id cannot be run, and the honest answer is to refuse it in
-// a way the platform records — not to scan nothing and report success. Any
-// caller that accepts the map shape (JSON numbers arrive as float64, Go
-// callers hand over ints) is served.
+// Strict on purpose. A job with no plan, a malformed plan or an unparseable
+// job id cannot be run, and the honest answer is to refuse it in a way the
+// platform records — not to scan nothing and report success. Any caller that
+// accepts the map shape (JSON numbers arrive as float64, Go callers hand over
+// ints) is served.
 func ParsePayload(m map[string]interface{}) (Payload, error) {
 	var p Payload
 	if m == nil {
@@ -114,105 +121,26 @@ func ParsePayload(m map[string]interface{}) (Payload, error) {
 		p.TenantID = strings.TrimSpace(tenantID)
 	}
 
-	targets, err := stringList(m["targets"])
+	// The protocols × ports shape is recognised only to be refused: a
+	// payload carrying any of its keys is not run, with or without a plan.
+	for _, key := range legacyPayloadKeys {
+		if _, ok := m[key]; ok {
+			return p, fmt.Errorf("%w (it carries %q)", ErrLegacyPayload, key)
+		}
+	}
+	raw, ok := m["plan"]
+	if !ok || raw == nil {
+		return p, fmt.Errorf("%w: no plan", ErrMalformedPayload)
+	}
+	plan, err := parsePlan(raw)
 	if err != nil {
-		return p, fmt.Errorf("%w: targets: %v", ErrMalformedPayload, err)
+		return p, fmt.Errorf("%w: %v", ErrMalformedPayload, err)
 	}
-	if raw, ok := m["plan"]; ok && raw != nil {
-		// A planned scan: its targets are in the plan, and a payload naming
-		// targets in both places is not one the platform writes.
-		if len(targets) > 0 {
-			return p, fmt.Errorf("%w: a planned scan carries its targets in the plan, not beside it", ErrMalformedPayload)
-		}
-		plan, err := parsePlan(raw)
-		if err != nil {
-			return p, fmt.Errorf("%w: %v", ErrMalformedPayload, err)
-		}
-		p.Plan = plan
-	} else if len(targets) == 0 {
-		return p, fmt.Errorf("%w: targets is empty", ErrMalformedPayload)
-	}
-	p.Targets = targets
-
-	if protocols, err := stringList(m["protocols"]); err != nil {
-		return p, fmt.Errorf("%w: protocols: %v", ErrMalformedPayload, err)
-	} else {
-		p.Protocols = protocols
-	}
-
-	ports, err := intList(m["ports"])
-	if err != nil {
-		return p, fmt.Errorf("%w: ports: %v", ErrMalformedPayload, err)
-	}
-	for _, port := range ports {
-		if port < 1 || port > 65535 {
-			return p, fmt.Errorf("%w: port %d is out of range", ErrMalformedPayload, port)
-		}
-	}
-	p.Ports = ports
-
+	p.Plan = plan
 	if opts, ok := m["options"].(map[string]interface{}); ok {
 		p.Options = opts
 	}
 	return p, nil
-}
-
-func stringList(v interface{}) ([]string, error) {
-	switch list := v.(type) {
-	case nil:
-		return nil, nil
-	case []string:
-		out := make([]string, 0, len(list))
-		for _, s := range list {
-			if s = strings.TrimSpace(s); s != "" {
-				out = append(out, s)
-			}
-		}
-		return out, nil
-	case []interface{}:
-		out := make([]string, 0, len(list))
-		for _, item := range list {
-			s, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("entry %v is not a string", item)
-			}
-			if s = strings.TrimSpace(s); s != "" {
-				out = append(out, s)
-			}
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("expected a list, got %T", v)
-	}
-}
-
-func intList(v interface{}) ([]int, error) {
-	switch list := v.(type) {
-	case nil:
-		return nil, nil
-	case []int:
-		return append([]int(nil), list...), nil
-	case []interface{}:
-		out := make([]int, 0, len(list))
-		for _, item := range list {
-			switch n := item.(type) {
-			case int:
-				out = append(out, n)
-			case int64:
-				out = append(out, int(n))
-			case float64:
-				if n != float64(int(n)) {
-					return nil, fmt.Errorf("entry %v is not an integer", item)
-				}
-				out = append(out, int(n))
-			default:
-				return nil, fmt.Errorf("entry %v is not a number", item)
-			}
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("expected a list, got %T", v)
-	}
 }
 
 // Liveness.
@@ -273,8 +201,8 @@ func DispatchTimeout(reportingIntervalSeconds int) time.Duration {
 	return LivenessWindow(reportingIntervalSeconds)
 }
 
-// ExecutionTimeout bounds how long a sensor that DID collect a protocols ×
-// ports command may run it before the platform stops waiting. Generous: a
+// ExecutionTimeout bounds how long a sensor that DID collect a command may run
+// it before the platform stops waiting. Generous: a
 // thousand-target sweep on a slow link is legitimate work. It exists so a
 // sensor that dies mid-job leaves a failed job with a reason, not one that
 // says "awaiting sensor" forever. A planned scan is not bound by it: it runs

@@ -1,14 +1,13 @@
 package api
 
 import (
-	"bytes"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	// Aliased: the device-agent has its own `certificates` package, above.
 	sharedcerts "github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	"github.com/vistasecurity/vistaplatform-agents/shared/httpclient"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // RotateCertificate rotates the agent's certificate by generating a new CSR and requesting a new certificate
@@ -69,42 +69,30 @@ func (c *OutboundClient) RotateCertificate() error {
 		return fmt.Errorf("failed to encode private key: %v", err)
 	}
 
-	// Request certificate rotation
+	// Request certificate rotation. The agent secret is always replaced at a
+	// rotation in protocol 1, so the request carries only the CSR.
 	rotationReq := map[string]interface{}{
 		"csr": csrPEM,
-		// This build stores the per-agent secret (#2437); the platform issues a
-		// replacement only to a build that says so.
-		"supports_agent_secret": true,
-	}
-
-	jsonData, err := json.Marshal(rotationReq)
-	if err != nil {
-		return fmt.Errorf("failed to marshal rotation request: %v", err)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/certificates/rotate", c.baseURL, c.agentID.String())
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create rotation request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
 	// Use existing certificate for authentication during rotation
-	resp, err := c.httpClient.Do(req)
+	status, _, body, err := c.call(http.MethodPost, url, rotationReq, maxAnswerBytes, nil)
 	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send rotation request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("certificate rotation failed with status %d: %s", resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return fmt.Errorf("certificate rotation failed with status %d: %s", status, string(body))
 	}
 
 	var rotationResp struct {
 		AgentID              string    `json:"agent_id"`
 		ClientCert           string    `json:"client_cert"`
+		ClientKey            string    `json:"client_key"` // never accepted
 		ServerCACert         string    `json:"server_ca_cert"`
 		CertificateExpiresAt time.Time `json:"certificate_expires_at"`
 		Message              string    `json:"message"`
@@ -112,8 +100,19 @@ func (c *OutboundClient) RotateCertificate() error {
 		AgentSecretVersion   int       `json:"agent_secret_version"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&rotationResp); err != nil {
+	if err := json.Unmarshal(body, &rotationResp); err != nil {
 		return fmt.Errorf("failed to decode rotation response: %v", err)
+	}
+	if rotationResp.ClientKey != "" {
+		return &managedprotocol.ViolationError{Reason: "the rotation answer carries a private key the platform generated (client_key)"}
+	}
+	if rotationResp.ClientCert == "" {
+		return fmt.Errorf("certificate rotation answer carries no client_cert")
+	}
+	if rotationResp.AgentSecret == "" {
+		// Not fatal: the certificate is what keeps the agent reachable, and
+		// the platform has already revoked the old one. Keep the secret held.
+		log.Printf("⚠️  Certificate rotation answer carries no agent_secret, which protocol %d always issues; keeping the current secret", managedprotocol.Version)
 	}
 
 	// Update configuration with new certificate
@@ -128,9 +127,8 @@ func (c *OutboundClient) RotateCertificate() error {
 
 	// The replacement per-agent secret (#2437). The one it replaces stays
 	// valid for agentcreds.PreviousSecretWindow so a job the platform sealed
-	// just before this rotation still opens; for an agent that held none (it
-	// enrolled before agent secrets existed) the replaced root is its
-	// registration key. The caller persists it with the certificate.
+	// just before this rotation still opens. The caller persists it with the
+	// certificate.
 	if rotationResp.AgentSecret != "" {
 		c.config.RotateAgentSecret(rotationResp.AgentSecret, rotationResp.AgentSecretVersion, time.Now())
 	}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/command-ack.schema.json",
+  "title": "Sensor command acknowledgement",
+  "description": "POST /api/v1/sensor-manager/sensors/{id}/commands/{command}/ack. A refused command carries response_data.refused true, a reason, and, when the sensor does not run that work at all, code unsupported_command.",
+  "type": "object",
+  "required": [
+    "id",
+    "command_id",
+    "sensor_id",
+    "status",
+    "message",
+    "timestamp"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "command_id": {
+      "type": "string"
+    },
+    "sensor_id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "error",
+        "partial"
+      ]
+    },
+    "message": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "response_data": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "refused": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "description": "unsupported_command when the sensor does not run that work at all."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "bc789b6e-9298-4a71-8a7b-f4c495dae444",
+  "type": "device_interrogation",
+  "asset_id": "2b9e1f40-5c6d-4e7f-8a9b-0c1d2e3f4a5b",
+  "device_type": "fortinet",
+  "credentials": {
+    "encrypted_data": "AAAAAAAAAAAAAAAAU1lOVEhFVElDLUVOVkVMT1BFLU5PVC1BLVJFQUwtU0VBTEVELUNSRURFTlRJQUxT"
+  },
+  "parameters": {
+    "management_url": "https://198.51.100.20",
+    "hostname": "fw-a.example.test"
+  },
+  "created_at": "2026-01-02T03:04:05Z",
+  "expires_at": null,
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "device_discovery"
+    ]
+  }
+}

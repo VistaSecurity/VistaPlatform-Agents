@@ -1,0 +1,47 @@
+{
+  "registration_key": "REG-0123456789abcdef0123456789abcdef",
+  "name": "sensor-a",
+  "description": "",
+  "platform": "linux",
+  "version": "5.3.0",
+  "profile": "standard",
+  "network_interfaces": [
+    "eth0"
+  ],
+  "available_interfaces": [
+    "eth0",
+    "eth1"
+  ],
+  "ip_address": "192.0.2.10",
+  "reporting_interval": 30,
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "host": {
+    "hostname": "sensor-a",
+    "fqdn": "sensor-a.example.test",
+    "os": "linux",
+    "arch": "amd64",
+    "interfaces": [
+      {
+        "interface_name": "eth0",
+        "address": "192.0.2.10",
+        "prefix_length": 24,
+        "is_primary": true,
+        "mac": "00:00:5e:00:53:01"
+      },
+      {
+        "interface_name": "eth1",
+        "address": "2001:db8::10",
+        "prefix_length": 64
+      }
+    ]
+  },
+  "agent_kind": "sensor",
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "identity_dns_v1",
+      "scan_plan_v1",
+      "verify_certificate_v1"
+    ]
+  }
+}
