@@ -1,0 +1,185 @@
+// Package deviceinterrogation is the single, shared capability core for
+// vendor device interrogation. Both runtimes that interrogate customer devices
+// — the standalone Interrogation Agent (device-agent, shipped to customer
+// networks) and the in-cluster multi-tenant platform agent
+// (device-interrogation-service) — consume this package so there is exactly
+// one implementation of "how do I talk to a FortiGate / Cisco / PAN-OS / F5 /
+// UniFi / database and extract its cryptographic posture."
+//
+// The two runtimes differ ONLY in their wrappers: how credentials arrive
+// (locally-decrypted on the agent vs. a multi-tenant credential store in the
+// service) and how results are delivered (POST-home over HMAC vs. in-cluster
+// discovery findings). Every capability — vendor clients, certificate/cipher
+// parsing, the SNMP/TLS/HTTP probers, and database interrogation — lives here.
+//
+// This package MUST stay free of any dependency on either consumer module and
+// free of CGO, so it can be vendored into the standalone agent binary as
+// easily as it is imported by the in-cluster service.
+package deviceinterrogation
+
+import (
+	"context"
+
+	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
+)
+
+// CertificateInfo is the canonical extracted-certificate shape, re-exported
+// from shared/certificates so callers of this package have a single import.
+type CertificateInfo = certificates.CertificateInfo
+
+// DeviceInfo carries the addressing/identity a vendor client needs to reach a
+// device. Wrappers populate it from their own device records.
+type DeviceInfo struct {
+	DeviceType    string
+	Hostname      string
+	IPAddress     string
+	ManagementURL string
+	// Port is the management/SSH port when it differs from the vendor default
+	// (0 means "use the vendor default").
+	Port int
+	// SiteID is vendor-specific (e.g. UniFi controller site).
+	SiteID   string
+	Metadata map[string]interface{}
+	// SSHHostKeyFingerprint is the host key pinned to this device record on a
+	// previous contact, in ssh.FingerprintSHA256 form. Empty means the device
+	// has never been contacted over SSH (or was deliberately re-pinned), which
+	// is the enrolment case: the interrogation captures the key it is shown and
+	// the wrapper stores it. Once set, a DIFFERENT key aborts the handshake
+	// before authentication — no credential is sent. See shared/sshtrust.
+	SSHHostKeyFingerprint string
+}
+
+// Credentials are decrypted, in-memory-only device credentials. Wrappers are
+// responsible for decrypting before constructing this and for clearing it
+// after use.
+type Credentials struct {
+	Username string
+	Password string
+	APIKey   string
+	Token    string
+	// InsecureSkipVerify, when true, disables TLS verification of the device's
+	// management endpoint. Defaults to false (verify). Operators opt in
+	// per-device for self-signed appliance management certs.
+	InsecureSkipVerify bool
+	// Custom holds any additional credential fields a vendor needs.
+	Custom map[string]interface{}
+}
+
+// CryptoAsset is the superset cryptographic asset emitted by every
+// interrogator. Optional crypto fields are pointers so an interrogator can
+// leave a value genuinely unknown rather than fabricating a default.
+type CryptoAsset struct {
+	Hostname  string `json:"hostname"`
+	IPAddress string `json:"ip_address"`
+	Port      int    `json:"port"`
+	Protocol  string `json:"protocol"`
+	AssetType string `json:"asset_type,omitempty"` // server, appliance, firewall, load_balancer, vpn_gateway, database, etc.
+
+	ProtocolVersion  *string  `json:"protocol_version,omitempty"`
+	CipherSuite      *string  `json:"cipher_suite,omitempty"`
+	SupportedCiphers []string `json:"supported_ciphers,omitempty"`
+	KeySize          *int     `json:"key_size,omitempty"`
+	KeyExchangeAlg   *string  `json:"key_exchange_algorithm,omitempty"`
+	HashAlgorithm    *string  `json:"hash_algorithm,omitempty"`
+	TLSVersions      []string `json:"tls_versions,omitempty"`
+
+	// Certificate is the leaf certificate (backward-compat convenience);
+	// Certificates is the full chain (index 0 = leaf, then intermediates).
+	Certificate  *CertificateInfo  `json:"certificate,omitempty"`
+	Certificates []CertificateInfo `json:"certificates,omitempty"`
+
+	CertValidationStatus string `json:"cert_validation_status,omitempty"`
+	CertValidationError  string `json:"cert_validation_error,omitempty"`
+
+	SSHInfo      *SSHInfo      `json:"ssh_info,omitempty"`
+	ServiceHints *ServiceHints `json:"service_hints,omitempty"`
+
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// SSHInfo captures SSH protocol negotiation details.
+type SSHInfo struct {
+	Banner               string   `json:"banner,omitempty"`
+	KeyTypes             []string `json:"key_types,omitempty"`
+	HostKeyType          string   `json:"host_key_type,omitempty"`
+	HostKeyFingerprint   string   `json:"host_key_fingerprint,omitempty"`
+	KexAlgorithm         string   `json:"kex_algorithm,omitempty"`
+	EncryptionAlgC2S     string   `json:"encryption_alg_c2s,omitempty"`
+	EncryptionAlgS2C     string   `json:"encryption_alg_s2c,omitempty"`
+	MACAlgC2S            string   `json:"mac_alg_c2s,omitempty"`
+	MACAlgS2C            string   `json:"mac_alg_s2c,omitempty"`
+	CompressionAlgorithm string   `json:"compression_alg,omitempty"`
+}
+
+// ServiceHints holds an identified service name/version for inventory enrichment.
+type ServiceHints struct {
+	ServiceName          string `json:"service_name,omitempty"`
+	ServiceVersion       string `json:"service_version,omitempty"`
+	Confidence           string `json:"confidence,omitempty"`
+	IdentificationMethod string `json:"identification_method,omitempty"`
+}
+
+// DeviceIdentity captures hardware/software identity of the interrogated device.
+type DeviceIdentity struct {
+	Vendor          string `json:"vendor,omitempty"`
+	Model           string `json:"model,omitempty"`
+	FirmwareVersion string `json:"firmware_version,omitempty"`
+	SerialNumber    string `json:"serial_number,omitempty"`
+	OSVersion       string `json:"os_version,omitempty"`
+	// ClassHint is an asset-class key (shared/assetclass) proposing what this
+	// device is — `firewall` for a PAN-OS appliance, `access_point` for a
+	// UniFi uap. A proposal for the classifier seam (ADR-0002 D2), never a
+	// decision: class changes go through Approvals.
+	//
+	// The mappings live in classhint.go today and move to the seeded
+	// classification-rule table in ADR-0004 D6 (workstream 2.10), which is why
+	// they are deliberately small and data-shaped.
+	ClassHint string `json:"class_hint,omitempty"`
+}
+
+// InterrogateResult is the raw output of a single interrogation. Wrappers map
+// Assets onto their own downstream asset/finding model.
+type InterrogateResult struct {
+	Assets []CryptoAsset `json:"assets"`
+	// DeviceInfo is freeform vendor system info (version/model/serial, raw
+	// certificate dumps, etc.).
+	DeviceInfo map[string]interface{} `json:"device_info"`
+	// DeviceIdentity, when populated, is the structured device identity shared
+	// across every asset from this interrogation.
+	DeviceIdentity *DeviceIdentity `json:"device_identity,omitempty"`
+	// Facts are the registered ops facts this interrogation measured —
+	// interfaces, neighbours, VLANs, uptime, hardware identity (ADR-0004 D1).
+	// Every key is registered in standards/fact-keys.yaml; see observations.go.
+	Facts []FactObservation `json:"facts,omitempty"`
+	// Relationships are the edges this interrogation observed — an adoption, an
+	// uplink, an LLDP neighbour (ADR-0003). Every type is one of the canonical
+	// ten in shared/relationships.
+	Relationships []RelationshipObservation `json:"relationships,omitempty"`
+	// Network is the interrogated device's own interfaces, addresses, VLANs
+	// and ARP cache (DCIM row 1.5): the posture that has a model of its own and
+	// is filed through the identity engine, NOT as facts. Nil when the
+	// collector measured none, or is not yet a row-1.5 adapter (those still
+	// emit net.interfaces).
+	Network *NetworkObservation `json:"network,omitempty"`
+	// Warnings are the sub-failures the collector survived — an endpoint the
+	// account may not read, a command this version lacks, a table cut at its
+	// bound. The rest of the result is still returned; these say what it is
+	// missing and why (see warnings.go). Absent means none.
+	Warnings []CollectionWarning `json:"warnings,omitempty"`
+
+	// collector names the interrogator that built this result, stamped on each
+	// warning it records. Not serialised: every warning carries its own copy.
+	collector string
+}
+
+// DeviceInterrogator is implemented by every vendor/protocol client.
+type DeviceInterrogator interface {
+	// Interrogate connects to the device and returns its discovered crypto assets.
+	Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error)
+	// SupportedDeviceTypes returns the device_type strings this interrogator handles.
+	SupportedDeviceTypes() []string
+}
+
+// strPtr / intPtr are small helpers for populating the optional pointer fields.
+func strPtr(s string) *string { return &s }
+func intPtr(i int) *int       { return &i }

@@ -1,0 +1,12 @@
+{
+  "name": "vistaplatform-agents-scripts",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Code generators and guard scripts for the Vista Platform customer agents",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "fs-extra": "^11.4.1",
+    "yaml": "^2.9.1"
+  }
+}

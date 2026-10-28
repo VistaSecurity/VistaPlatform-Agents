@@ -25,7 +25,7 @@ Report privately through either channel:
 - **GitHub private vulnerability reporting** on this repository (Security tab,
   "Report a vulnerability"). Preferred: the report, the fix and any CVE stay in
   one place.
-- **E-mail**: <security@vistasecurity.io>. If you want to encrypt the report,
+- **E-mail**: [SECURITY CONTACT ADDRESS]. If you want to encrypt the report,
   ask for a key in a first message with no details in it.
 
 **Is it the agents or the platform?** This repository covers the sensor, the

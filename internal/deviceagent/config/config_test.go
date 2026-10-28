@@ -1,0 +1,107 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadFromFilePreservesEnrolledMTLSPlatformURLOverEnv(t *testing.T) {
+	t.Setenv("PLATFORM_URL", "https://edge.example.test")
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte(`agent_id: "8d08afae-1a43-4c56-99b0-f462754d152d"
+platform_url: https://agents.example.test:8444
+registration_key: REG-0123456789abcdef0123456789abcdef
+security:
+  client_cert: "cert"
+  client_key: "key"
+  server_ca_cert: "ca"
+  use_tls: true
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+
+	if cfg.PlatformURL != "https://agents.example.test:8444" {
+		t.Fatalf("PlatformURL = %q, want persisted mTLS endpoint", cfg.PlatformURL)
+	}
+}
+
+func TestLoadFromFileUsesPlatformURLEnvBeforeEnrollment(t *testing.T) {
+	t.Setenv("PLATFORM_URL", "https://edge.example.test")
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte(`platform_url: https://bootstrap.example.test
+registration_key: REG-0123456789abcdef0123456789abcdef
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+
+	if cfg.PlatformURL != "https://edge.example.test" {
+		t.Fatalf("PlatformURL = %q, want environment bootstrap URL", cfg.PlatformURL)
+	}
+}
+
+func TestLoadFromFileVerboseEnvOverridesAbsentKey(t *testing.T) {
+	t.Setenv("VERBOSE", "false")
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte(`platform_url: https://platform.example
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Verbose == nil || *cfg.Verbose {
+		t.Fatalf("Verbose = %v, want explicit false from VERBOSE env", cfg.Verbose)
+	}
+}
+
+func TestHostInventoryConnectionsRequireExplicitOptIn(t *testing.T) {
+	t.Setenv("HOST_INVENTORY_ENABLED", "true")
+	t.Setenv("HOST_INVENTORY_CONNECTIONS_ENABLED", "")
+	if cfg := Load(); !cfg.HostInventoryEnabled || cfg.HostInventoryConnectionsEnabled {
+		t.Fatalf("Load() enabled=%t connections=%t; connection peers must remain opt-in", cfg.HostInventoryEnabled, cfg.HostInventoryConnectionsEnabled)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte("host_inventory_enabled: true\nhost_inventory_connections_enabled: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostInventoryConnectionsEnabled {
+		t.Fatal("YAML connection opt-in was not loaded")
+	}
+}
+
+func TestLoadFromFileConnectionsEnvOverridesWithoutHostInventoryEnv(t *testing.T) {
+	t.Setenv("HOST_INVENTORY_ENABLED", "")
+	t.Setenv("HOST_INVENTORY_CONNECTIONS_ENABLED", "true")
+	configPath := filepath.Join(t.TempDir(), "agent-config.yaml")
+	if err := os.WriteFile(configPath, []byte("host_inventory_enabled: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostInventoryConnectionsEnabled {
+		t.Fatal("HOST_INVENTORY_CONNECTIONS_ENABLED was ignored unless HOST_INVENTORY_ENABLED was also set")
+	}
+}

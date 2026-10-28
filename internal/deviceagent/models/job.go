@@ -1,0 +1,209 @@
+package models
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+
+	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+)
+
+// Job represents a device interrogation job from the platform
+type Job struct {
+	ID   uuid.UUID `json:"id"`
+	Type string    `json:"type"` // "device_interrogation", "cloud_discovery"
+	// AssetID is the asset the job targets. The platform merged `devices` into
+	// `assets` in phase 1 (ADR-0002 D5) and emits BOTH this and the legacy
+	// `device_id`, carrying the same value, for one release.
+	AssetID *uuid.UUID `json:"asset_id,omitempty"`
+	// DeviceID is the legacy spelling of AssetID. Read as a fallback so this
+	// agent still works against a control plane older than phase 1.
+	//
+	// Deprecated: use Target().
+	DeviceID    *uuid.UUID             `json:"device_id,omitempty"`
+	DeviceType  string                 `json:"device_type"` // "f5", "cisco_router", "aws_alb", etc.
+	Credentials map[string]interface{} `json:"credentials"` // Encrypted credentials (decrypted by agent)
+	Parameters  map[string]interface{} `json:"parameters"`
+	CreatedAt   time.Time              `json:"created_at"`
+	ExpiresAt   *time.Time             `json:"expires_at,omitempty"`
+}
+
+// Target returns the id of the thing the job is about, preferring the phase-1
+// `asset_id` and falling back to the legacy `device_id`.
+//
+// The fallback is not decoration: an agent is shipped separately and is
+// routinely a release behind or ahead of the control plane it talks to, so
+// BOTH directions have to work. Reading only one of the two fields is how an
+// agent ends up reporting an unexplained device failure for a job whose target
+// it simply could not see.
+func (j *Job) Target() *uuid.UUID {
+	if j.AssetID != nil {
+		return j.AssetID
+	}
+	return j.DeviceID
+}
+
+// JobResult represents the result of a job execution
+type JobResult struct {
+	JobID       uuid.UUID              `json:"job_id"`
+	Success     bool                   `json:"success"`
+	Error       string                 `json:"error,omitempty"`
+	Assets      []DiscoveredAsset      `json:"assets,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	CompletedAt time.Time              `json:"completed_at"`
+
+	// Facts and Relationships are the ops observations the shared collectors
+	// emit alongside the crypto assets — interfaces, neighbours, VLANs,
+	// hardware identity, and the adoption/uplink/LLDP edges between them
+	// (ADR-0004 D1, ADR-0003). They are carried verbatim from the shared core's
+	// InterrogateResult and land in asset_facts / asset_relationships on the
+	// platform; an older control plane ignores them.
+	Facts         []di.FactObservation         `json:"facts,omitempty"`
+	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
+
+	// Network is the device's own interfaces, addresses, VLANs and ARP cache
+	// (DCIM row 1.5), forwarded verbatim; the platform files it through the
+	// identity engine.
+	Network *di.NetworkObservation `json:"network,omitempty"`
+
+	// Warnings are the collection warnings the shared collector raised: what
+	// it could not read (a refused endpoint, a missing command, a table cut at
+	// its bound) and what the result lacks because of it. Forwarded verbatim —
+	// they are already sanitized, and the platform sanitizes them again on
+	// receipt. An older control plane ignores the field.
+	Warnings []di.CollectionWarning `json:"warnings,omitempty"`
+
+	// DeviceIdentity is the interrogated device's own identity, sent once
+	// beside the assets rather than only on each of them. Without it a run
+	// that found no crypto assets — a PAN-OS box with no decryption profiles —
+	// told the platform nothing about what the device is. Each asset still
+	// carries its DeviceInfo copy too, for a control plane older than this
+	// field, which ignores it.
+	DeviceIdentity *di.DeviceIdentity `json:"device_identity,omitempty"`
+
+	// Identification is a device_discovery job's answer: the allowlisted
+	// projection of what Registry.Identify read (#1492 slice B). FailureCode is
+	// the typed reason a discovery failed. An interrogation sets neither.
+	Identification *di.IdentificationReport `json:"identification,omitempty"`
+	FailureCode    string                   `json:"failure_code,omitempty"`
+}
+
+// DiscoveredAsset represents an infrastructure asset discovered during interrogation.
+// This model is aligned with the sensor's DiscoveryFinding to provide consistent
+// data quality across both discovery paths (sensor probing and device interrogation).
+type DiscoveredAsset struct {
+	Hostname        string `json:"hostname,omitempty"`
+	IPAddress       string `json:"ip_address,omitempty"`
+	Port            int    `json:"port,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	ProtocolVersion string `json:"protocol_version,omitempty"`
+	AssetType       string `json:"asset_type,omitempty"` // server, appliance, firewall, switch, load_balancer, vpn_gateway
+
+	// Cipher and crypto details
+	CipherSuite          string   `json:"cipher_suite,omitempty"`
+	SupportedCiphers     []string `json:"supported_ciphers,omitempty"`
+	KeySize              int      `json:"key_size,omitempty"`
+	KeyExchangeAlgorithm string   `json:"key_exchange_algorithm,omitempty"`
+	HashAlgorithm        string   `json:"hash_algorithm,omitempty"`
+
+	// TLS details
+	TLSVersions []string `json:"tls_versions,omitempty"` // All supported TLS versions
+
+	// Certificate chain (full, not just leaf)
+	Certificate  *CertificateInfo  `json:"certificate,omitempty"`  // Leaf cert (backward compat)
+	Certificates []CertificateInfo `json:"certificates,omitempty"` // Full chain: leaf + intermediates
+
+	// Certificate validation
+	CertValidationStatus string `json:"cert_validation_status,omitempty"` // valid, self_signed, expired, hostname_mismatch, untrusted_ca
+	CertValidationError  string `json:"cert_validation_error,omitempty"`
+
+	// SSH details (for SSH-capable devices)
+	SSHInfo *SSHInfo `json:"ssh_info,omitempty"`
+
+	// Device hardware/software identity
+	DeviceInfo *DeviceIdentity `json:"device_info,omitempty"`
+
+	// Service identification
+	ServiceHints *ServiceHints `json:"service_hints,omitempty"`
+
+	// Freeform metadata (backward compat)
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// CertificateInfo represents certificate information with full chain support.
+// Aligned with sensor's models.CertificateInfo for consistent processing.
+type CertificateInfo struct {
+	SubjectDN               string    `json:"subject_dn"`
+	IssuerDN                string    `json:"issuer_dn"`
+	SerialNumber            string    `json:"serial_number,omitempty"`
+	NotBefore               time.Time `json:"not_before,omitempty"`
+	NotAfter                time.Time `json:"not_after,omitempty"`
+	Fingerprint             string    `json:"fingerprint,omitempty"`        // SHA256 (backward compat alias)
+	FingerprintSHA256       string    `json:"fingerprint_sha256,omitempty"` // SHA256 hex
+	FingerprintSHA1         string    `json:"fingerprint_sha1,omitempty"`   // SHA1 hex
+	KeyAlgorithm            string    `json:"key_algorithm,omitempty"`      // RSA, ECDSA, Ed25519
+	KeySize                 int       `json:"key_size,omitempty"`           // Bit length
+	SignatureAlgorithm      string    `json:"signature_alg,omitempty"`      // SHA256WithRSA, etc.
+	IsCA                    bool      `json:"is_ca,omitempty"`              // Basic constraint
+	CertificatePEM          string    `json:"certificate_pem,omitempty"`    // Full PEM
+	SubjectAlternativeNames []string  `json:"subject_alternative_names,omitempty"`
+	KeyUsage                []string  `json:"key_usage,omitempty"`
+	ExtendedKeyUsage        []string  `json:"extended_key_usage,omitempty"`
+	ChainOrder              int       `json:"chain_order,omitempty"` // 0 = leaf, 1+ = intermediates
+}
+
+// SSHInfo contains SSH protocol negotiation details collected during interrogation.
+type SSHInfo struct {
+	Banner               string   `json:"banner,omitempty"`
+	KeyTypes             []string `json:"key_types,omitempty"`
+	HostKeyType          string   `json:"host_key_type,omitempty"`
+	HostKeyFingerprint   string   `json:"host_key_fingerprint,omitempty"` // SHA256
+	KexAlgorithm         string   `json:"kex_algorithm,omitempty"`
+	EncryptionAlgC2S     string   `json:"encryption_alg_c2s,omitempty"`
+	EncryptionAlgS2C     string   `json:"encryption_alg_s2c,omitempty"`
+	MACAlgC2S            string   `json:"mac_alg_c2s,omitempty"`
+	MACAlgS2C            string   `json:"mac_alg_s2c,omitempty"`
+	CompressionAlgorithm string   `json:"compression_alg,omitempty"`
+}
+
+// DeviceIdentity captures hardware and software identity of the interrogated device.
+type DeviceIdentity struct {
+	Vendor          string `json:"vendor,omitempty"`           // F5 Networks, Cisco, Fortinet, etc.
+	Model           string `json:"model,omitempty"`            // BIG-IP i5800, ASA 5525-X, etc.
+	FirmwareVersion string `json:"firmware_version,omitempty"` // 15.1.0, 9.16(3), etc.
+	SerialNumber    string `json:"serial_number,omitempty"`
+	OSVersion       string `json:"os_version,omitempty"` // TMOS 15.1, IOS-XE 17.3, etc.
+}
+
+// ServiceHints holds identified service name/version for inventory enrichment.
+type ServiceHints struct {
+	ServiceName          string `json:"service_name,omitempty"`
+	ServiceVersion       string `json:"service_version,omitempty"`
+	Confidence           string `json:"confidence,omitempty"`            // high, medium, low
+	IdentificationMethod string `json:"identification_method,omitempty"` // banner, api, port_heuristic, device_config
+}
+
+// UnmarshalJSON custom unmarshaling for Job to handle credentials decryption
+func (j *Job) UnmarshalJSON(data []byte) error {
+	type Alias Job
+	aux := &struct {
+		*Alias
+		Credentials json.RawMessage `json:"credentials"`
+	}{
+		Alias: (*Alias)(j),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	// Credentials will be decrypted by the API client before unmarshaling
+	if len(aux.Credentials) > 0 {
+		if err := json.Unmarshal(aux.Credentials, &j.Credentials); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

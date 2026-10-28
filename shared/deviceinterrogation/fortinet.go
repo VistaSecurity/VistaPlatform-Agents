@@ -1,0 +1,545 @@
+package deviceinterrogation
+
+import (
+	"context"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
+	"github.com/vistasecurity/vistaplatform-agents/shared/cryptoparse"
+)
+
+// FortinetInterrogator interrogates Fortinet FortiGate appliances over the
+// FortiOS REST API (/api/v2/cmdb/...). It extracts SSL-VPN settings, IPSec
+// phase1 tunnels, and the local certificate store. This is the union of the
+// former device-agent and device-interrogation-service copies — the latter's
+// X.509 certificate parsing (the superset) routed through shared/certificates.
+type FortinetInterrogator struct{}
+
+// SupportedDeviceTypes implements DeviceInterrogator.
+func (*FortinetInterrogator) SupportedDeviceTypes() []string {
+	return []string{"fortinet", "fortigate"}
+}
+
+// Interrogate implements DeviceInterrogator.
+func (*FortinetInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+	username, password := creds.Username, creds.Password
+	if creds.Token != "" {
+		username, password = fortinetTokenUsername, creds.Token
+	}
+	client := newFortinetClient(baseURL, username, password, creds.InsecureSkipVerify)
+	result, err := client.interrogate(ctx)
+	if result != nil {
+		result.setNetworkManagementAddress(device)
+	}
+	return result, err
+}
+
+// fortinetClient handles a single Fortinet device.
+type fortinetClient struct {
+	baseURL    string
+	username   string
+	password   string
+	token      string
+	httpClient *http.Client
+}
+
+// fortinetTokenUsername is the storage marker used by the device form. Device
+// credentials have one encrypted secret column; for FortiOS that secret is an
+// API token, not a login password. Keeping the marker in the non-secret
+// username column lets the platform and remote agent distinguish the two
+// authentication schemes without putting the token in metadata or changing
+// the encrypted-at-rest contract.
+const fortinetTokenUsername = "__api_token__"
+
+func newFortinetClient(baseURL, username, password string, insecureSkipVerify bool) *fortinetClient {
+	c := &fortinetClient{
+		baseURL:    baseURL,
+		username:   username,
+		password:   password,
+		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
+	}
+	if username == fortinetTokenUsername {
+		c.token = password
+		c.username = ""
+		c.password = ""
+	}
+	return c
+}
+
+// fortinetAPIResponse represents a FortiOS REST API response envelope.
+type fortinetAPIResponse struct {
+	Status       string                   `json:"status"`
+	Serial       string                   `json:"serial"`
+	Version      string                   `json:"version"`
+	Build        int                      `json:"build"`
+	Results      []map[string]interface{} `json:"results"`
+	Error        int                      `json:"error"`
+	ErrorMessage string                   `json:"error_message"`
+}
+
+func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, error) {
+	result := &InterrogateResult{
+		Assets:     []CryptoAsset{},
+		DeviceInfo: make(map[string]interface{}),
+		collector:  fortinetCollector,
+	}
+
+	sysInfo, err := c.getSystemInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get system info: %w", err)
+	}
+	result.DeviceInfo = sysInfo
+	result.DeviceIdentity = fortinetIdentity(sysInfo)
+
+	// Ops facts (ADR-0004 D1 item 5) — see fortinet_ops.go. Non-fatal: a
+	// restricted API profile answers some endpoints and 403s the rest.
+	c.fortinetCollectOps(ctx, result, sysInfo)
+
+	if sslVPNs, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ssl/settings"); err != nil {
+		result.warn("/api/v2/cmdb/vpn.ssl/settings", err, "SSL VPN settings not collected")
+	} else {
+		for _, vpn := range sslVPNs {
+			result.Assets = append(result.Assets, c.convertSSLVPNToAsset(vpn))
+		}
+	}
+
+	if tunnels, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ipsec/phase1-interface"); err != nil {
+		result.warn("/api/v2/cmdb/vpn.ipsec/phase1-interface", err, "IPsec tunnels not collected")
+	} else {
+		for _, tunnel := range tunnels {
+			result.Assets = append(result.Assets, c.convertIPSecToAsset(tunnel))
+		}
+		// The same tunnels as objects (DCIM row 4.3), with their child SAs.
+		phase2, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ipsec/phase2-interface")
+		if err != nil {
+			result.warn("/api/v2/cmdb/vpn.ipsec/phase2-interface", err, "IPsec phase-2 proposals not collected")
+		}
+		c.addFortinetTunnels(result, tunnels, phase2)
+	}
+
+	if certs, err := c.getCertificates(ctx); err != nil {
+		result.warn("/api/v2/cmdb/certificate/local", err, "Local certificates not collected")
+	} else {
+		result.DeviceInfo["certificates"] = certs
+	}
+
+	return result, nil
+}
+
+func (c *fortinetClient) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
+	// FortiOS 7.4 serves identity from the monitor API and returns results as a
+	// singleton object. Older releases used the CMDB path and an array. Prefer
+	// the current endpoint, but retain the old path for appliances already
+	// supported by earlier Vista releases.
+	raw, monitorErr := c.apiRequestRaw(ctx, "GET", c.baseURL+"/api/v2/monitor/system/status")
+	if monitorErr == nil {
+		var singleton map[string]interface{}
+		if err := json.Unmarshal(raw.Results, &singleton); err == nil && len(singleton) > 0 {
+			info := projectFortinet(singleton, fortinetSystemStatusFields)
+			if _, ok := info["serial"]; !ok && raw.Serial != "" {
+				info["serial"] = raw.Serial
+			}
+			if _, ok := info["version"]; !ok && raw.Version != "" {
+				info["version"] = raw.Version
+			}
+			return info, nil
+		}
+	}
+
+	// A credential refusal is final: retrying on the legacy path would double
+	// the login attempts against a stale password and risk an account lockout.
+	var statusErr *deviceStatusError
+	if errors.As(monitorErr, &statusErr) && (statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden) {
+		return nil, monitorErr
+	}
+
+	resp, legacyErr := c.apiRequest(ctx, "GET", c.baseURL+"/api/v2/cmdb/system/status")
+	if legacyErr != nil {
+		if monitorErr != nil {
+			return nil, monitorErr
+		}
+		return nil, legacyErr
+	}
+	info := make(map[string]interface{})
+	if len(resp.Results) > 0 {
+		info = projectFortinet(resp.Results[0], fortinetSystemStatusFields)
+	}
+	// FortiOS repeats the serial and the firmware version in the response
+	// ENVELOPE, on every call, whatever the endpoint. Several releases put them
+	// only there — so a collector that reads the results array alone reports no
+	// serial for those devices, and hw.serial is the usual join key to a CMDB.
+	if _, ok := info["serial"]; !ok && resp.Serial != "" {
+		info["serial"] = resp.Serial
+	}
+	if _, ok := info["version"]; !ok && resp.Version != "" {
+		info["version"] = resp.Version
+	}
+	return info, nil
+}
+
+func (c *fortinetClient) getResults(ctx context.Context, path string) ([]map[string]interface{}, error) {
+	resp, err := c.apiRequest(ctx, "GET", c.baseURL+path)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Results == nil {
+		return []map[string]interface{}{}, nil
+	}
+	return resp.Results, nil
+}
+
+// getCertificates retrieves the local certificate store and enriches each
+// entry with parsed X.509 fields (the superset behavior from the former
+// service copy).
+func (c *fortinetClient) getCertificates(ctx context.Context) ([]map[string]interface{}, error) {
+	resp, err := c.apiRequest(ctx, "GET", c.baseURL+"/api/v2/cmdb/certificate/local")
+	if err != nil {
+		return nil, err
+	}
+	if resp.Results == nil {
+		return []map[string]interface{}{}, nil
+	}
+	processed := make([]map[string]interface{}, 0, len(resp.Results))
+	for _, certData := range resp.Results {
+		processed = append(processed, processFortinetCertificate(certData))
+	}
+	return processed, nil
+}
+
+func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*fortinetAPIResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.authorize(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		// The status and FortiOS's numeric error code, never the body: an
+		// error body is the device's free text, and this error is persisted
+		// as a collection warning (see vendorErrorCode).
+		return nil, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, fortinetErrorCode(resp.Body))
+	}
+
+	var apiResp fortinetAPIResponse
+	if err := decodeBoundedJSON(resp.Body, "FortiOS "+url, &apiResp); err != nil {
+		return nil, err
+	}
+	if apiResp.Status != "success" && apiResp.Error != 0 {
+		// The numeric code only; error_message is vendor free text.
+		return nil, fmt.Errorf("API error (FortiOS code %d)", apiResp.Error)
+	}
+	return &apiResp, nil
+}
+
+// authorize applies the one authentication scheme configured for this client.
+// FortiOS 7.4 supports token authentication for the REST API; Basic remains as
+// a compatibility path for older FortiOS releases and existing devices.
+func (c *fortinetClient) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		return
+	}
+	req.SetBasicAuth(c.username, c.password)
+}
+
+func fortinetIdentity(sysInfo map[string]interface{}) *DeviceIdentity {
+	id := &DeviceIdentity{Vendor: fortinetVendor, ClassHint: fortinetClassHint()}
+	if v, ok := sysInfo["version"].(string); ok {
+		id.FirmwareVersion = v
+		id.OSVersion = strings.TrimSpace(fortinetOSName + " " + v)
+	}
+	if v, ok := sysInfo["serial"].(string); ok {
+		id.SerialNumber = v
+	}
+	if v := fortinetString(sysInfo, "model_name", "model"); v != "" {
+		id.Model = v
+	}
+	return id
+}
+
+// FortiOS cmdb objects are configuration, not status — they carry the material
+// that makes the configuration work. `vpn.ipsec/phase1-interface` includes
+// `psksecret` (the tunnel pre-shared key), `certificate/local` includes
+// `private-key`, and system status carries admin session detail. Copying those
+// objects wholesale into asset metadata persisted all of it.
+//
+// Each allowlist below is the set of fields the conversion actually reads, plus
+// the handful that are genuinely useful inventory. Add to one only when
+// something reads the field.
+
+var fortinetSSLVPNFields = []string{
+	"server_hostname", "server_ip", "port",
+	"cipher", "tls_version", "min_tls_version",
+	"server_cert", "status", "ssl_max_proto_ver", "ssl_min_proto_ver",
+	"algorithm",
+}
+
+var fortinetIPSecTunnelFields = []string{
+	"name", "remote-gw", "interface", "ike-version",
+	"proposal", "phase1name", "encryption", "authentication", "dhgrp",
+	"certificate", "ca_cert", "authmethod",
+	"keylife", "nattraversal", "dpd",
+}
+
+// fortinetCertificateFields is the certificate-store projection. Note what is
+// absent: `private-key`, `password`, `csr`, and the enrolment credentials.
+var fortinetCertificateFields = []string{
+	"name", "comments", "range", "source", "state",
+	"cert", "certificate", "cert_pem", "pem", "cert_base64",
+}
+
+var fortinetSystemStatusFields = []string{
+	"version", "serial", "model", "model_name", "hostname",
+	"build", "branch_point", "platform_id", "fortios_version",
+}
+
+// projectFortinet keeps only the allowlisted fields from a FortiOS object.
+func projectFortinet(src map[string]interface{}, fields []string) map[string]interface{} {
+	out := make(map[string]interface{}, len(fields)+4)
+	for _, f := range fields {
+		if v, ok := src[f]; ok && v != nil {
+			out[f] = v
+		}
+	}
+	return out
+}
+
+func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) CryptoAsset {
+	asset := CryptoAsset{
+		Protocol:  "SSL VPN",
+		Port:      443,
+		AssetType: "vpn_gateway",
+		Metadata:  projectFortinet(vpn, fortinetSSLVPNFields),
+	}
+
+	// server_hostname is genuinely meant as a hostname, but it is still
+	// operator-entered FortiOS config and not guaranteed to be a valid DNS
+	// name; guard it the same as every other collector-supplied Hostname so a
+	// malformed value never reaches the identity layer to be rejected there.
+	if hostname, ok := vpn["server_hostname"].(string); ok {
+		if canon := canonicalHostnameOrEmpty(hostname); canon != "" {
+			asset.Hostname = canon
+		}
+	}
+	if ip, ok := vpn["server_ip"].(string); ok {
+		asset.IPAddress = ip
+	}
+	if port, ok := vpn["port"].(float64); ok {
+		asset.Port = int(port)
+	}
+	cipherIsString := false
+	if cipher, ok := vpn["cipher"].(string); ok && cryptoparse.LooksLikeCipherString(cipher) {
+		// A custom cipher list in OpenSSL-style grammar: its `!`/`-` tokens
+		// are exclusions, not ciphers in use (P-05). Report only the suites it
+		// definitely enables, and only the components they all share; the raw
+		// value stays in metadata via the projection above.
+		cipherIsString = true
+		parsed := cryptoparse.ParseCipherString(cipher, cryptoparse.CipherStringVendor)
+		if field := cipherStringSuiteField(cipher, parsed); field != "" {
+			asset.CipherSuite = strPtr(field)
+		}
+		if c := parsed.Components(); c != nil && parsed.Complete {
+			if bits := cryptoparse.SymmetricKeyBits(c.Symmetric); bits > 0 {
+				asset.KeySize = intPtr(bits)
+			}
+			if c.Hash != "" {
+				asset.HashAlgorithm = strPtr(c.Hash)
+			}
+		}
+	} else if ok {
+		asset.CipherSuite = strPtr(cipher)
+		if keySize := fortinetKeySize(cipher); keySize > 0 {
+			asset.KeySize = intPtr(keySize)
+		}
+	}
+	if tlsVersion, ok := vpn["tls_version"].(string); ok {
+		asset.ProtocolVersion = strPtr(tlsVersion)
+	} else if minVersion, ok := vpn["min_tls_version"].(string); ok {
+		asset.ProtocolVersion = strPtr(minVersion)
+	}
+	if asset.CipherSuite != nil && !cipherIsString {
+		if hashAlg := fortinetHashAlg(*asset.CipherSuite); hashAlg != "" {
+			asset.HashAlgorithm = strPtr(hashAlg)
+		}
+	}
+	if certName, ok := vpn["server_cert"].(string); ok && certName != "" {
+		asset.Metadata["certificate_name"] = certName
+		asset.Metadata["certificate_source"] = "ssl_vpn_config"
+	}
+	return asset
+}
+
+func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) CryptoAsset {
+	asset := CryptoAsset{
+		Protocol:  "IPSec",
+		Port:      500,
+		AssetType: "vpn_gateway",
+		Metadata:  projectFortinet(tunnel, fortinetIPSecTunnelFields),
+	}
+
+	// tunnel["name"] is the admin-chosen IPSec phase-1 config name
+	// ("Site-A-VPN"), not a hostname — kept for display via
+	// fortinetIPSecTunnelFields, only promoted to Hostname when DNS-valid.
+	if name, ok := tunnel["name"].(string); ok {
+		if hostname := canonicalHostnameOrEmpty(name); hostname != "" {
+			asset.Hostname = hostname
+		}
+	}
+	if remoteGw, ok := tunnel["remote-gw"].(string); ok {
+		asset.IPAddress = remoteGw
+	}
+	if proposal, ok := tunnel["proposal"].(string); ok {
+		asset.CipherSuite = strPtr(proposal)
+		if keySize := fortinetKeySize(proposal); keySize > 0 {
+			asset.KeySize = intPtr(keySize)
+		}
+		if hashAlg := fortinetHashAlg(proposal); hashAlg != "" {
+			asset.HashAlgorithm = strPtr(hashAlg)
+		}
+	}
+	if phase1Proposal, ok := tunnel["phase1name"].(string); ok {
+		asset.Metadata["phase1_proposal"] = phase1Proposal
+	}
+	if encryption, ok := tunnel["encryption"].(string); ok {
+		asset.Metadata["encryption_algorithm"] = encryption
+		if keySize := fortinetKeySize(encryption); keySize > 0 {
+			asset.KeySize = intPtr(keySize)
+		}
+	}
+	if authentication, ok := tunnel["authentication"].(string); ok {
+		asset.Metadata["authentication_algorithm"] = authentication
+		if hashAlg := fortinetHashAlg(authentication); hashAlg != "" {
+			asset.HashAlgorithm = strPtr(hashAlg)
+		}
+	}
+	// dhgrp is a space-separated list in preference order ("14 5").
+	if dhGroup, ok := tunnel["dhgrp"].(string); ok {
+		applyIKEDHGroups(&asset, dhGroup, "")
+	}
+	if certName, ok := tunnel["certificate"].(string); ok && certName != "" {
+		asset.Metadata["certificate_name"] = certName
+		asset.Metadata["certificate_source"] = "ipsec_config"
+	}
+	if caCert, ok := tunnel["ca_cert"].(string); ok && caCert != "" {
+		asset.Metadata["ca_certificate_name"] = caCert
+	}
+	return asset
+}
+
+// processFortinetCertificate enriches a raw certificate map with parsed X.509
+// fields when a PEM/base64 body is present. Parsing goes through the canonical
+// shared/certificates extractor (#460); only the map projection — the shape
+// FortiOS metadata consumers read — lives here.
+func processFortinetCertificate(raw map[string]interface{}) map[string]interface{} {
+	// Project BEFORE enriching. The FortiOS certificate-store entry carries the
+	// certificate's own private key; the parsed X.509 fields below are derived
+	// from the public certificate and are all we need.
+	pemData := extractFortinetPEM(raw)
+	certData := projectFortinet(raw, fortinetCertificateFields)
+	if pemData == "" {
+		return certData
+	}
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		certData["certificate_pem"] = pemData
+		return certData
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		certData["certificate_pem"] = pemData
+		return certData
+	}
+
+	infos := certificates.ExtractCertificatesFromX509([]*x509.Certificate{cert})
+	if len(infos) == 0 {
+		certData["certificate_pem"] = pemData
+		return certData
+	}
+	info := infos[0]
+
+	certData["certificate_pem"] = pemData
+	certData["fingerprint_sha256"] = info.FingerprintSHA256
+	certData["fingerprint_sha1"] = info.FingerprintSHA1
+	certData["subject_dn"] = info.SubjectDN
+	certData["issuer_dn"] = info.IssuerDN
+	certData["subject_alternative_names"] = info.SubjectAlternativeNames
+	certData["key_usage"] = info.KeyUsage
+	certData["extended_key_usage"] = info.ExtendedKeyUsage
+	certData["public_key_algorithm"] = info.KeyAlgorithm
+	certData["public_key_size"] = info.KeySize
+	certData["signature_algorithm"] = info.SignatureAlg
+	certData["is_ca"] = info.IsCA
+	certData["is_self_signed"] = info.SubjectDN == info.IssuerDN
+	certData["serial_number"] = info.SerialNumber
+	certData["not_before"] = info.NotBefore
+	certData["not_after"] = info.NotAfter
+	return certData
+}
+
+func extractFortinetPEM(certData map[string]interface{}) string {
+	for _, field := range []string{"cert", "certificate", "cert_pem", "pem"} {
+		if v, ok := certData[field].(string); ok && v != "" {
+			return certificates.NormalizePEM(v)
+		}
+	}
+	if certBase64, ok := certData["cert_base64"].(string); ok && certBase64 != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(certBase64); err == nil {
+			return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: decoded}))
+		}
+	}
+	return ""
+}
+
+// fortinetKeySize / fortinetHashAlg are string-heuristic extractors carried
+// over verbatim from both copies. NOTE: these re-derive key size and hash from
+// cipher/proposal strings rather than normalizing against the authoritative
+// `algorithms` table — see issue #443 item 1. That normalization belongs in
+// the platform ingest path (the customer-deployed agent has no DB access), so
+// it is intentionally NOT done here; this preserves the existing union behavior.
+func fortinetKeySize(cipher string) int {
+	if strings.Contains(cipher, "AES256") || strings.Contains(cipher, "256") {
+		return 256
+	}
+	if strings.Contains(cipher, "AES128") || strings.Contains(cipher, "128") {
+		return 128
+	}
+	return 0
+}
+
+func fortinetHashAlg(input string) string {
+	in := strings.ToUpper(input)
+	switch {
+	case strings.Contains(in, "SHA256"), strings.Contains(in, "SHA-256"):
+		return "SHA256"
+	case strings.Contains(in, "SHA384"), strings.Contains(in, "SHA-384"):
+		return "SHA384"
+	case strings.Contains(in, "SHA512"), strings.Contains(in, "SHA-512"):
+		return "SHA512"
+	case strings.Contains(in, "SHA1"), strings.Contains(in, "SHA-1"):
+		return "SHA1"
+	case strings.Contains(in, "MD5"):
+		return "MD5"
+	}
+	return ""
+}
+
+// managementURL and its helpers live in target.go — they are shared by every
+// vendor interrogator, not Fortinet-specific.

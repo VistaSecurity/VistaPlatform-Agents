@@ -65,6 +65,12 @@ jobs:
           package-manager-cache: false
       - name: Workflow trust guard
         run: node scripts/check-workflows.mjs
+      # The generator tests import their dependencies (yaml, fs-extra) from
+      # scripts/package.json; without them they fail with ERR_MODULE_NOT_FOUND.
+      # --ignore-scripts: a pull request's lockfile runs no install hooks.
+      - name: Install the generators' npm dependencies
+        working-directory: scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
       # Every script test: this guard's own, and the generator and import
       # guards that arrive with the extracted agents.
       - name: Script tests
@@ -94,6 +100,15 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libpcap-dev
+      # shared/facts' TestGeneratedFilesMatchYAML runs the generator's --check,
+      # which needs Node and the generators' npm dependencies.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install the generators' npm dependencies
+        working-directory: scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: go.mod declares the pinned Go version
         run: |
           want="go ${GO_VERSION}"
