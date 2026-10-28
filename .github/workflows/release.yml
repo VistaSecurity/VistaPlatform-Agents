@@ -208,7 +208,7 @@ jobs:
       - name: Download the draft back and verify what GitHub holds
         run: |
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/back"
-          diff <(cd "$ASSETS" && ls -A | LC_ALL=C sort) <(cd "$RUNNER_TEMP/back" && ls -A | LC_ALL=C sort)
+          diff <(cd "$ASSETS" && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort) <(cd "$RUNNER_TEMP/back" && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort)
           for f in "$ASSETS"/*; do cmp "$f" "$RUNNER_TEMP/back/$(basename "$f")"; done
           scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG" --dir "$RUNNER_TEMP/back"
       - name: Publish
