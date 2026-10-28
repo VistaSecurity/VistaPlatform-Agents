@@ -1,0 +1,6 @@
+# Every path needs the owner's review; the main-branch ruleset requires it.
+# Workflows and the scripts they run are listed on their own so that a later
+# edit to the catch-all cannot quietly drop them.
+*                       @woody9k
+/.github/               @woody9k
+/scripts/               @woody9k

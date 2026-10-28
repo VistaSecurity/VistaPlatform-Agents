@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+/artifacts/
+*.exe
+*.test
+coverage.out
+coverage.html
+
+# Local environment
+.env
+
+# Tooling
+node_modules/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Deliberately NOT ignored: *.pem, *.key, config.yaml. Test fixtures and the
+# sensor's example configuration use those names, and an ignore rule would
+# make `git add` drop them without a word.

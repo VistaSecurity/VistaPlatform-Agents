@@ -1,0 +1,37 @@
+version: 2
+
+# Weekly, grouped, so a shared transitive bump arrives as one pull request.
+#
+# Go: one module at the repository root. No ignore list for golang.org/x/*:
+# the exact GOTOOLCHAIN pin in pr.yml is what keeps the tree on Go 1.26. A
+# bump that needs a newer toolchain goes red in CI instead of merging.
+#
+# GitHub Actions: every action is pinned to a commit SHA with its version in a
+# comment (scripts/check-workflows.mjs); Dependabot moves both together.
+
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "go"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "ci"

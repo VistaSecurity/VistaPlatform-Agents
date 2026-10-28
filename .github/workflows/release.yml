@@ -1,0 +1,35 @@
+# PLACEHOLDER. The trusted tagged release is work order WO-08 of the agent
+# split programme; until it lands this workflow builds, signs and publishes
+# nothing, and fails if anyone dispatches it. The tag ruleset also refuses
+# every v* tag until then.
+#
+# What WO-08 puts here (MASTER_PLAN 6.2, D11, D19):
+#   - a trigger on protected v<semver> tags only, never a pull request
+#   - both executables and their installers for the approved target matrix,
+#     built on GitHub-hosted runners from the tagged commit
+#   - SHA256SUMS, an SBOM, build provenance and agents-release.json
+#   - keyless signatures from this workflow's identity,
+#     https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/v<semver>
+#   - an immutable GitHub Release per version; release candidates never
+#     advance the stable channel
+#   - the `release` environment, which requires the owner's approval
+#
+# It has no tag trigger yet and no permissions, so a dispatch can do nothing
+# but fail.
+name: Release (placeholder)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  placeholder:
+    name: placeholder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Not implemented
+        run: |
+          echo "::error::release.yml is a placeholder; the signed tagged release is work order WO-08."
+          exit 1

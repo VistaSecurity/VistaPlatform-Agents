@@ -1,0 +1,244 @@
+# PR gate for the Vista Platform agents.
+#
+# Runs on every pull request, from a branch of this repository or from a fork,
+# on GitHub-hosted runners only, with a read-only token and no secrets. Nothing
+# here signs, publishes or reaches a private network: building, signing and
+# publishing release artefacts belongs to nightly.yml and release.yml, which
+# never run on pull_request.
+#
+# The rules this file keeps, which scripts/check-workflows.mjs enforces for
+# every workflow in the repository (the workflow-guard job below):
+#   - runs-on names a GitHub-hosted runner label, never a runner of our own
+#   - every action is pinned to a full commit SHA, its version in a comment
+#   - read-only permissions on pull_request; no secrets; no caches
+#   - no pull_request_target, no workflow_run
+#   - actions/checkout does not leave the token in .git/config
+#
+# A pull request can edit this file and the guard script along with its code,
+# and its version of both is what runs. CODEOWNERS therefore routes .github/
+# and scripts/ to the owner, and the branch ruleset requires that review.
+#
+# The ruleset requires one check, `pr-gate`, which fails unless every other
+# job succeeded, so adding or renaming a job never needs a settings change.
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Go 1.26 only, at the exact patch go.mod declares. An exact GOTOOLCHAIN
+  # hard-fails on a module that needs a newer toolchain instead of silently
+  # downloading one.
+  GO_VERSION: '1.26.10'
+  GOTOOLCHAIN: go1.26.10
+  # The repository is one module with no workspace.
+  GOWORK: 'off'
+  # go.mod and go.sum must already be complete; CI never edits them.
+  GOFLAGS: -mod=readonly
+  NODE_VERSION: '24'
+  # Tool versions, installed with `go install`, so the Go checksum database
+  # verifies the bytes. A bump is a reviewed diff.
+  GOLANGCI_LINT_VERSION: v2.12.2
+  GOVULNCHECK_VERSION: v1.8.0
+  ACTIONLINT_VERSION: v1.7.12
+
+jobs:
+  workflow-guard:
+    name: workflow-guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Workflow trust guard
+        run: node scripts/check-workflows.mjs
+      # Every script test: this guard's own, and the generator and import
+      # guards that arrive with the extracted agents.
+      - name: Script tests
+        run: node --test 'scripts/**/*.test.mjs'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: actionlint
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
+  build-test:
+    name: build-test (linux/amd64, cgo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install libpcap-dev (the sensor links libpcap)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libpcap-dev
+      - name: go.mod declares the pinned Go version
+        run: |
+          want="go ${GO_VERSION}"
+          got="$(grep -E '^go [0-9]' go.mod || true)"
+          if [ "$got" != "$want" ]; then
+            echo "::error file=go.mod::go.mod says '${got}', this gate pins '${want}'"
+            exit 1
+          fi
+      - name: Module verified and tidy
+        run: |
+          go mod verify
+          go mod tidy -diff
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  cross-build:
+    name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }}, cgo off)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The device agent and shared/ are CGO-free on every target; a CGO
+          # import there fails here. The sensor needs CGO (libpcap) everywhere
+          # except Windows, where it loads Npcap at run time, so Windows builds
+          # the whole module.
+          - {goos: linux, goarch: amd64, packages: './cmd/device-agent/... ./internal/deviceagent/... ./shared/...'}
+          - {goos: linux, goarch: arm64, packages: './cmd/device-agent/... ./internal/deviceagent/... ./shared/...'}
+          - {goos: darwin, goarch: amd64, packages: './cmd/device-agent/... ./internal/deviceagent/... ./shared/...'}
+          - {goos: darwin, goarch: arm64, packages: './cmd/device-agent/... ./internal/deviceagent/... ./shared/...'}
+          - {goos: windows, goarch: amd64, packages: './...'}
+          - {goos: windows, goarch: '386', packages: './...'}
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      PACKAGES: ${{ matrix.packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # `go build ./missing/...` only warns and exits 0, so a moved directory
+      # would turn this leg green while building nothing.
+      - name: Every pattern names at least one package
+        run: |
+          for p in $PACKAGES; do
+            if [ -z "$(go list "$p" 2>/dev/null)" ]; then
+              echo "::error::pattern ${p} matches no package for ${GOOS}/${GOARCH}"
+              exit 1
+            fi
+          done
+      # With CGO off, a file that says `import "C"` is silently left out of
+      # the build rather than failing it, so ask with CGO on which of these
+      # packages have cgo files. None may: they ship CGO-free.
+      - name: No cgo files in packages that ship CGO-free
+        run: |
+          # shellcheck disable=SC2086 # PACKAGES is a list of patterns
+          cgo="$(CGO_ENABLED=1 go list -f '{{if .CgoFiles}}{{.ImportPath}}: {{join .CgoFiles " "}}{{end}}' $PACKAGES)"
+          if [ -n "$cgo" ]; then
+            echo "::error::cgo files in packages built with CGO_ENABLED=0 for ${GOOS}/${GOARCH}:"
+            echo "$cgo"
+            exit 1
+          fi
+      - name: Build
+        run: |
+          # shellcheck disable=SC2086 # PACKAGES is a list of patterns
+          go build $PACKAGES
+
+  lint:
+    name: lint (gofmt, golangci-lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install libpcap-dev (golangci-lint type-checks the sensor)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libpcap-dev
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "::error::gofmt would reformat:"
+            echo "$out"
+            exit 1
+          fi
+      - name: Install golangci-lint (pinned)
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: golangci-lint
+        run: golangci-lint run ./...
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Install libpcap-dev
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libpcap-dev
+      - name: Install govulncheck (pinned)
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: govulncheck
+        run: govulncheck ./...
+
+  pr-gate:
+    name: pr-gate
+    if: always()
+    needs: [workflow-guard, build-test, cross-build, lint, govulncheck]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every gate job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'to_entries | length > 0 and all(.value.result == "success")' > /dev/null

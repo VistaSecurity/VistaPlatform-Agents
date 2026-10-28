@@ -1,0 +1,33 @@
+# PLACEHOLDER. The trusted nightly build is work order WO-08 of the agent
+# split programme; until it lands this workflow builds, signs and publishes
+# nothing, and fails if anyone dispatches it.
+#
+# What WO-08 puts here (MASTER_PLAN 6.2, D11, D19):
+#   - a schedule on the protected default branch only, never a pull request
+#   - both executables for the approved target matrix, GitHub-hosted runners
+#   - SHA256SUMS, an SBOM and build provenance for every artefact
+#   - keyless signatures from this workflow's identity,
+#     https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/nightly.yml@refs/heads/main
+#   - an immutable nightly identifier carrying the date and the source SHA,
+#     marked prerelease; a nightly never advances the stable channel
+#   - the `nightly` environment, which requires the owner's approval
+#
+# It has no schedule trigger yet, so it cannot fail every night, and no
+# permissions, so a dispatch can do nothing but fail.
+name: Nightly (placeholder)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  placeholder:
+    name: placeholder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Not implemented
+        run: |
+          echo "::error::nightly.yml is a placeholder; the signed nightly build is work order WO-08."
+          exit 1
