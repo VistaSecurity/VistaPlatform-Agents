@@ -1,0 +1,871 @@
+package deviceinterrogation
+
+import (
+	"context"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
+	"github.com/vistasecurity/vistaplatform-agents/shared/cryptoparse"
+)
+
+// F5Interrogator interrogates F5 BIG-IP appliances over the iControl REST API
+// (/mgmt/tm/...). It authenticates for a token, then reads sys/version, the
+// ltm/virtual VIPs, and the client-ssl / server-ssl profiles, joining each
+// enabled VIP to its SSL profile(s) to emit one TLS crypto asset per
+// VIP×profile pairing. Certificates referenced by a profile's certKeyChain are
+// fetched from sys/crypto/cert (with a certKeyChain-metadata fallback), decoded,
+// and emitted as canonical CertificateInfo entries.
+//
+// This is the union of the former device-interrogation-service and device-agent
+// copies: the service copy's iControl cert fetch/decode (the superset, routed
+// through shared/certificates) plus the agent copy's TLS version-range parsing,
+// key-exchange extraction, SupportedCiphers list, AssetType, and ServiceHints.
+type F5Interrogator struct{}
+
+// SupportedDeviceTypes implements DeviceInterrogator.
+func (*F5Interrogator) SupportedDeviceTypes() []string {
+	return []string{"f5", "f5_bigip", "bigip"}
+}
+
+// Interrogate implements DeviceInterrogator.
+func (*F5Interrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
+	username := creds.Username
+	password := creds.Password
+	// Agent copy allowed credentials to arrive in the Custom map; preserve that.
+	if username == "" {
+		if u, ok := creds.Custom["username"].(string); ok {
+			username = u
+		}
+	}
+	if password == "" {
+		if p, ok := creds.Custom["password"].(string); ok {
+			password = p
+		}
+	}
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("username and password required for F5 device")
+	}
+
+	baseURL, err := managementURL(device)
+	if err != nil {
+		return nil, err
+	}
+
+	client := newF5Client(baseURL, username, password, creds.Token, creds.InsecureSkipVerify)
+	result, err := client.interrogate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result.DeviceIdentity = f5Identity(result.DeviceInfo)
+	result.setNetworkManagementAddress(device)
+	return result, nil
+}
+
+// f5Client handles a single F5 BIG-IP device over iControl REST.
+type f5Client struct {
+	baseURL    string
+	username   string
+	password   string
+	token      string
+	httpClient *http.Client
+}
+
+func newF5Client(baseURL, username, password, token string, insecureSkipVerify bool) *f5Client {
+	return &f5Client{
+		baseURL:    baseURL,
+		username:   username,
+		password:   password,
+		token:      token,
+		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
+	}
+}
+
+// f5APIResponse represents a generic iControl REST collection response.
+type f5APIResponse struct {
+	Kind  string                   `json:"kind"`
+	Items []map[string]interface{} `json:"items"`
+}
+
+// f5VirtualServer represents an F5 virtual server (VIP).
+//
+// Neither this type nor f5SSLProfile keeps the raw iControl item it was built
+// from. Both used to, in a `Metadata` field nothing ever read: a whole vendor
+// object held in memory for the length of an interrogation, one serialisation
+// away from being persisted, and invisible to Sanitize because nothing put it
+// in the result. The named fields below are what the conversion uses.
+type f5VirtualServer struct {
+	Name        string
+	Destination string
+	Port        int
+	Profiles    []map[string]interface{}
+	Source      string
+	Enabled     bool
+	// Pool is the pool this virtual server forwards to, partition-qualified
+	// ("/Common/web-pool"). It is what makes a VIP's dependency on its backends
+	// measurable rather than inferred (ADR-0004 D1 (5)).
+	Pool string
+}
+
+// f5SSLProfile represents an F5 client-ssl or server-ssl profile.
+type f5SSLProfile struct {
+	Name                string
+	Kind                string
+	Ciphers             string
+	CipherGroup         string
+	CipherList          []string
+	CertKeyChain        []map[string]interface{}
+	DefaultProfile      string
+	SecureRenegotiation string
+	TLSVersion          string
+	// Options is the profile's TMOS option list (`tmOptions` in iControl
+	// REST, `options` in tmsh), e.g. "no-tlsv1", "no-tlsv1.1". BIG-IP
+	// expresses which protocol versions a profile refuses here, not in a
+	// version field; nil when the response carried neither key.
+	Options []string
+}
+
+func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) {
+	result := &InterrogateResult{
+		Assets:     []CryptoAsset{},
+		DeviceInfo: make(map[string]interface{}),
+		collector:  f5Collector,
+	}
+
+	if err := c.authenticate(ctx); err != nil {
+		return nil, fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	if sysInfo, err := c.getSystemInfo(ctx); err != nil {
+		result.warn("/mgmt/tm/sys/version", err, "Software version not collected")
+	} else {
+		result.DeviceInfo = sysInfo
+	}
+
+	virtualServers, err := c.getVirtualServers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get virtual servers: %w", err)
+	}
+
+	// Ops facts and the virtual-server → pool-member dependencies
+	// (ADR-0004 D1 item 5, ADR-0003 D2) — see f5_ops.go. Non-fatal, and driven
+	// from the virtual servers already fetched rather than a second read.
+	c.f5CollectOps(ctx, result, virtualServers)
+
+	clientSSLProfiles, err := c.getClientSSLProfiles(ctx)
+	if err != nil {
+		result.warn("/mgmt/tm/ltm/profile/client-ssl", err, "Client SSL profiles not collected; virtual servers lack their TLS settings")
+	}
+	serverSSLProfiles, err := c.getServerSSLProfiles(ctx)
+	if err != nil {
+		result.warn("/mgmt/tm/ltm/profile/server-ssl", err, "Server SSL profiles not collected")
+	}
+
+	// Build a profile lookup keyed by profile name.
+	profileMap := make(map[string]*f5SSLProfile)
+	for i := range clientSSLProfiles {
+		p := &clientSSLProfiles[i]
+		profileMap[p.Name] = p
+	}
+	for i := range serverSSLProfiles {
+		p := &serverSSLProfiles[i]
+		profileMap[p.Name] = p
+	}
+
+	for _, vs := range virtualServers {
+		if !vs.Enabled {
+			continue
+		}
+
+		// `destination` is partition-qualified ("/Common/198.51.100.10:443"),
+		// and IPv6 VIPs use "." as the port separator. f5ParseDestination
+		// returns an address the downstream inet-typed columns accept, or ""
+		// when the destination names something that is not an IP literal. The
+		// VIP is emitted either way — an empty IPAddress still classifies by
+		// hostname downstream, whereas a partition-prefixed one failed the
+		// ::inet cast and lost the finding entirely.
+		ipAddress, port := f5ParseDestination(vs.Destination)
+		if port <= 0 {
+			port = 443
+		}
+
+		for _, profileRef := range vs.Profiles {
+			profileName, ok := profileRef["name"].(string)
+			if !ok {
+				continue
+			}
+			profile, found := profileMap[profileName]
+			if !found {
+				continue
+			}
+			result.Assets = append(result.Assets, c.convertVIPToAsset(ctx, vs, profile, ipAddress, port))
+		}
+	}
+
+	return result, nil
+}
+
+// authenticate obtains an iControl REST token via the tmos login provider.
+// On failure to extract a token it falls back to basic auth for later requests.
+func (c *f5Client) authenticate(ctx context.Context) error {
+	url := fmt.Sprintf("%s/mgmt/shared/authn/login", c.baseURL)
+
+	authReq := map[string]string{
+		"username":          c.username,
+		"password":          c.password,
+		"loginProviderName": "tmos",
+	}
+	reqBody, err := json.Marshal(authReq)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(reqBody)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(c.username, c.password)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("authentication request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return httpStatusError("authentication", resp.StatusCode)
+	}
+
+	var authResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		return fmt.Errorf("failed to decode auth response: %w", err)
+	}
+	if tokenObj, ok := authResp["token"].(map[string]interface{}); ok {
+		if token, ok := tokenObj["token"].(string); ok {
+			c.token = token
+			return nil
+		}
+	}
+	// No token in the response — subsequent requests use basic auth.
+	return nil
+}
+
+func (c *f5Client) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
+	url := fmt.Sprintf("%s/mgmt/tm/sys/version", c.baseURL)
+	resp, err := c.apiRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	info := make(map[string]interface{})
+	if len(resp.Items) > 0 {
+		// Projected, not copied. This was the one system call in the package
+		// that put a vendor object into DeviceInfo whole; the response is
+		// benign on every release we have seen, which is not the same thing as
+		// a guarantee about the next one.
+		info = projectF5(resp.Items[0], f5SystemVersionFields)
+	}
+	return info, nil
+}
+
+// projectF5 keeps only the allowlisted fields of an iControl object. The typed
+// structs in f5_ops.go are the stronger form of this; it exists for the two
+// places that still read a map.
+func projectF5(src map[string]interface{}, fields []string) map[string]interface{} {
+	out := make(map[string]interface{}, len(fields))
+	for _, field := range fields {
+		if v, ok := src[field]; ok && v != nil {
+			out[field] = v
+		}
+	}
+	return out
+}
+
+func (c *f5Client) getVirtualServers(ctx context.Context) ([]f5VirtualServer, error) {
+	url := fmt.Sprintf("%s/mgmt/tm/ltm/virtual", c.baseURL)
+	resp, err := c.apiRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var virtualServers []f5VirtualServer
+	for _, item := range resp.Items {
+		vs := f5VirtualServer{
+			Name:        f5GetString(item, "name"),
+			Destination: f5GetString(item, "destination"),
+			Source:      f5GetString(item, "source"),
+			Enabled:     f5GetBool(item, "enabled"),
+			Pool:        f5GetString(item, "pool"),
+		}
+		if _, port := f5ParseDestination(vs.Destination); port > 0 {
+			vs.Port = port
+		}
+		if profiles, ok := item["profiles"].([]interface{}); ok {
+			for _, p := range profiles {
+				if profileMap, ok := p.(map[string]interface{}); ok {
+					vs.Profiles = append(vs.Profiles, profileMap)
+				}
+			}
+		}
+		virtualServers = append(virtualServers, vs)
+	}
+	return virtualServers, nil
+}
+
+func (c *f5Client) getClientSSLProfiles(ctx context.Context) ([]f5SSLProfile, error) {
+	return c.getSSLProfiles(ctx, "/mgmt/tm/ltm/profile/client-ssl", true)
+}
+
+func (c *f5Client) getServerSSLProfiles(ctx context.Context) ([]f5SSLProfile, error) {
+	return c.getSSLProfiles(ctx, "/mgmt/tm/ltm/profile/server-ssl", false)
+}
+
+// getSSLProfiles reads an SSL-profile collection. certKeyChain extraction only
+// applies to client-ssl profiles (server-ssl profiles don't carry one).
+func (c *f5Client) getSSLProfiles(ctx context.Context, path string, withCertKeyChain bool) ([]f5SSLProfile, error) {
+	url := c.baseURL + path
+	resp, err := c.apiRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var profiles []f5SSLProfile
+	for _, item := range resp.Items {
+		profile := f5SSLProfile{
+			Name:    f5GetString(item, "name"),
+			Kind:    f5GetString(item, "kind"),
+			Ciphers: f5GetString(item, "ciphers"),
+			// A profile can take its ciphers from a cipher group (TMOS 13+)
+			// instead of the string; `ciphers` is then "none".
+			CipherGroup: f5GetString(item, "cipherGroup"),
+		}
+		if cipherList, ok := item["cipherList"].([]interface{}); ok {
+			for _, cl := range cipherList {
+				if cipher, ok := cl.(string); ok {
+					profile.CipherList = append(profile.CipherList, cipher)
+				}
+			}
+		}
+		if withCertKeyChain {
+			if certKeyChains, ok := item["certKeyChain"].([]interface{}); ok {
+				for _, ckc := range certKeyChains {
+					if ckcMap, ok := ckc.(map[string]interface{}); ok {
+						profile.CertKeyChain = append(profile.CertKeyChain, ckcMap)
+					}
+				}
+			}
+		}
+		profile.DefaultProfile = f5GetString(item, "defaultsFrom")
+		profile.SecureRenegotiation = f5GetString(item, "secureRenegotiation")
+		profile.TLSVersion = f5GetString(item, "tlsVersion")
+		profile.Options = f5ProfileOptions(item)
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
+}
+
+// apiRequest makes an authenticated iControl REST request (token if present,
+// otherwise basic auth).
+func (c *f5Client) apiRequest(ctx context.Context, method, url string, body io.Reader) (*f5APIResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("X-F5-Auth-Token", c.token)
+	} else {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		// The status and iControl's numeric code, never the body: a 401 body
+		// has been seen to echo the auth token back (see vendorErrorCode).
+		return nil, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, f5ErrorCode(resp.Body))
+	}
+
+	var apiResp f5APIResponse
+	if err := decodeBoundedJSON(resp.Body, "F5 "+url, &apiResp); err != nil {
+		return nil, err
+	}
+	return &apiResp, nil
+}
+
+// convertVIPToAsset builds one CryptoAsset from a VIP joined to one SSL profile.
+func (c *f5Client) convertVIPToAsset(ctx context.Context, vs f5VirtualServer, profile *f5SSLProfile, ipAddress string, port int) CryptoAsset {
+	// vs.Name is the BIG-IP object name (often partition-qualified, e.g.
+	// "/Common/my-vip") — kept for display under "virtual_server" below, only
+	// promoted to Hostname when it is DNS-valid.
+	asset := CryptoAsset{
+		Hostname:  canonicalHostnameOrEmpty(vs.Name),
+		IPAddress: ipAddress,
+		Port:      port,
+		Protocol:  "TLS",
+		AssetType: "load_balancer",
+		Metadata: map[string]interface{}{
+			"virtual_server": vs.Name,
+			"destination":    vs.Destination,
+			"source":         vs.Source,
+			"profile_name":   profile.Name,
+			"profile_kind":   profile.Kind,
+		},
+		ServiceHints: &ServiceHints{
+			ServiceName:          "F5 BIG-IP Virtual Server",
+			Confidence:           "high",
+			IdentificationMethod: "device_config",
+		},
+	}
+
+	// TLS version(s). Only what the profile states (#2014 W1.2, principle 2:
+	// unknown stays unknown). This used to fill "TLS 1.2" whenever
+	// `tlsVersion` was empty — which BIG-IP leaves it on real client-ssl
+	// profiles, because versions are switched off through `options` — and
+	// that invented version was linked, scored and shown as measured, hiding
+	// a profile that still accepts TLS 1.0.
+	switch {
+	case profile.TLSVersion != "":
+		asset.TLSVersions = f5ParseTLSVersionRange(profile.TLSVersion)
+		asset.ProtocolVersion = strPtr(profile.TLSVersion)
+	case profile.Options != nil:
+		disabled, remaining := f5OptionsVersions(profile.Options)
+		if len(disabled) > 0 {
+			asset.Metadata["tls_versions_disabled"] = disabled
+		}
+		// Options only say what is refused. The version is known only when
+		// they leave a single one; otherwise it depends on the cipher string
+		// and the TMOS release, and stays unmeasured.
+		if len(remaining) == 1 {
+			asset.ProtocolVersion = strPtr(remaining[0])
+			asset.TLSVersions = remaining
+		}
+	}
+
+	// Cipher suites. A profile's `ciphers` is an OpenSSL-style cipher STRING
+	// ("ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5", "DEFAULT"), not a suite list:
+	// storing it whole as the cipher suite and substring-matching it reported
+	// every EXCLUDED algorithm as in use (P-05). Only suites the string
+	// definitely enables are reported; the string itself, what it excludes and
+	// what could not be expanded (DEFAULT, F5 keywords, cipher groups) stay in
+	// metadata. Nothing resolved means the fields stay unset — unknown.
+	var components *cryptoparse.CipherSuiteComponents
+	if len(profile.CipherList) > 0 {
+		asset.SupportedCiphers = profile.CipherList
+		asset.CipherSuite = strPtr(profile.CipherList[0])
+		components, _ = cryptoparse.ParseCipherSuite(profile.CipherList[0])
+	} else if profile.Ciphers != "" && !strings.EqualFold(profile.Ciphers, "none") {
+		components = f5ApplyCipherString(&asset, profile.Ciphers)
+	}
+	if profile.CipherGroup != "" && !strings.EqualFold(profile.CipherGroup, "none") {
+		asset.Metadata["cipher_group"] = profile.CipherGroup
+	}
+	if components != nil {
+		if bits := cryptoparse.SymmetricKeyBits(components.Symmetric); bits > 0 {
+			asset.KeySize = intPtr(bits)
+		}
+		if components.Hash != "" {
+			asset.HashAlgorithm = strPtr(components.Hash)
+		}
+		if components.KeyExchange != "" {
+			asset.KeyExchangeAlg = strPtr(components.KeyExchange)
+		}
+	}
+
+	// Certificates: fetch + decode each certKeyChain entry into canonical
+	// CertificateInfo, preserving chain order. Emit into the canonical
+	// Certificates (full chain) + Certificate (leaf) fields (issue #443 #3).
+	if len(profile.CertKeyChain) > 0 {
+		asset.Metadata["cert_key_chain"] = profile.CertKeyChain
+		certs := c.extractCertificatesFromKeyChain(ctx, profile.CertKeyChain)
+		if len(certs) > 0 {
+			asset.Certificates = certs
+			leaf := certs[0]
+			asset.Certificate = &leaf
+		}
+	}
+
+	if profile.SecureRenegotiation != "" {
+		asset.Metadata["secure_renegotiation"] = profile.SecureRenegotiation
+	}
+
+	return asset
+}
+
+// extractCertificatesFromKeyChain resolves each certKeyChain entry to a parsed
+// certificate: first via the sys/crypto/cert API, then falling back to a PEM
+// embedded in the certKeyChain metadata. Chain order is preserved by position
+// (0 = leaf, then intermediates).
+func (c *f5Client) extractCertificatesFromKeyChain(ctx context.Context, certKeyChains []map[string]interface{}) []CertificateInfo {
+	var result []CertificateInfo
+	for i, ckc := range certKeyChains {
+		var info *CertificateInfo
+
+		if certName := f5GetString(ckc, "cert"); certName != "" {
+			if fetched, err := c.getCertificate(ctx, certName); err == nil {
+				info = fetched
+			}
+		}
+		if info == nil {
+			if certPEM := f5ExtractCertificatePEMFromKeyChain(ckc); certPEM != "" {
+				info = f5ProcessCertificatePEM(certPEM)
+			}
+		}
+		if info == nil {
+			continue
+		}
+		info.ChainOrder = i
+		result = append(result, *info)
+	}
+	return result
+}
+
+// getCertificate fetches a certificate from F5 by name and decodes it.
+func (c *f5Client) getCertificate(ctx context.Context, certName string) (*CertificateInfo, error) {
+	url := fmt.Sprintf("%s/mgmt/tm/sys/crypto/cert/%s", c.baseURL, f5CertName(certName))
+	resp, err := c.apiRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Items) == 0 {
+		return nil, fmt.Errorf("certificate not found")
+	}
+	certPEM := f5ExtractCertificatePEMFromF5Response(resp.Items[0])
+	if certPEM == "" {
+		return nil, fmt.Errorf("no certificate PEM found")
+	}
+	info := f5ProcessCertificatePEM(certPEM)
+	if info == nil {
+		return nil, fmt.Errorf("failed to process certificate PEM")
+	}
+	return info, nil
+}
+
+// f5ExtractCertificatePEMFromF5Response pulls a PEM/base64 body out of a
+// sys/crypto/cert API response item.
+func f5ExtractCertificatePEMFromF5Response(certData map[string]interface{}) string {
+	for _, field := range []string{"certificate", "cert", "certPem", "certificatePem"} {
+		if v, ok := certData[field].(string); ok && v != "" {
+			return f5NormalizePEM(v)
+		}
+	}
+	if certBase64, ok := certData["certificateBase64"].(string); ok && certBase64 != "" {
+		return f5DecodeBase64Certificate(certBase64)
+	}
+	return ""
+}
+
+// f5ExtractCertificatePEMFromKeyChain pulls a PEM body out of a certKeyChain
+// metadata entry.
+func f5ExtractCertificatePEMFromKeyChain(ckc map[string]interface{}) string {
+	for _, field := range []string{"certificate", "cert"} {
+		if v, ok := ckc[field].(string); ok && v != "" {
+			return f5NormalizePEM(v)
+		}
+	}
+	return ""
+}
+
+// f5ProcessCertificatePEM parses a PEM certificate and extracts all canonical
+// fields through shared/certificates. On parse failure it returns a minimal
+// CertificateInfo carrying just the PEM so the data isn't lost.
+func f5ProcessCertificatePEM(pemData string) *CertificateInfo {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return &CertificateInfo{CertificatePEM: pemData}
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return &CertificateInfo{CertificatePEM: pemData}
+	}
+	infos := certificates.ExtractCertificatesFromX509([]*x509.Certificate{cert})
+	if len(infos) == 0 {
+		return &CertificateInfo{CertificatePEM: pemData}
+	}
+	return &infos[0]
+}
+
+// f5NormalizePEM normalizes a certificate string to standard PEM via the
+// canonical shared/certificates helper (#460 — this and the Fortinet copy
+// were identical forks).
+func f5NormalizePEM(pemData string) string {
+	return certificates.NormalizePEM(pemData)
+}
+
+// f5DecodeBase64Certificate decodes a base64-encoded DER certificate to PEM.
+func f5DecodeBase64Certificate(base64Data string) string {
+	decoded, err := base64.StdEncoding.DecodeString(base64Data)
+	if err != nil {
+		return ""
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: decoded}))
+}
+
+// f5Identity extracts structured device identity from F5 sys/version info.
+func f5Identity(sysInfo map[string]interface{}) *DeviceIdentity {
+	id := &DeviceIdentity{Vendor: f5Vendor, ClassHint: f5ClassHint()}
+	if version, ok := sysInfo["Version"].(string); ok {
+		id.FirmwareVersion = version
+		id.OSVersion = f5OSName + " " + version
+	}
+	if product, ok := sysInfo["Product"].(string); ok {
+		id.Model = product
+	}
+	if platform, ok := sysInfo["Platform"].(string); ok && id.Model == "" {
+		id.Model = platform
+	}
+	return id
+}
+
+// f5TLSVersionRangeRE matches F5-style TLS 1.x ranges, e.g. "1.0-1.3", "TLSv1.2 - 1.3".
+var f5TLSVersionRangeRE = regexp.MustCompile(`(?i)1\.(\d)\s*[-–—]\s*1\.(\d)`)
+
+// f5ParseTLSVersionRange parses an F5 TLS version string into a supported-version
+// list. F5 may report ranges like "1.0-1.3" or a single version.
+func f5ParseTLSVersionRange(tlsVersion string) []string {
+	upper := strings.ToUpper(tlsVersion)
+	var versions []string
+
+	if m := f5TLSVersionRangeRE.FindStringSubmatch(tlsVersion); len(m) == 3 {
+		lo, errLo := strconv.Atoi(m[1])
+		hi, errHi := strconv.Atoi(m[2])
+		if errLo == nil && errHi == nil {
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			for minor := hi; minor >= lo; minor-- {
+				if label := f5TLSMinorVersionLabel(minor); label != "" {
+					versions = append(versions, label)
+				}
+			}
+		}
+	}
+
+	if len(versions) == 0 {
+		if strings.Contains(upper, "1.3") {
+			versions = append(versions, "TLS 1.3")
+		}
+		if strings.Contains(upper, "1.2") {
+			versions = append(versions, "TLS 1.2")
+		}
+		if strings.Contains(upper, "1.1") {
+			versions = append(versions, "TLS 1.1")
+		}
+		if strings.Contains(upper, "1.0") {
+			versions = append(versions, "TLS 1.0")
+		}
+	}
+
+	// Nothing recognisable is nothing measured: no "safe default" (W1.2).
+	return versions
+}
+
+// f5ProtocolVersionOptions maps each BIG-IP option that switches a protocol
+// version off to the version it refuses, in the order versions are listed.
+// SSL 3.0 is included because a profile without `no-sslv3` may still accept
+// it through a custom cipher string; leaving it out would let three `no-tls*`
+// options read as a single remaining version that is not, in fact, alone.
+var f5ProtocolVersionOptions = []struct{ option, version string }{
+	{"no-sslv3", "SSL 3.0"},
+	{"no-tlsv1", "TLS 1.0"},
+	{"no-tlsv1.1", "TLS 1.1"},
+	{"no-tlsv1.2", "TLS 1.2"},
+	{"no-tlsv1.3", "TLS 1.3"},
+}
+
+// f5OptionsVersions reads a profile's option list into the protocol versions
+// it switches off and the ones it leaves possible.
+func f5OptionsVersions(options []string) (disabled, remaining []string) {
+	set := make(map[string]bool, len(options))
+	for _, o := range options {
+		set[strings.ToLower(strings.TrimSpace(o))] = true
+	}
+	for _, v := range f5ProtocolVersionOptions {
+		if set[v.option] {
+			disabled = append(disabled, v.version)
+		} else {
+			remaining = append(remaining, v.version)
+		}
+	}
+	return disabled, remaining
+}
+
+// f5ProfileOptions reads a profile's option list. iControl REST names it
+// `tmOptions` (and tmsh `options`); it arrives as a JSON array, or as tmsh's
+// "{ a b }" string from some releases. "none" is an empty list. nil means
+// neither key was present, so nothing about versions was stated.
+func f5ProfileOptions(item map[string]interface{}) []string {
+	for _, key := range []string{"tmOptions", "options"} {
+		raw, ok := item[key]
+		if !ok || raw == nil {
+			continue
+		}
+		var out []string
+		switch v := raw.(type) {
+		case []interface{}:
+			for _, o := range v {
+				if s, ok := o.(string); ok {
+					out = append(out, strings.Fields(s)...)
+				}
+			}
+		case string:
+			out = strings.Fields(strings.Trim(strings.TrimSpace(v), "{}"))
+		default:
+			continue
+		}
+		cleaned := make([]string, 0, len(out))
+		for _, o := range out {
+			if o != "" && !strings.EqualFold(o, "none") {
+				cleaned = append(cleaned, o)
+			}
+		}
+		return cleaned
+	}
+	return nil
+}
+
+func f5TLSMinorVersionLabel(minor int) string {
+	switch minor {
+	case 0:
+		return "TLS 1.0"
+	case 1:
+		return "TLS 1.1"
+	case 2:
+		return "TLS 1.2"
+	case 3:
+		return "TLS 1.3"
+	default:
+		return ""
+	}
+}
+
+// f5ApplyCipherString evaluates a profile's cipher string and records what it
+// provably enables (see cipherStringSuiteField for what CipherSuite carries).
+// SupportedCiphers is only the suites the string definitely enables. It
+// returns the components every enabled suite shares, and only when the string
+// resolved completely: a hash or key exchange read off part of an unknown set
+// would be a guess about the rest.
+func f5ApplyCipherString(asset *CryptoAsset, cipherString string) *cryptoparse.CipherSuiteComponents {
+	parsed := cryptoparse.ParseCipherString(cipherString, cryptoparse.CipherStringVendor)
+	recordCipherString(asset.Metadata, cipherString, parsed)
+	if names := parsed.EnabledNames(); len(names) > 0 {
+		asset.SupportedCiphers = names
+	}
+	if field := cipherStringSuiteField(cipherString, parsed); field != "" {
+		asset.CipherSuite = strPtr(field)
+	}
+	if !parsed.Complete {
+		return nil
+	}
+	return parsed.Components()
+}
+
+// f5CertName encodes an F5 object name for use in an iControl REST URL path.
+// F5 represents the partition folder separator "/" as "~", e.g.
+// "/Common/default.crt" → "~Common~default.crt". Without this, every
+// getCertificate fetch 404s and silently falls back to certKeyChain metadata.
+func f5CertName(name string) string {
+	return strings.ReplaceAll(name, "/", "~")
+}
+
+func f5GetString(m map[string]interface{}, key string) string {
+	if val, ok := m[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
+func f5GetBool(m map[string]interface{}, key string) bool {
+	if val, ok := m[key]; ok {
+		if b, ok := val.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+// f5ParseDestination splits an iControl `destination` into an IP literal and a
+// port. iControl returns the destination partition-qualified, and separates the
+// port differently per address family:
+//
+//	/Common/198.51.100.10:443        → 198.51.100.10, 443
+//	/Common/Prod/198.51.100.10:8443  → 198.51.100.10, 8443
+//	/Common/2001:db8::1.443          → 2001:db8::1,   443   (IPv6 separates with ".")
+//	/Common/198.51.100.10%2:443      → 198.51.100.10, 443   (route domain)
+//
+// The IP is returned empty when the remainder is not an IP literal — a
+// destination may also name a virtual-address object. Callers must never place
+// a non-IP value in CryptoAsset.IPAddress: it flows into
+// discovery_findings.resolved_ip and the $6::inet bind in writeSensorDiscovery,
+// both inet-typed, and a failed cast discards the row. Leaving the partition
+// prefix on ("/Common/198.51.100.10") is exactly that failure, and is how an F5
+// interrogation of a hundred VIPs reported success while producing zero
+// findings and zero inventory assets.
+//
+// A zero port means "not stated" (or a wildcard "any" VIP); the caller applies
+// its own default.
+func f5ParseDestination(destination string) (string, int) {
+	s := strings.TrimSpace(destination)
+	if s == "" {
+		return "", 0
+	}
+
+	// Strip the partition (and any folder) prefix: "/Common/x" → "x".
+	if strings.HasPrefix(s, "/") {
+		s = s[strings.LastIndex(s, "/")+1:]
+	}
+
+	// Split the port off. F5 writes "address:port" for IPv4 and "address.port"
+	// for IPv6, where ":" is already part of the address.
+	addr, portStr := s, ""
+	if strings.Count(s, ":") > 1 {
+		if idx := strings.LastIndex(s, "."); idx >= 0 {
+			addr, portStr = s[:idx], s[idx+1:]
+		}
+	} else if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		addr, portStr = s[:idx], s[idx+1:]
+	}
+
+	port := 0
+	if portStr != "" {
+		// A wildcard VIP reports port "any", which is simply not a number.
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p <= 65535 {
+			port = p
+		}
+	}
+
+	if ip := f5StripRouteDomain(addr); net.ParseIP(ip) != nil {
+		return ip, port
+	}
+	// The split mis-cut a portless address whose own text contains dots (an
+	// IPv4-mapped IPv6 literal). Retry against the whole remainder.
+	if ip := f5StripRouteDomain(s); net.ParseIP(ip) != nil {
+		return ip, 0
+	}
+	return "", port
+}
+
+// f5StripRouteDomain removes the "%<id>" route-domain suffix F5 appends to an
+// address. It is F5 bookkeeping, not part of the address, and Postgres rejects
+// it on an inet cast.
+func f5StripRouteDomain(addr string) string {
+	if idx := strings.IndexByte(addr, '%'); idx >= 0 {
+		return addr[:idx]
+	}
+	return addr
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "protocol_type",
+  "description": "The protocols the platform stores a crypto configuration under, in their canonical spelling. Exported from the platform; do not edit.",
+  "type": "string",
+  "enum": [
+    "TLS",
+    "SSH",
+    "IPSec",
+    "VPN",
+    "Database",
+    "API",
+    "SMB",
+    "Kerberos",
+    "QUIC",
+    "PPTP",
+    "IKE",
+    "Modbus",
+    "DNP3",
+    "MMS",
+    "ICCP",
+    "IEC62351",
+    "OPC_UA",
+    "EtherNet_IP",
+    "BACnet",
+    "BACnet_SC",
+    "HART_IP",
+    "S7"
+  ]
+}

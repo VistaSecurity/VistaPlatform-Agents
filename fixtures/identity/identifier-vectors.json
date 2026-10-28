@@ -1,0 +1,135 @@
+{
+  "description": "Identifier kinds and normalisation vectors: an identifier the agents emit must normalise the way the platform stores it. Generated from the platform's identity rules; do not edit.",
+  "kinds": [
+    "declaration_id",
+    "agent_id",
+    "sensor_id",
+    "cloud_resource_id",
+    "serial_number",
+    "cmdb_sys_id",
+    "ssh_host_key_fingerprint",
+    "mac_address",
+    "fqdn",
+    "hostname",
+    "ip_address",
+    "name"
+  ],
+  "accepted": [
+    {
+      "kind": "mac_address",
+      "value": "00:11:22:33:44:55",
+      "canonical": "00:11:22:33:44:55"
+    },
+    {
+      "kind": "mac_address",
+      "value": "00-11-22-33-44-55",
+      "canonical": "00:11:22:33:44:55"
+    },
+    {
+      "kind": "mac_address",
+      "value": "0011.2233.4455",
+      "canonical": "00:11:22:33:44:55"
+    },
+    {
+      "kind": "mac_address",
+      "value": "AA:BB:CC:DD:EE:FF",
+      "canonical": "aa:bb:cc:dd:ee:ff"
+    },
+    {
+      "kind": "mac_address",
+      "value": "A0:B2:C3:D4:E5:F6",
+      "canonical": "a0:b2:c3:d4:e5:f6"
+    },
+    {
+      "kind": "fqdn",
+      "value": "core-sw-1.example.net",
+      "canonical": "core-sw-1.example.net"
+    },
+    {
+      "kind": "fqdn",
+      "value": "CORE-SW-1.Example.NET.",
+      "canonical": "core-sw-1.example.net"
+    },
+    {
+      "kind": "hostname",
+      "value": "core-sw-1",
+      "canonical": "core-sw-1"
+    },
+    {
+      "kind": "hostname",
+      "value": "Core-SW-1",
+      "canonical": "core-sw-1"
+    },
+    {
+      "kind": "ip_address",
+      "value": "192.0.2.10",
+      "canonical": "192.0.2.10"
+    },
+    {
+      "kind": "ip_address",
+      "value": "::ffff:192.0.2.10",
+      "canonical": "192.0.2.10"
+    },
+    {
+      "kind": "ip_address",
+      "value": "2001:db8::1",
+      "canonical": "2001:db8::1"
+    },
+    {
+      "kind": "serial_number",
+      "value": "FGT60D4615007833",
+      "canonical": "FGT60D4615007833"
+    },
+    {
+      "kind": "agent_id",
+      "value": "6f1b6a1e-2f3c-4d5e-8a7b-9c0d1e2f3a4b",
+      "canonical": "6f1b6a1e-2f3c-4d5e-8a7b-9c0d1e2f3a4b"
+    }
+  ],
+  "rejected": [
+    {
+      "kind": "mac_address",
+      "value": "00:00:00:00:00:00"
+    },
+    {
+      "kind": "mac_address",
+      "value": "ff:ff:ff:ff:ff:ff"
+    },
+    {
+      "kind": "mac_address",
+      "value": ""
+    },
+    {
+      "kind": "mac_address",
+      "value": "not-a-mac"
+    },
+    {
+      "kind": "fqdn",
+      "value": "localhost"
+    },
+    {
+      "kind": "hostname",
+      "value": "AC LR"
+    },
+    {
+      "kind": "hostname",
+      "value": "office switch #2"
+    },
+    {
+      "kind": "ip_address",
+      "value": "0.0.0.0"
+    },
+    {
+      "kind": "ip_address",
+      "value": "N/A"
+    },
+    {
+      "kind": "agent_id",
+      "value": ""
+    },
+    {
+      "kind": "agent_id",
+      "value": "   "
+    }
+  ]
+}

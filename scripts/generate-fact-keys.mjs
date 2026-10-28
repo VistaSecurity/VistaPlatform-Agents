@@ -1,0 +1,234 @@
+#!/usr/bin/env node
+// Generates the fact-key registry from standards/fact-keys.yaml
+// Output:
+//   shared/facts/keys_gen.go
+// Run via `make generate`; `make generate-check` (--check) fails on drift.
+import fs from 'fs-extra';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import yaml from 'yaml';
+import { goConst, goConstBlock, goStr, fail as sharedFail } from './lib/registry-codegen.mjs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const root = path.resolve(__dirname, '..');
+
+const TYPES = ['string', 'integer', 'boolean', 'date', 'array', 'object'];
+const SCALARS = ['string', 'integer', 'boolean', 'date'];
+const STATUSES = ['active', 'retired'];
+
+const fail = (msg) => sharedFail('fact-keys', msg);
+
+function validate(registry) {
+  const producers = registry.producers || [];
+  if (!producers.length) fail('no producers defined');
+  const producerSet = new Set(producers);
+  if (producerSet.size !== producers.length) fail('duplicate entry in producers');
+  for (const p of producers) {
+    if (!/^[a-z0-9-]+$/.test(p)) fail(`bad producer: ${p}`);
+  }
+
+  const keys = registry.keys || [];
+  if (!keys.length) fail('no keys defined');
+
+  const seen = new Set();
+  const usedProducers = new Set();
+
+  for (const k of keys) {
+    // Namespaced: at least one dot, lower snake within each segment.
+    if (!k.key || !/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(k.key)) {
+      fail(`bad key (must be namespaced, e.g. os.name): ${k.key}`);
+    }
+    if (seen.has(k.key)) fail(`duplicate key: ${k.key}`);
+    seen.add(k.key);
+
+    if (!TYPES.includes(k.type)) fail(`${k.key}: invalid type: ${k.type}`);
+    if (!k.description) fail(`${k.key}: description required`);
+    // Explicit, never defaulted: a new key must not inherit "not sensitive"
+    // by omission.
+    if (typeof k.redact !== 'boolean') fail(`${k.key}: redact must be an explicit bool`);
+
+    // Lifecycle. A retired key stays registered (older collectors still send
+    // it; stored rows keep their meaning) and must say what replaced it.
+    if (k.status !== undefined && !STATUSES.includes(k.status)) {
+      fail(`${k.key}: status must be one of ${STATUSES.join(', ')} (got ${JSON.stringify(k.status)})`);
+    }
+    if (k.status === 'retired' && !(typeof k.retired_reason === 'string' && k.retired_reason.trim())) {
+      fail(`${k.key}: a retired key needs a retired_reason saying what replaced it`);
+    }
+    if (k.status !== 'retired' && k.retired_reason !== undefined) {
+      fail(`${k.key}: retired_reason is only valid with status: retired`);
+    }
+
+    if (!Array.isArray(k.producers) || !k.producers.length) {
+      fail(`${k.key}: at least one producer required`);
+    }
+    const seenHere = new Set();
+    for (const p of k.producers) {
+      if (!producerSet.has(p)) fail(`${k.key}: producer '${p}' is not in the registry producers list`);
+      if (seenHere.has(p)) fail(`${k.key}: duplicate producer '${p}'`);
+      seenHere.add(p);
+      usedProducers.add(p);
+    }
+
+    const isContainer = k.type === 'array' || k.type === 'object';
+    if (isContainer && !k.item_schema) {
+      fail(`${k.key}: ${k.type} keys need an item_schema so a consumer knows the shape`);
+    }
+    if (!isContainer && k.item_schema) {
+      fail(`${k.key}: item_schema is only valid on array and object keys`);
+    }
+    if (k.enum !== undefined) {
+      if (!SCALARS.includes(k.type)) fail(`${k.key}: enum is only valid on scalar keys`);
+      if (!Array.isArray(k.enum) || k.enum.length < 2) fail(`${k.key}: enum needs at least two values`);
+      if (new Set(k.enum).size !== k.enum.length) fail(`${k.key}: duplicate enum value`);
+      for (const v of k.enum) {
+        if (typeof v !== 'string') fail(`${k.key}: enum values must be strings`);
+      }
+      if (k.type !== 'string') fail(`${k.key}: enum is only supported on string keys`);
+    }
+    if (isContainer) {
+      // Catch a hand-written fragment that is not JSON-serialisable before it
+      // reaches the generated file, where it would fail as a Go syntax error.
+      try {
+        JSON.stringify(k.item_schema);
+      } catch {
+        fail(`${k.key}: item_schema is not JSON-serialisable`);
+      }
+    }
+  }
+
+  // A producer nothing writes is either a typo or a vocabulary entry that
+  // outlived its collector; either way the registry is lying about who writes
+  // what.
+  for (const p of producers) {
+    if (!usedProducers.has(p)) fail(`producer '${p}' is declared but writes no key`);
+  }
+}
+
+function renderGo(registry) {
+  const keys = registry.keys;
+
+  const keyConsts = goConstBlock(
+    keys.map((k) => ({ name: `Key${goConst(k.key)}`, value: goStr(k.key) })));
+
+  const producerConsts = goConstBlock(
+    registry.producers.map((p) => ({ name: `Producer${goConst(p)}`, value: goStr(p) })));
+
+  const entries = keys
+    .map((k) => {
+      const producers = k.producers.map((p) => goStr(p)).join(', ');
+      const enumLiteral = k.enum ? `[]string{${k.enum.map((v) => goStr(v)).join(', ')}}` : 'nil';
+      const schema = k.item_schema ? goStr(JSON.stringify(k.item_schema)) : goStr('');
+      // One line per value so gofmt's alignment block is never broken by a
+      // nested literal; names padded to the longest (Description).
+      return `	{
+		Key:         ${goStr(k.key)},
+		Type:        ${goStr(k.type)},
+		Enum:        ${enumLiteral},
+		ItemSchema:  ${schema},
+		Producers:   []string{${producers}},
+		Redact:      ${k.redact},
+		Description: ${goStr(k.description.trim())},${k.status === 'retired' ? `
+		Retired:     ${goStr(k.retired_reason.trim())},` : ''}
+	},`;
+    })
+    .join('\n');
+
+  return `// Code generated by scripts/generate-fact-keys.mjs from
+// standards/fact-keys.yaml. DO NOT EDIT — edit the YAML and run
+// \`make generate\`.
+
+// Package facts is the generated registry of fact keys that may appear in
+// asset_facts.key (asset-inventory ADR-0005 D2). A fact is a statement with
+// provenance, never a judgement — judgements are findings. There is no CHECK
+// constraint on the key column, so ValidateValue (validate.go) is the
+// enforcement point.
+package facts
+
+// Fact-key constants.
+const (
+${keyConsts}
+)
+
+// Producer keys — the collectors permitted to write facts.
+const (
+${producerConsts}
+)
+
+// Key is one registered fact key.
+type Key struct {
+	Key  string \`json:"key"\`
+	Type string \`json:"type"\`
+	// Enum, when set, is the closed set of permitted values for a scalar key.
+	Enum []string \`json:"enum,omitempty"\`
+	// ItemSchema is a JSON-schema fragment describing an array element (for
+	// array keys) or the value itself (for object keys), stored as raw JSON.
+	// It is vocabulary and documentation; ValidateValue type-checks the
+	// container, and the producer owns the shape of what it puts inside.
+	ItemSchema  string   \`json:"item_schema,omitempty"\`
+	Producers   []string \`json:"producers"\`
+	Redact      bool     \`json:"redact"\`
+	Description string   \`json:"description"\`
+	// Retired, when set, says the key is retired and what replaced it
+	// (standards/fact-keys.yaml \`status: retired\`). The key stays
+	// registered — older collectors still send it and stored rows keep their
+	// meaning — but the platform no longer stores it from the producers the
+	// reason names.
+	Retired string \`json:"retired,omitempty"\`
+}
+
+// All is the generated fact-key list, in YAML order.
+var All = []Key{
+${entries}
+}
+
+// Producers is the collector vocabulary, in YAML order.
+var Producers = []string{${registry.producers.map((p) => goStr(p)).join(', ')}}
+
+var byKey = func() map[string]Key {
+	m := make(map[string]Key, len(All))
+	for _, k := range All {
+		m[k.Key] = k
+	}
+	return m
+}()
+
+// Get returns the registry entry for a fact key. The second result is false
+// when the key is not registered.
+func Get(key string) (Key, bool) {
+	k, ok := byKey[key]
+	return k, ok
+}
+`;
+}
+
+async function main() {
+  const checkOnly = process.argv.includes('--check');
+  const registryPath = path.resolve(root, 'standards', 'fact-keys.yaml');
+  const outputs = [];
+
+  const registry = yaml.parse(await fs.readFile(registryPath, 'utf8'));
+  validate(registry);
+
+  outputs.push([path.resolve(root, 'shared', 'facts', 'keys_gen.go'), renderGo(registry)]);
+
+  if (checkOnly) {
+    for (const [outPath, want] of outputs) {
+      const current = (await fs.pathExists(outPath)) ? await fs.readFile(outPath, 'utf8') : '';
+      if (current !== want) {
+        fail(`${path.relative(root, outPath)} is out of date — run \`make generate\``);
+      }
+    }
+    console.log(`fact-keys check OK (${registry.keys.length} keys)`);
+    return;
+  }
+
+  for (const [outPath, content] of outputs) {
+    await fs.ensureDir(path.dirname(outPath));
+    await fs.writeFile(outPath, content);
+    console.log(`Generated: ${path.relative(root, outPath)} (${registry.keys.length} fact keys)`);
+  }
+}
+
+main().catch((e) => fail(e.message));

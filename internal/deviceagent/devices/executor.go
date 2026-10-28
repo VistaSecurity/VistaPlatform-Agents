@@ -1,0 +1,515 @@
+package devices
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/audit"
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
+	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
+)
+
+// resultSubmitter is the slice of the API client the executor uses: it posts a
+// finished job result and nothing else.
+//
+// Named as an interface so the executor's dispatch can be driven in a test
+// without a platform to POST to. The alternative — testing each execute*
+// function directly — would leave the `switch job.Type` itself unexercised, and
+// the switch is the wiring that decides whether a job type is handled at all.
+type resultSubmitter interface {
+	SubmitResult(result *models.JobResult) error
+}
+
+// DefaultJobTimeout bounds one job when the payload does not carry its own
+// timeout_seconds. A device that never answers (a TCP black hole, an SSH stall)
+// would otherwise hold the agent's single poll loop forever while the heartbeat
+// goroutine kept reporting it healthy.
+const DefaultJobTimeout = 5 * time.Minute
+
+// maxJobTimeout caps a payload-supplied timeout_seconds so a bad value cannot
+// switch the bound off.
+const maxJobTimeout = time.Hour
+
+// JobExecutor executes device interrogation jobs. The vendor/protocol logic
+// lives in the shared deviceinterrogation core; this executor is a thin agent
+// wrapper that decrypts credentials locally, runs the shared interrogator, and
+// POSTs the results home. The in-cluster platform agent wraps the same core.
+type JobExecutor struct {
+	submitter   resultSubmitter
+	config      *config.Config
+	registry    *di.Registry
+	auditLogger *audit.AuditLogger
+	// jobTimeout is the per-job bound when the job names none; zero means
+	// DefaultJobTimeout.
+	jobTimeout time.Duration
+}
+
+// NewJobExecutor creates a new job executor.
+func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecutor {
+	return &JobExecutor{
+		submitter: retryingSubmitter(apiClient),
+		config:    cfg,
+		registry:  di.NewRegistry(),
+	}
+}
+
+// NewJobExecutorWithAudit creates a new job executor with audit logging enabled.
+func NewJobExecutorWithAudit(apiClient *api.OutboundClient, cfg *config.Config, auditLogger *audit.AuditLogger) *JobExecutor {
+	return &JobExecutor{
+		submitter:   retryingSubmitter(apiClient),
+		config:      cfg,
+		registry:    di.NewRegistry(),
+		auditLogger: auditLogger,
+	}
+}
+
+// retryingSubmitter wraps the client so a network blip on a finished job's
+// result is retried rather than dropping the interrogation.
+func retryingSubmitter(c *api.OutboundClient) resultSubmitter {
+	return &api.RetryingSubmitter{Client: c, Policy: api.DefaultSubmitRetry}
+}
+
+// timeoutFor resolves the bound for one job: the payload's timeout_seconds when
+// it carries a positive one (capped at maxJobTimeout), else the executor's
+// default.
+func (e *JobExecutor) timeoutFor(job *models.Job) time.Duration {
+	if secs, ok := job.Parameters["timeout_seconds"].(float64); ok && secs > 0 {
+		d := time.Duration(secs * float64(time.Second))
+		if d > maxJobTimeout || d <= 0 {
+			d = maxJobTimeout
+		}
+		return d
+	}
+	if e.jobTimeout > 0 {
+		return e.jobTimeout
+	}
+	return DefaultJobTimeout
+}
+
+// Execute executes a job under a per-job timeout and converts a panic in any
+// handler into a failed job result, so one bad interrogator cannot take the
+// agent down. ctx is the agent's lifetime; the job's own deadline is derived
+// from it.
+func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) {
+	timeout := e.timeoutFor(job)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			// The panic text can embed whatever the handler was holding, so it
+			// goes through the same redaction as any other failure.
+			err = e.submitFailure(job, fmt.Sprintf("Job panicked: %v", r))
+		}
+	}()
+
+	switch job.Type {
+	case "device_interrogation":
+		return e.executeDeviceInterrogation(ctx, job, timeout)
+	case "cloud_discovery":
+		return e.executeCloudDiscovery(job)
+	case JobTypeHostInventory:
+		return e.executeHostInventory(ctx, job)
+	case di.JobTypeDeviceDiscovery:
+		return e.executeDeviceDiscovery(ctx, job)
+	default:
+		return fmt.Errorf("unknown job type: %s", job.Type)
+	}
+}
+
+// ReportError reports a job that could not be run or reported, redacted and
+// with the same retries as a result.
+func (e *JobExecutor) ReportError(jobID uuid.UUID, msg string) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       jobID,
+		Success:     false,
+		Error:       redact.Text(msg),
+		CompletedAt: time.Now(),
+	})
+}
+
+// interrogateBounded runs the interrogation so that ctx's deadline frees the
+// caller even when the interrogator ignores its context (an SSH stall inside a
+// library call). The abandoned goroutine finishes or leaks on its own; what
+// matters is that the poll loop is not held. A panic is carried back to the
+// caller so Execute's recovery sees it.
+func interrogateBounded(ctx context.Context, i di.DeviceInterrogator, device di.DeviceInfo, creds di.Credentials) (*di.InterrogateResult, error) {
+	type outcome struct {
+		res      *di.InterrogateResult
+		err      error
+		panicVal any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		defer func() {
+			if r := recover(); r != nil {
+				o = outcome{panicVal: r}
+			}
+			done <- o
+		}()
+		o.res, o.err = i.Interrogate(ctx, device, creds)
+	}()
+	select {
+	case o := <-done:
+		if o.panicVal != nil {
+			panic(o.panicVal)
+		}
+		return o.res, o.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// executeDeviceInterrogation executes a device interrogation job.
+func (e *JobExecutor) executeDeviceInterrogation(ctx context.Context, job *models.Job, timeout time.Duration) error {
+	// Decrypt credentials (in-memory only)
+	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.CredentialSecrets()...)
+	if err != nil {
+		return e.submitFailure(job, fmt.Sprintf("Failed to decrypt credentials: %v", err))
+	}
+	defer security.ClearCredentials(decryptedCreds)
+
+	// Extract device type from parameters or job
+	deviceType := job.DeviceType
+	if deviceType == "" {
+		if dt, ok := job.Parameters["device_type"].(string); ok {
+			deviceType = dt
+		}
+	}
+	if deviceType == "" {
+		return e.submitFailure(job, "device_type not specified in job")
+	}
+
+	interrogator, err := e.registry.Get(deviceType)
+	if err != nil {
+		return e.submitFailure(job, fmt.Sprintf("Unsupported device type: %s", deviceType))
+	}
+
+	device := buildDeviceInfo(deviceType, job.Parameters)
+	creds := buildCredentials(decryptedCreds, job.Parameters)
+
+	result, err := interrogateBounded(ctx, interrogator, device, creds)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s", timeout)
+		}
+		if e.auditLogger != nil {
+			e.auditLogger.LogInterrogation(job.ID.String(), device.IPAddress, deviceType, "failure",
+				map[string]interface{}{"job_type": job.Type}, err)
+		}
+		return e.submitFailure(job, fmt.Sprintf("Device interrogation failed: %v", err))
+	}
+
+	if e.auditLogger != nil {
+		e.auditLogger.LogInterrogation(job.ID.String(), device.IPAddress, deviceType, "success",
+			map[string]interface{}{"job_type": job.Type, "asset_count": len(result.Assets)}, nil)
+	}
+
+	assets := convertInterrogateResult(result)
+
+	jobResult := &models.JobResult{
+		JobID:   job.ID,
+		Success: true,
+		Assets:  assets,
+		// The ops observations the collectors produced alongside the crypto
+		// assets. They are forwarded verbatim rather than folded into Metadata:
+		// the platform validates each fact key against the registry and each
+		// edge type against the canonical ten, and a blob it has to go fishing
+		// in cannot be validated at all.
+		Facts:         result.Facts,
+		Relationships: result.Relationships,
+		// The device's own interfaces, addresses, VLANs and ARP cache (DCIM
+		// row 1.5): the platform files them through the identity engine.
+		Network: result.Network,
+		// What the collector could not read. Without this the platform's job
+		// detail says nothing about an endpoint the account was refused — the
+		// in-cluster executor reports the same list for the same device.
+		Warnings: result.Warnings,
+		// The device's identity, once, whether or not any asset was found —
+		// the in-cluster executor hands the same value to the same sink.
+		DeviceIdentity: result.DeviceIdentity,
+		Metadata:       result.DeviceInfo,
+		CompletedAt:    time.Now(),
+	}
+
+	security.ClearCredentials(decryptedCreds)
+	return e.submitter.SubmitResult(jobResult)
+}
+
+// deviceDiscoveryTimeout bounds one identification, end to end. The platform's
+// synchronous Add device allows 20 s with an operator waiting; an agent run has
+// no one waiting, so a slow appliance login gets a little longer.
+const deviceDiscoveryTimeout = 45 * time.Second
+
+// executeDeviceDiscovery identifies a device the platform cannot reach, for an
+// Add device routed to this agent (#1492 slice B).
+//
+// It is the platform's identification, not a copy of it: Registry.Identify is
+// the shared step Add device and Test connection run in-cluster, over each
+// vendor collector's own guarded client, sanitized by the Registry. What goes
+// home is the IdentificationReport allowlist or a typed failure code — never
+// the vendor's answer, and never free text a device wrote.
+func (e *JobExecutor) executeDeviceDiscovery(ctx context.Context, job *models.Job) error {
+	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.CredentialSecrets()...)
+	if err != nil {
+		return e.submitDiscoveryFailure(job, di.IdentifyFailed)
+	}
+	defer security.ClearCredentials(decryptedCreds)
+
+	deviceType := job.DeviceType
+	if deviceType == "" {
+		deviceType, _ = job.Parameters["device_type"].(string)
+	}
+	device := buildDeviceInfo(deviceType, job.Parameters)
+	if device.ManagementURL == "" {
+		device.ManagementURL, _ = decryptedCreds["management_url"].(string)
+	}
+	creds := buildCredentials(decryptedCreds, job.Parameters)
+
+	ctx, cancel := context.WithTimeout(ctx, deviceDiscoveryTimeout)
+	defer cancel()
+	identification, err := e.registry.Identify(ctx, device, creds)
+	security.ClearCredentials(decryptedCreds)
+	if err != nil {
+		code := di.ClassifyIdentifyError(err).Code
+		if e.auditLogger != nil {
+			e.auditLogger.LogInterrogation(job.ID.String(), di.DisplayAddress(device.ManagementURL), deviceType, "failure",
+				map[string]interface{}{"job_type": job.Type, "failure_code": string(code)}, nil)
+		}
+		return e.submitDiscoveryFailure(job, code)
+	}
+	if e.auditLogger != nil {
+		e.auditLogger.LogInterrogation(job.ID.String(), di.DisplayAddress(device.ManagementURL), deviceType, "success",
+			map[string]interface{}{"job_type": job.Type}, nil)
+	}
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:          job.ID,
+		Success:        true,
+		Identification: di.NewIdentificationReport(identification),
+		CompletedAt:    time.Now(),
+	})
+}
+
+// submitDiscoveryFailure reports a failed identification by its typed code
+// alone. The cause can carry whatever the device answered, so it stays here.
+func (e *JobExecutor) submitDiscoveryFailure(job *models.Job, code di.IdentifyFailure) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       job.ID,
+		Success:     false,
+		Error:       string(code),
+		FailureCode: string(code),
+		CompletedAt: time.Now(),
+	})
+}
+
+// executeCloudDiscovery executes a cloud discovery job.
+func (e *JobExecutor) executeCloudDiscovery(job *models.Job) error {
+	return e.submitFailure(job, "Cloud discovery should be handled by platform service")
+}
+
+// submitFailure builds and submits a failed JobResult.
+//
+// errMsg is redacted on the way out. It is assembled from whatever failed — a
+// vendor error, a Go *url.Error that prints the entire request URL — and the
+// platform stores it as device_jobs.error_message, which GET /jobs serves to the
+// tenant verbatim while the results beside it are projected field by field.
+// [redact.Text] is the value-shaped half of the same redactor: PEM private keys
+// by shape, credential query parameters by parameter name.
+//
+// The platform redacts this field again at its own write (see
+// redactedErrorMessage in device-interrogation-service). Both, deliberately:
+// this agent runs on the customer's host, so scrubbing here keeps the secret off
+// the wire, and scrubbing there covers every other producer of the field.
+func (e *JobExecutor) submitFailure(job *models.Job, errMsg string) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       job.ID,
+		Success:     false,
+		Error:       redact.Text(errMsg),
+		CompletedAt: time.Now(),
+	})
+}
+
+// buildDeviceInfo maps job parameters onto the shared core's DeviceInfo.
+func buildDeviceInfo(deviceType string, params map[string]interface{}) di.DeviceInfo {
+	device := di.DeviceInfo{DeviceType: deviceType, Metadata: params}
+	if v, ok := params["hostname"].(string); ok {
+		device.Hostname = v
+	}
+	if v, ok := params["ip_address"].(string); ok {
+		device.IPAddress = v
+	}
+	if v, ok := params["management_url"].(string); ok {
+		device.ManagementURL = v
+	}
+	if v, ok := params["site_id"].(string); ok {
+		device.SiteID = v
+	}
+	// The host key the platform pinned for this device on a previous contact.
+	// Absent means first contact: the interrogation captures what it is shown
+	// and the platform pins it from the result. Present means a different key
+	// aborts the handshake before the password is offered (shared/sshtrust).
+	if v, ok := params["ssh_host_key_fingerprint"].(string); ok {
+		device.SSHHostKeyFingerprint = v
+	}
+	// SSH/management port — accept "ssh_port" or "port", encoded as a JSON number.
+	if p, ok := params["ssh_port"].(float64); ok {
+		device.Port = int(p)
+	} else if p, ok := params["port"].(float64); ok {
+		device.Port = int(p)
+	}
+	return device
+}
+
+// buildCredentials maps decrypted credentials + parameters onto the shared
+// core's Credentials.
+func buildCredentials(decrypted map[string]interface{}, params map[string]interface{}) di.Credentials {
+	creds := di.Credentials{Custom: decrypted}
+	if v, ok := decrypted["username"].(string); ok {
+		creds.Username = v
+	}
+	if v, ok := decrypted["password"].(string); ok {
+		creds.Password = v
+	}
+	if v, ok := decrypted["api_key"].(string); ok {
+		creds.APIKey = v
+	}
+	if v, ok := decrypted["token"].(string); ok {
+		creds.Token = v
+	}
+	// Per-device opt-out of TLS/host-key verification (self-signed appliance
+	// mgmt endpoints, devices not yet in known_hosts). Defaults to false.
+	if v, ok := params["insecure_skip_verify"].(bool); ok {
+		creds.InsecureSkipVerify = v
+	} else if v, ok := decrypted["insecure_skip_verify"].(bool); ok {
+		creds.InsecureSkipVerify = v
+	}
+	return creds
+}
+
+// convertInterrogateResult maps the shared core's result onto the agent's
+// enriched models.DiscoveredAsset format for platform submission.
+func convertInterrogateResult(ir *di.InterrogateResult) []models.DiscoveredAsset {
+	assets := make([]models.DiscoveredAsset, 0, len(ir.Assets))
+	for i := range ir.Assets {
+		ca := &ir.Assets[i]
+		asset := models.DiscoveredAsset{
+			Hostname:             ca.Hostname,
+			IPAddress:            ca.IPAddress,
+			Port:                 ca.Port,
+			Protocol:             ca.Protocol,
+			AssetType:            ca.AssetType,
+			SupportedCiphers:     ca.SupportedCiphers,
+			TLSVersions:          ca.TLSVersions,
+			CertValidationStatus: ca.CertValidationStatus,
+			CertValidationError:  ca.CertValidationError,
+			Metadata:             ca.Metadata,
+		}
+		if ca.ProtocolVersion != nil {
+			asset.ProtocolVersion = *ca.ProtocolVersion
+		}
+		if ca.CipherSuite != nil {
+			asset.CipherSuite = *ca.CipherSuite
+		}
+		if ca.KeySize != nil {
+			asset.KeySize = *ca.KeySize
+		}
+		if ca.KeyExchangeAlg != nil {
+			asset.KeyExchangeAlgorithm = *ca.KeyExchangeAlg
+		}
+		if ca.HashAlgorithm != nil {
+			asset.HashAlgorithm = *ca.HashAlgorithm
+		}
+		if ca.SSHInfo != nil {
+			asset.SSHInfo = convertSSHInfo(ca.SSHInfo)
+		}
+		if ca.ServiceHints != nil {
+			asset.ServiceHints = convertServiceHints(ca.ServiceHints)
+		}
+		if ca.Certificate != nil {
+			asset.Certificate = convertCertInfo(ca.Certificate)
+		}
+		if len(ca.Certificates) > 0 {
+			certs := make([]models.CertificateInfo, 0, len(ca.Certificates))
+			for j := range ca.Certificates {
+				certs = append(certs, *convertCertInfo(&ca.Certificates[j]))
+			}
+			asset.Certificates = certs
+		}
+		if ir.DeviceIdentity != nil {
+			asset.DeviceInfo = convertDeviceIdentity(ir.DeviceIdentity)
+		}
+		assets = append(assets, asset)
+	}
+	return assets
+}
+
+func convertSSHInfo(s *di.SSHInfo) *models.SSHInfo {
+	return &models.SSHInfo{
+		Banner:               s.Banner,
+		KeyTypes:             s.KeyTypes,
+		HostKeyType:          s.HostKeyType,
+		HostKeyFingerprint:   s.HostKeyFingerprint,
+		KexAlgorithm:         s.KexAlgorithm,
+		EncryptionAlgC2S:     s.EncryptionAlgC2S,
+		EncryptionAlgS2C:     s.EncryptionAlgS2C,
+		MACAlgC2S:            s.MACAlgC2S,
+		MACAlgS2C:            s.MACAlgS2C,
+		CompressionAlgorithm: s.CompressionAlgorithm,
+	}
+}
+
+func convertServiceHints(s *di.ServiceHints) *models.ServiceHints {
+	return &models.ServiceHints{
+		ServiceName:          s.ServiceName,
+		ServiceVersion:       s.ServiceVersion,
+		Confidence:           s.Confidence,
+		IdentificationMethod: s.IdentificationMethod,
+	}
+}
+
+func convertDeviceIdentity(d *di.DeviceIdentity) *models.DeviceIdentity {
+	return &models.DeviceIdentity{
+		Vendor:          d.Vendor,
+		Model:           d.Model,
+		FirmwareVersion: d.FirmwareVersion,
+		SerialNumber:    d.SerialNumber,
+		OSVersion:       d.OSVersion,
+	}
+}
+
+// convertCertInfo maps the shared/certificates.CertificateInfo (the core's
+// canonical cert shape) onto the agent's models.CertificateInfo.
+func convertCertInfo(c *di.CertificateInfo) *models.CertificateInfo {
+	serial := c.SerialNumber
+	if serial == "" {
+		serial = c.Serial
+	}
+	return &models.CertificateInfo{
+		SubjectDN:               c.SubjectDN,
+		IssuerDN:                c.IssuerDN,
+		SerialNumber:            serial,
+		NotBefore:               c.NotBefore,
+		NotAfter:                c.NotAfter,
+		Fingerprint:             c.FingerprintSHA256,
+		FingerprintSHA256:       c.FingerprintSHA256,
+		FingerprintSHA1:         c.FingerprintSHA1,
+		KeyAlgorithm:            c.KeyAlgorithm,
+		KeySize:                 c.KeySize,
+		SignatureAlgorithm:      c.SignatureAlg,
+		IsCA:                    c.IsCA,
+		CertificatePEM:          c.CertificatePEM,
+		SubjectAlternativeNames: c.SubjectAlternativeNames,
+		KeyUsage:                c.KeyUsage,
+		ExtendedKeyUsage:        c.ExtendedKeyUsage,
+		ChainOrder:              c.ChainOrder,
+	}
+}
