@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/rotation.request.schema.json",
+  "title": "Certificate rotation request",
+  "description": "POST .../sensors/{id}/certificates/rotate or .../agents/{id}/certificates/rotate, over the current client certificate, when it has under 30 days left. A CSR for a fresh key; the agent secret is always replaced.",
+  "type": "object",
+  "required": [
+    "csr"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "csr": {
+      "type": "string",
+      "pattern": "^-----BEGIN CERTIFICATE REQUEST-----"
+    }
+  }
+}

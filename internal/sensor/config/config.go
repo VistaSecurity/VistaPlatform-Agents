@@ -108,11 +108,11 @@ func (c *Config) SetEnrolledAgentSecret(secret string, version int) {
 }
 
 // RotateAgentSecret records the secret issued at a certificate rotation. The
-// one it replaces — or, for a sensor that held none, its registration key —
-// stays valid for agentcreds.PreviousSecretWindow.
+// one it replaces stays valid for agentcreds.PreviousSecretWindow; the
+// registration key is never kept as one (managed protocol 1, D-P7).
 func (c *Config) RotateAgentSecret(secret string, version int, now time.Time) {
 	agentSecretsMu.Lock()
-	c.agentSecrets = c.agentSecrets.Rotate(secret, version, c.RegistrationKey, now)
+	c.agentSecrets = c.agentSecrets.Rotate(secret, version, "", now)
 	agentSecretsMu.Unlock()
 }
 

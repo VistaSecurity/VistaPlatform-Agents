@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/envelope.json",
+  "title": "Discovery (the discovery metadata envelope)",
+  "description": "One sensor discovery (CryptoDiscovery) as it is sent. The platform stores it as an envelope: the top-level version, cipher_suite, key_size, source_ip and discovery_method are promoted and raw_metadata is nested beneath them; on merge an outer key wins unless it is empty (null, \"\", 0, [], {}), and false is not empty (CLAUDE.md 'The discovery metadata envelope'). Certificates ride only as raw_metadata.certificates in the single certificate format. Unchanged by protocol 1.",
+  "type": "object",
+  "required": [
+    "id",
+    "sensor_id",
+    "timestamp",
+    "source_ip",
+    "dest_ip",
+    "port",
+    "protocol",
+    "version",
+    "cipher_suite",
+    "key_size",
+    "discovery_method",
+    "confidence",
+    "raw_metadata",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "sensor_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_ip": {
+      "type": "string"
+    },
+    "dest_ip": {
+      "type": "string"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "protocol": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "cipher_suite": {
+      "type": "string"
+    },
+    "key_size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "discovery_method": {
+      "type": "string",
+      "description": "passive, active, ... (v1 keeps the awkward name)."
+    },
+    "discovery_type": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "number"
+    },
+    "raw_metadata": {
+      "$ref": "#/$defs/raw_metadata"
+    },
+    "service_hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service_name": {
+          "type": "string"
+        },
+        "service_version": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        },
+        "identification_method": {
+          "type": "string"
+        },
+        "raw_banner": {
+          "type": "string"
+        },
+        "ja3s_fingerprint": {
+          "type": "string"
+        },
+        "ja3_fingerprint": {
+          "type": "string"
+        },
+        "ja4_fingerprint": {
+          "type": "string"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "raw_metadata": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true,
+      "description": "The collector's own metadata. Open by design; the keys the platform reads are typed here.",
+      "properties": {
+        "certificates": {
+          "type": "array",
+          "items": {
+            "$ref": "certificate.json"
+          }
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "type": "string"
+        },
+        "cert_has_sct": {
+          "type": "boolean"
+        },
+        "cert_known_bad_ca": {
+          "type": "boolean"
+        },
+        "cert_is_ev": {
+          "type": "boolean"
+        },
+        "ocsp_status": {
+          "type": "string"
+        },
+        "ocsp_detail": {
+          "type": "string"
+        },
+        "mtls_detected": {
+          "type": "boolean"
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "private_key"
+            ]
+          },
+          {
+            "required": [
+              "private_key_pem"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

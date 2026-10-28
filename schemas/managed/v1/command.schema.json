@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/command.schema.json",
+  "title": "Sensor command",
+  "description": "A command riding a sensor's heartbeat answer. A type the sensor does not run (or whose capability was not negotiated) is acknowledged as refused with response_data.code unsupported_command; the type is therefore an open string. A discovery_job's payload is a scan plan, the only job shape of protocol 1 (D-P5).",
+  "type": "object",
+  "required": [
+    "id",
+    "type"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "priority": {
+      "type": "integer"
+    },
+    "payload": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "requires_ack": {
+      "type": "boolean"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "if": {
+    "properties": {
+      "type": {
+        "const": "discovery_job"
+      }
+    }
+  },
+  "then": {
+    "properties": {
+      "payload": {
+        "$ref": "discovery-job.payload.schema.json"
+      }
+    },
+    "required": [
+      "payload"
+    ]
+  }
+}

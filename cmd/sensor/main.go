@@ -35,6 +35,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	sharednetwork "github.com/vistasecurity/vistaplatform-agents/shared/network"
 	"github.com/vistasecurity/vistaplatform-agents/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch"
@@ -289,6 +290,11 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 		// An operator supplied a key, so they intend this sensor to report.
 		// Failing to register is not a mode to continue in quietly: an
 		// unregistered sensor captures on every worker and submits nothing.
+		if isProtocolRefusal(err) {
+			logProtocolRefusal(err)
+			exitProcess(exitNeedsOperator)
+			return
+		}
 		var rejected *api.RegistrationRejectedError
 		if errors.As(err, &rejected) {
 			log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)
@@ -349,6 +355,15 @@ func (s *Sensor) retryRegistrationUntilSuccess(stop <-chan struct{}) {
 		}
 
 		if err := s.register(); err != nil {
+			if isProtocolRefusal(err) {
+				// The same answer as at startup: an agent and a platform that
+				// do not share a managed protocol, which only an operator can
+				// change. Stop, as a rejected key does at startup.
+				logProtocolRefusal(err)
+				s.recordError()
+				exitProcess(exitNeedsOperator)
+				return
+			}
 			var rejected *api.RegistrationRejectedError
 			if errors.As(err, &rejected) {
 				log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)
@@ -778,6 +793,9 @@ func (s *Sensor) initialize() error {
 
 	// Initialize sensor manager client (for registration and certificate management)
 	sensorManager := api.NewSensorManagerClient(s.config)
+	// One view of the platform's managed protocol for both clients: a refusal
+	// seen at registration or rotation closes submission too.
+	sensorManager.UseGate(apiClient.Gate())
 	s.sensorManager = sensorManager
 
 	// The worker that runs dispatched (planned) jobs one at a time on the
@@ -1232,8 +1250,14 @@ func (s *Sensor) processDiscoveries() {
 
 	// Send discoveries to control plane
 	if err := s.apiClient.SubmitDiscoveries(batch); err != nil {
-		log.Printf("❌ Failed to submit %d discoveries (attempt %d): %v", len(batch), s.retryCount+1, err)
-		s.recordError()
+		if errors.Is(err, managedprotocol.ErrNotNegotiated) {
+			// Not a failure: no heartbeat has answered since this process
+			// started, so the platform's protocol is not known yet. Hold.
+			log.Printf("⏳ Holding %d discoveries until the platform's managed protocol is known", len(batch))
+		} else {
+			log.Printf("❌ Failed to submit %d discoveries (attempt %d): %v", len(batch), s.retryCount+1, err)
+			s.recordError()
+		}
 		// Move current discoveries into retry queue (do NOT clear them)
 		s.pendingRetry = append(s.pendingRetry, s.discoveries...)
 		s.discoveries = s.discoveries[:0]
@@ -1373,7 +1397,7 @@ func (s *Sensor) sendHeartbeat() {
 		SensorID:            s.config.SensorID,
 		Status:              status,
 		Version:             Version,
-		Capabilities:        []string{sensordispatch.IdentityDNSCapability, sensordispatch.ScanPlanCapability, sensordispatch.VerifyCertificateCapability},
+		Capabilities:        api.SensorCapabilities(),
 		DNSInterfaces:       s.reportedDNSInterfaces(),
 		LastHeartbeat:       time.Now(),
 		Uptime:              uptime,
@@ -1432,9 +1456,17 @@ func (s *Sensor) sendHeartbeat() {
 			health.ConfigRunning = s.applier.Running()
 		}
 
+		// The refusal line, while the platform's last answer named no managed
+		// protocol this sensor implements (managed protocol 1, D-P2).
+		health.ProtocolError = s.apiClient.Gate().Problem()
+
 		commands, err := s.apiClient.Heartbeat(health)
 		if err != nil {
-			log.Printf("❌ Failed to send heartbeat: %v", err)
+			// A protocol refusal was already logged once, by the gate; the
+			// commands in such an answer are not run.
+			if !managedprotocol.IsIncompatible(err) {
+				log.Printf("❌ Failed to send heartbeat: %v", err)
+			}
 			s.recordError()
 		} else {
 			if reportHost {
@@ -1609,6 +1641,10 @@ func (s *Sensor) processCommand(command models.Command) {
 	case "export_logs":
 		result = s.handleExportLogs(command)
 	case sensordispatch.IdentityDNSCommand:
+		if !s.capabilityNegotiated(sensordispatch.IdentityDNSCapability) {
+			result = s.unsupportedCommand(command, "the platform did not negotiate "+sensordispatch.IdentityDNSCapability+" with this sensor")
+			break
+		}
 		result = s.queueIdentityDNS(command)
 	case sensordispatch.CommandType:
 		// A discovery job the platform handed to this sensor (#1839). Runs on
@@ -1623,15 +1659,7 @@ func (s *Sensor) processCommand(command models.Command) {
 		result = s.handleCancelDiscoveryJob(command)
 	default:
 		log.Printf("⚠️ Unknown command type: %s", command.Type)
-		result = &models.CommandResponse{
-			ID:           uuid.New(),
-			CommandID:    command.ID,
-			SensorID:     s.config.SensorID,
-			Status:       "error",
-			Message:      fmt.Sprintf("Unknown command type: %s", command.Type),
-			ResponseData: make(map[string]interface{}),
-			Timestamp:    time.Now(),
-		}
+		result = s.unsupportedCommand(command, fmt.Sprintf("Unknown command type: %s", command.Type))
 	}
 
 	// Acknowledge command with result

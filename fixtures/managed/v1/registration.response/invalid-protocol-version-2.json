@@ -1,0 +1,14 @@
+{
+  "agent_id": "6f1f0a7e-1d3c-4f0e-9a52-0c3b6f3d2a11",
+  "client_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "server_ca_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNBLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "certificate_expires_at": "2027-01-02T03:04:05Z",
+  "agent_secret": "c3ludGhldGljLWFnZW50LXNlY3JldA==",
+  "agent_secret_version": 1,
+  "protocol": {
+    "version": 2,
+    "capabilities": [
+      "device_discovery"
+    ]
+  }
+}

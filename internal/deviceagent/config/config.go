@@ -107,11 +107,11 @@ func (c *Config) SetEnrolledAgentSecret(secret string, version int) {
 }
 
 // RotateAgentSecret records the secret issued at a certificate rotation. The
-// one it replaces — or, for an agent that held none, its registration key —
-// stays valid for agentcreds.PreviousSecretWindow.
+// one it replaces stays valid for agentcreds.PreviousSecretWindow. The
+// registration key is never a credential secret (managed protocol 1, D-P7).
 func (c *Config) RotateAgentSecret(secret string, version int, now time.Time) {
 	agentSecretsMu.Lock()
-	c.agentSecrets = c.agentSecrets.Rotate(secret, version, c.RegistrationKey, now)
+	c.agentSecrets = c.agentSecrets.Rotate(secret, version, "", now)
 	agentSecretsMu.Unlock()
 }
 
@@ -125,11 +125,11 @@ func (c *Config) PruneAgentSecrets(now time.Time) bool {
 }
 
 // CredentialSecrets lists the secrets a job's credential envelope may be sealed
-// under, in the order to try them: the agent secret (and the one it replaced,
-// for agentcreds.PreviousSecretWindow after a rotation), or — for an agent that
-// has not rotated since before agent secrets existed — its registration key.
+// under, in the order to try them: the agent secret, and the one it replaced
+// for agentcreds.PreviousSecretWindow after a rotation. Never the registration
+// key: managed protocol 1 has no registration-key derivation (D-P7).
 func (c *Config) CredentialSecrets() []string {
-	return c.AgentSecretState().Candidates(c.RegistrationKey, time.Now())
+	return c.AgentSecretState().Candidates("", time.Now())
 }
 
 // RegistrationKeyRetained reports whether the registration key still has to be

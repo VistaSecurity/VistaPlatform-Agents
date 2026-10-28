@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/protocol.json",
+  "title": "Managed protocol object",
+  "description": "The protocol version and the capabilities in force. Sent by an agent in its registration request; sent by the platform in every registration, heartbeat and job answer (or, on an answer without a body, as the Vista-Agent-Protocol header `1; capabilities=a,b`). Version 1 is the only version of this directory: a major version is a new directory (v2/).",
+  "type": "object",
+  "required": [
+    "version",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "The managed protocol major version."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "uniqueItems": true,
+      "description": "Capability names. Additive: an unknown capability is ignored by both sides. Today: identity_dns_v1, scan_plan_v1, verify_certificate_v1 (sensor); device_discovery (device agent)."
+    }
+  }
+}

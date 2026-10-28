@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // HostInventorySubmission is the body of a LOCAL host-inventory post.
@@ -110,30 +109,32 @@ func (c *OutboundClient) SubmitHostInventory(report *hostinventory.Report, obser
 		return fmt.Errorf("failed to marshal host inventory: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/host-inventory", c.baseURL)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	// The collection runs as the agent starts, beside its first heartbeat;
+	// nothing is sent until an answer has named the platform's protocol.
+	if err := c.gate.WaitReady(hostInventoryNegotiationWait); err != nil {
+		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+
+	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/host-inventory", c.baseURL)
 	// The agent id also rides in a header so AgentAuth can identify the caller
 	// without parsing the body — the same shape the other outbound routes get
 	// from their :id path parameter.
-	req.Header.Set("X-Agent-ID", c.agentID.String())
+	extra := http.Header{}
+	extra.Set("X-Agent-ID", c.agentID.String())
 
-	resp, err := c.httpClient.Do(req)
+	status, _, msg, err := c.call(http.MethodPost, url, json.RawMessage(jsonData), 4096, extra)
 	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send host inventory: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusRequestEntityTooLarge {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if status == http.StatusRequestEntityTooLarge {
 		return &ReportTooLargeError{Bytes: len(jsonData), Detail: strings.TrimSpace(string(msg))}
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("failed to submit host inventory: %s (status: %d)", string(msg), resp.StatusCode)
+	if status != http.StatusOK && status != http.StatusCreated && status != http.StatusAccepted {
+		return fmt.Errorf("failed to submit host inventory: %s (status: %d)", string(msg), status)
 	}
 	return nil
 }

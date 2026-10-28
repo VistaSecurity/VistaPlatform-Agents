@@ -1,0 +1,19 @@
+{
+  "status": "active",
+  "timestamp": "2026-01-02T03:04:05Z",
+  "version": "5.3.0",
+  "ip_address": "192.0.2.20",
+  "interfaces": [
+    {
+      "interface_name": "eth0",
+      "address": "192.0.2.20",
+      "prefix_length": 24,
+      "is_primary": true
+    }
+  ],
+  "log_export": true,
+  "config_revision": "rev-1",
+  "config_running": {
+    "host_inventory_enabled": true
+  }
+}

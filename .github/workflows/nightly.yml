@@ -1,33 +1,213 @@
-# PLACEHOLDER. The trusted nightly build is work order WO-08 of the agent
-# split programme; until it lands this workflow builds, signs and publishes
-# nothing, and fails if anyone dispatches it.
+# Nightly build of the Vista Platform agents (MASTER_PLAN 6.2, D19).
 #
-# What WO-08 puts here (MASTER_PLAN 6.2, D11, D19):
-#   - a schedule on the protected default branch only, never a pull request
-#   - both executables for the approved target matrix, GitHub-hosted runners
-#   - SHA256SUMS, an SBOM and build provenance for every artefact
-#   - keyless signatures from this workflow's identity,
-#     https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/nightly.yml@refs/heads/main
-#   - an immutable nightly identifier carrying the date and the source SHA,
-#     marked prerelease; a nightly never advances the stable channel
-#   - the `nightly` environment, which requires the owner's approval
+# Runs daily from the head of the protected default branch, or by hand on
+# main (gh workflow run nightly.yml --ref main). Never on a pull request,
+# never on another branch. A commit that already has a published nightly is
+# not built again.
 #
-# It has no schedule trigger yet, so it cannot fail every night, and no
-# permissions, so a dispatch can do nothing but fail.
-name: Nightly (placeholder)
+# The release is a PRERELEASE under the immutable tag
+# nightly-<YYYYMMDD>-<first 12 hex of the commit> (D19), with the version
+# 0.0.0-nightly.<YYYYMMDD>.g<12 hex> stamped into the binaries. It never
+# becomes "latest" and never touches the stable channel. Packaging, signing,
+# metadata and verification are the same as release.yml's; see that file for
+# the job-by-job description. Nightly releases are pruned after the retention
+# period by a maintainer, from the dry run of
+# scripts/release/prune-nightlies.mjs (docs/releasing.md).
+#
+# Signer identity (cosign certificate SAN), issuer
+# https://token.actions.githubusercontent.com:
+#   https://github.com/<owner>/<repo>/.github/workflows/nightly.yml@refs/heads/main
+name: Nightly
 
 on:
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions: {}
 
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
 jobs:
-  placeholder:
-    name: placeholder
+  prepare:
+    name: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      source-time: ${{ steps.resolve.outputs.source_time }}
+      skip: ${{ steps.seen.outputs.skip }}
     steps:
-      - name: Not implemented
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Resolve the nightly identifier
+        id: resolve
+        run: node scripts/release/resolve.mjs nightly
+      - name: Has this commit a published nightly already?
+        id: seen
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::error::nightly.yml is a placeholder; the signed nightly build is work order WO-08."
-          exit 1
+          prev=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.draft | not) | select(.tag_name | test(\"^nightly-[0-9]{8}-${GITHUB_SHA:0:12}$\")) | .tag_name")
+          if [ -n "$prev" ]; then
+            echo "::notice::${GITHUB_SHA} already has a nightly: ${prev}; nothing to build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-agents.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      source-time: ${{ needs.prepare.outputs.source-time }}
+      require-notices: false
+
+  publish:
+    name: publish
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: nightly
+    permissions:
+      contents: write       # the nightly tag, the draft release and its assets
+      id-token: write       # keyless cosign signatures and the provenance attestation
+      attestations: write   # GitHub's attestation store
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CHANNEL: ${{ needs.prepare.outputs.channel }}
+      IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/nightly.yml@${{ github.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Paths
+        run: |
+          {
+            echo "ASSETS=$RUNNER_TEMP/assets"
+            echo "STATE=$RUNNER_TEMP/state"
+            echo "SMOKE=$RUNNER_TEMP/smoke"
+          } >> "$GITHUB_ENV"
+      - name: The identity this job signs with is the one the tag requires
+        run: |
+          want="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/nightly.yml@refs/heads/main"
+          [ "$IDENTITY" = "$want" ] || { echo "::error::signing identity $IDENTITY is not $want"; exit 1; }
+      - name: Install cosign (pinned version and digest)
+        run: scripts/release/install-cosign.sh "$RUNNER_TEMP/cosign"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-state
+          path: ${{ runner.temp }}/state
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: smoke-*
+          path: ${{ runner.temp }}/smoke
+          merge-multiple: true
+      - name: The packaged artefacts arrived unchanged
+        run: (cd "$ASSETS" && sha256sum --strict -c "$STATE/artifacts.sha256")
+      - name: No release, draft or published, exists for this tag
+        run: scripts/release/github-release.sh precheck "$GITHUB_REPOSITORY" "$TAG"
+      - name: Sign every artefact
+        run: |
+          mapfile -t files < <(sed 's/^[0-9a-f]\{64\}  //' "$STATE/artifacts.sha256")
+          scripts/release/sign.sh "$IDENTITY" "$ASSETS" "${files[@]}"
+      # GitHub attests build provenance on public repositories, and on private
+      # ones only under GitHub Enterprise Cloud. While this repository is
+      # private, a nightly records provenance as unavailable, and says why.
+      # The visibility comes from the API, not from the event: GitHub
+      # documents no event payload for a scheduled run (only
+      # github.event.schedule), so an event-based check could leave a public
+      # repository's nightlies without provenance. A failed call or any answer
+      # but true/false stops the job.
+      - name: Provenance availability
+        id: provenance
+        run: |
+          private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)
+          case "$private" in true|false) ;; *) echo "::error::cannot read the repository's visibility (got '$private')"; exit 1 ;; esac
+          if [ "$private" = false ]; then
+            echo "mode=attested" >> "$GITHUB_OUTPUT"
+          elif [ "$CHANNEL" = stable ]; then
+            echo "::error::a stable release needs build provenance, which GitHub does not attest for this private repository"
+            exit 1
+          else
+            echo "::warning::private repository: no build provenance for this ${CHANNEL} release"
+            echo "mode=unavailable" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Attest build provenance (SLSA v1)
+        id: attest
+        if: steps.provenance.outputs.mode == 'attested'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/state/artifacts.sha256
+      - name: Keep the provenance bundle as a release asset
+        if: steps.provenance.outputs.mode == 'attested'
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" "$ASSETS/provenance.intoto.jsonl"
+      - name: Write and validate agents-release.json and the first compatibility record
+        env:
+          MODE: ${{ steps.provenance.outputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          node scripts/release/metadata.mjs --assets "$ASSETS" --state "$STATE" --repo "$GITHUB_REPOSITORY" \
+            --run-url "$RUN_URL" --smoke "$SMOKE" --provenance "$MODE" \
+            --provenance-reason "the repository was private when this release was built; GitHub attests private repositories only under Enterprise Cloud" \
+            --issued-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      - name: Sign the metadata and the record
+        run: |
+          record=$(jq -r .initial_record.file "$ASSETS/agents-release.json")
+          scripts/release/sign.sh "$IDENTITY" "$ASSETS" agents-release.json "$record"
+      - name: Write and sign SHA256SUMS
+        run: |
+          scripts/release/sums.sh "$ASSETS"
+          scripts/release/sign.sh "$IDENTITY" "$ASSETS" SHA256SUMS
+      - name: Verify before anything is uploaded
+        run: scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG" --dir "$ASSETS"
+      - name: Create the draft release and upload
+        run: |
+          node scripts/release/notes.mjs "$ASSETS/agents-release.json" > "$RUNNER_TEMP/notes.md"
+          scripts/release/github-release.sh nightly-tag "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA"
+          scripts/release/github-release.sh draft "$GITHUB_REPOSITORY" "$TAG" "$CHANNEL" "$RUNNER_TEMP/notes.md"
+          scripts/release/github-release.sh upload "$GITHUB_REPOSITORY" "$TAG" "$ASSETS"
+      - name: Download the draft back and verify what GitHub holds
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/back"
+          diff <(cd "$ASSETS" && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort) <(cd "$RUNNER_TEMP/back" && find . -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort)
+          for f in "$ASSETS"/*; do cmp "$f" "$RUNNER_TEMP/back/$(basename "$f")"; done
+          scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG" --dir "$RUNNER_TEMP/back"
+      - name: Publish
+        run: scripts/release/github-release.sh publish "$GITHUB_REPOSITORY" "$TAG" "$CHANNEL" "$GITHUB_SHA"
+      - name: Verify the published release
+        run: scripts/verify-release.sh --repo "$GITHUB_REPOSITORY" --tag "$TAG"

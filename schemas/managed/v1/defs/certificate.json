@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/certificate.json",
+  "title": "Certificate entry (the single certificate format)",
+  "description": "One certificate of a chain, in the canonical field names every discovery path uses (CLAUDE.md 'Single certificate format'; shared/certificates CertificateInfo). Written down as v1 unchanged: `fingerprint` is the device agent's duplicate of fingerprint_sha256, kept for v1. Collect posture, never key material: an entry carrying a private key is invalid.",
+  "type": "object",
+  "required": [
+    "subject_dn",
+    "issuer_dn"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "subject_dn": {
+      "type": "string"
+    },
+    "issuer_dn": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "issuer": {
+      "type": "string"
+    },
+    "valid_from": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "valid_to": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "not_before": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "not_after": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "key_size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "signature": {
+      "type": "string"
+    },
+    "serial": {
+      "type": "string"
+    },
+    "serial_number": {
+      "type": "string"
+    },
+    "key_algorithm": {
+      "type": "string"
+    },
+    "signature_alg": {
+      "type": "string"
+    },
+    "is_ca": {
+      "type": "boolean"
+    },
+    "certificate_pem": {
+      "type": "string"
+    },
+    "fingerprint_sha256": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{64})?$"
+    },
+    "fingerprint_sha1": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{40})?$"
+    },
+    "fingerprint": {
+      "type": "string",
+      "description": "Device agent alias of fingerprint_sha256 (v1 keeps it)."
+    },
+    "subject_alternative_names": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "key_usage": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "extended_key_usage": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "chain_order": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "private_key"
+        ]
+      },
+      {
+        "required": [
+          "private_key_pem"
+        ]
+      },
+      {
+        "required": [
+          "key_pem"
+        ]
+      }
+    ]
+  }
+}

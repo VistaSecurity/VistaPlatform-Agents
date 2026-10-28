@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation/devicetest"
@@ -49,7 +48,7 @@ func TestExecute_ZeroAssetRunStillPostsDeviceIdentity(t *testing.T) {
 	devicetest.AllowListener(t, srv.Listener.Addr().String())
 
 	rec := &recordingClient{}
-	exec := &JobExecutor{submitter: rec, config: &config.Config{}, registry: di.NewRegistry()}
+	exec := &JobExecutor{submitter: rec, config: secretConfig(), registry: di.NewRegistry()}
 	job := &models.Job{
 		ID:          uuid.New(),
 		Type:        "device_interrogation",
@@ -57,7 +56,7 @@ func TestExecute_ZeroAssetRunStillPostsDeviceIdentity(t *testing.T) {
 		Credentials: map[string]interface{}{"username": "readonly", "password": "readonly-password"},
 		Parameters:  map[string]interface{}{"management_url": srv.URL},
 	}
-	if err := exec.Execute(context.Background(), job); err != nil {
+	if err := exec.Execute(context.Background(), sealJob(job)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 

@@ -1,0 +1,46 @@
+{
+  "_comment": "The release surface of this repository, read by scripts/release/*.mjs and checked against the workflows by scripts/release-metadata.test.mjs. A target, an installer, a capability or a protocol version is added here and in the build matrix of .github/workflows/build-agents.yml in the same reviewed change; the test fails when the two disagree, and when a capability named here is not a string constant in the Go source.",
+  "agents": [
+    {
+      "kind": "sensor",
+      "variant": "default",
+      "asset_prefix": "vista-sensor",
+      "executable": "crypto-sensor",
+      "command": "cmd/sensor",
+      "targets": [
+        { "os": "linux", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": true, "requires": ["libpcap"] },
+        { "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "cgo": true, "requires": ["libpcap"] },
+        { "os": "darwin", "arch": "amd64", "runner": "macos-15-intel", "cgo": true, "requires": ["libpcap"] },
+        { "os": "darwin", "arch": "arm64", "runner": "macos-14", "cgo": true, "requires": ["libpcap"] },
+        { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": ["npcap"] },
+        { "os": "windows", "arch": "386", "runner": "ubuntu-24.04", "cgo": false, "requires": ["npcap"] }
+      ],
+      "installers": { "linux": "install-sensor.sh", "windows": "install-sensor.ps1" },
+      "capabilities": ["identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"]
+    },
+    {
+      "kind": "device-agent",
+      "variant": "default",
+      "asset_prefix": "vista-device-agent",
+      "executable": "device-agent",
+      "command": "cmd/device-agent",
+      "targets": [
+        { "os": "linux", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
+        { "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
+        { "os": "darwin", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
+        { "os": "darwin", "arch": "arm64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
+        { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] }
+      ],
+      "installers": { "linux": "install-device-agent.sh" },
+      "capabilities": ["device_discovery"]
+    }
+  ],
+  "smoke": [
+    { "os": "linux", "arch": "amd64", "runner": "ubuntu-24.04" },
+    { "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm" }
+  ],
+  "protocol": { "managed_versions": [1], "output_versions": [] },
+  "modes": { "managed": "pending", "standalone": "none" },
+  "native_signing": { "windows": "none", "darwin": "none" },
+  "license": "Apache-2.0"
+}

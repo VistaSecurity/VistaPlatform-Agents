@@ -1,13 +1,11 @@
 package api
 
 import (
-	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -25,6 +23,7 @@ import (
 	sharedcerts "github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/httpclient"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	sharednetwork "github.com/vistasecurity/vistaplatform-agents/shared/network"
 )
 
@@ -55,6 +54,8 @@ type OutboundClient struct {
 	// still pending on the next beat (its clearing raced the beat) is not sent
 	// twice. Only SendHeartbeat touches it, from the heartbeat loop.
 	lastLogRequest string
+	// gate is the platform's managed protocol as last answered (protocol.go).
+	gate *managedprotocol.Gate
 }
 
 // ConfigApplier is the slice of desiredstate.Applier the client needs. An
@@ -143,6 +144,7 @@ func NewOutboundClient(cfg *config.Config) *OutboundClient {
 		httpClient: httpClient,
 		agentID:    agentID,
 		baseURL:    cfg.PlatformURL,
+		gate:       managedprotocol.NewGate(AgentCapabilities()),
 	}
 }
 
@@ -185,55 +187,65 @@ func (c *OutboundClient) Register(version string) error {
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/register", c.baseURL)
 
+	if csrPEM == "" {
+		return fmt.Errorf("refusing to register without a certificate signing request")
+	}
 	reqBody := map[string]interface{}{
 		"registration_key": c.config.RegistrationKey,
 		"platform":         registrationPlatform(),
 		"version":          version,
 		"csr":              csrPEM,           // Include CSR in registration request
 		"agent_id":         agentID.String(), // Proposed agent ID
-		// This build stores the per-agent secret the platform issues at
-		// enrolment (#2437); without the flag the platform issues none.
-		"supports_agent_secret": true,
+		// Managed protocol 1, which always issues the per-agent secret
+		// (#2437): there is no flag asking for it.
+		"agent_kind": managedprotocol.AgentKindDeviceAgent,
+		"protocol":   managedprotocol.Offer(c.gate.Own()),
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	status, _, body, err := c.call(http.MethodPost, url, reqBody, maxAnswerBytes, nil)
 	if err != nil {
-		return fmt.Errorf("failed to marshal registration request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send registration request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		if isPermanentRegistrationStatus(resp.StatusCode) {
-			return &RegistrationRejectedError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status != http.StatusOK && status != http.StatusCreated {
+		if isPermanentRegistrationStatus(status) {
+			return &RegistrationRejectedError{StatusCode: status, Body: string(body)}
 		}
-		return fmt.Errorf("registration failed: %s (status: %d)", string(body), resp.StatusCode)
+		return fmt.Errorf("registration failed: %s (status: %d)", string(body), status)
 	}
 
 	var result struct {
-		AgentID              string `json:"agent_id"`
-		ClientCert           string `json:"client_cert"`       // Signed certificate (no private key)
-		ServerCACert         string `json:"server_ca_cert"`    // CA certificate for trust
-		ControlPlaneURL      string `json:"control_plane_url"` // mTLS passthrough URL to switch to (#1033)
-		CertificateExpiresAt string `json:"certificate_expires_at"`
-		AgentSecret          string `json:"agent_secret"`
-		AgentSecretVersion   int    `json:"agent_secret_version"`
+		AgentID              string                    `json:"agent_id"`
+		ClientCert           string                    `json:"client_cert"`       // Signed certificate (no private key)
+		ClientKey            string                    `json:"client_key"`        // never accepted: see below
+		ServerCACert         string                    `json:"server_ca_cert"`    // CA certificate for trust
+		ControlPlaneURL      string                    `json:"control_plane_url"` // mTLS passthrough URL to switch to (#1033)
+		CertificateExpiresAt string                    `json:"certificate_expires_at"`
+		AgentSecret          string                    `json:"agent_secret"`
+		AgentSecretVersion   int                       `json:"agent_secret_version"`
+		Protocol             *managedprotocol.Protocol `json:"protocol"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return fmt.Errorf("failed to decode registration response: %w", err)
 	}
+
+	// Nothing from the answer is applied before it is known to be protocol 1.
+	caps, err := managedprotocol.Negotiate(result.Protocol, status, c.gate.Own())
+	if err != nil {
+		return c.gate.Observe(err)
+	}
+	// The key pair is this agent's; a platform that generated one has seen a
+	// private key it must never hold.
+	if result.ClientKey != "" {
+		return &managedprotocol.ViolationError{Reason: "it carries a private key the platform generated (client_key); this agent only ever uses the key it generated for its certificate signing request"}
+	}
+	if result.AgentSecret == "" {
+		return &managedprotocol.ViolationError{Reason: "it carries no agent_secret, which protocol 1 always issues at enrollment"}
+	}
+	c.gate.Compatible(caps)
 
 	parsedID, err := uuid.Parse(result.AgentID)
 	if err != nil {
@@ -338,7 +350,12 @@ func applyAdvertisedPlatformURL(cfg *config.Config, advertised string) bool {
 	return true
 }
 
-// GetNextJob polls the platform for the next available job
+// GetNextJob polls the platform for the next available job.
+//
+// The answer must name the platform's managed protocol: the 204 "nothing to
+// do" in its Vista-Agent-Protocol header, a job in its body. One that names
+// none, or another version, closes the gate and no job is returned, so nothing
+// is run.
 func (c *OutboundClient) GetNextJob() (*models.Job, error) {
 	if c.agentID == uuid.Nil {
 		return nil, fmt.Errorf("agent not registered")
@@ -346,68 +363,68 @@ func (c *OutboundClient) GetNextJob() (*models.Job, error) {
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/jobs", c.baseURL, c.agentID.String())
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
 	// The job types this build runs beyond device_interrogation. The platform
 	// hands a newer job type only to an agent that declares it, so an agent
 	// that predates one is never given a job it would strand.
-	req.Header.Set(di.AgentCapabilitiesHeader, strings.Join(di.AgentCapabilities(), ","))
+	extra := http.Header{}
+	extra.Set(di.AgentCapabilitiesHeader, strings.Join(di.AgentCapabilities(), ","))
 
-	resp, err := c.httpClient.Do(req)
+	status, header, body, err := c.call(http.MethodGet, url, nil, maxJobBytes, extra)
 	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusNoContent {
-		// No job available
+	if status == http.StatusNoContent {
+		// No job available; the header names the protocol.
+		caps, err := managedprotocol.NegotiateHeader(header, status, c.gate.Own())
+		if err != nil {
+			return nil, c.gate.Observe(err)
+		}
+		c.gate.Compatible(caps)
 		return nil, nil
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get job: %s (status: %d)", string(body), resp.StatusCode)
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("failed to get job: %s (status: %d)", string(body), status)
 	}
 
 	var job models.Job
-	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+	if err := json.Unmarshal(body, &job); err != nil {
 		return nil, fmt.Errorf("failed to decode job: %w", err)
 	}
-
+	caps, err := managedprotocol.Negotiate(job.Protocol, status, c.gate.Own())
+	if err != nil {
+		return nil, c.gate.Observe(err)
+	}
+	c.gate.Compatible(caps)
 	return &job, nil
 }
 
-// SubmitResult submits job results to the platform
+// SubmitResult submits job results to the platform. Nothing is sent unless
+// the platform's protocol is known to be version 1.
 func (c *OutboundClient) SubmitResult(result *models.JobResult) error {
 	if c.agentID == uuid.Nil {
 		return fmt.Errorf("agent not registered")
 	}
+	if err := c.gate.Ready(); err != nil {
+		return err
+	}
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/results", c.baseURL, c.agentID.String())
 
-	jsonData, err := json.Marshal(result)
+	status, _, body, err := c.call(http.MethodPost, url, result, maxAnswerBytes, nil)
 	if err != nil {
-		return fmt.Errorf("failed to marshal result: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send result: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return &SubmitStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return &SubmitStatusError{StatusCode: status, Body: string(body)}
 	}
 
 	return nil
@@ -477,66 +494,74 @@ func (c *OutboundClient) SendHeartbeat() error {
 		}
 	}
 
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal heartbeat: %w", err)
+	// The refusal line, while the platform's last answer named no managed
+	// protocol this agent implements (managed protocol 1, D-P2).
+	if problem := c.gate.Problem(); problem != "" {
+		reqBody["protocol_error"] = problem
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	status, _, body, err := c.call(http.MethodPost, url, reqBody, maxHeartbeatResponseBytes, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat failed: %s (status: %d)", string(body), resp.StatusCode)
+	if status != http.StatusOK {
+		return fmt.Errorf("heartbeat failed: %s (status: %d)", string(body), status)
 	}
 
-	// The platform's answer: what this agent should be running. A response
-	// without a config block is not an error — an older platform simply does
-	// not send one, and the agent keeps whatever it already has rather than
-	// reverting to its file. A malformed one is logged and ignored for the same
-	// reason: a bad answer must not cost the agent its liveness reporting.
-	if c.configApplier != nil || c.logs != nil {
-		var answer struct {
-			Config      *agentconfig.ExchangePayload `json:"config"`
-			LogsRequest *agentlogs.Request           `json:"logs_request"`
-		}
-		// Bounded: the body is parsed on every beat, and an agent must not be
-		// made to buffer an unbounded response by whatever it is pointed at.
-		err := json.NewDecoder(io.LimitReader(resp.Body, maxHeartbeatResponseBytes)).Decode(&answer)
-		switch {
-		case errors.Is(err, io.EOF):
-			// An empty body. That is exactly what an older platform returns, so
-			// it is the normal case for a mixed fleet, not something to warn
-			// about once a minute for the life of the process.
-		case err != nil:
+	// The platform's answer: its protocol, and what this agent should be
+	// running. An answer that does not name protocol 1 closes the gate and
+	// nothing in it is applied: a configuration or a log request from a
+	// platform this agent does not speak to is not one to act on.
+	var answer struct {
+		Protocol    *managedprotocol.Protocol `json:"protocol"`
+		Config      json.RawMessage           `json:"config"`
+		LogsRequest json.RawMessage           `json:"logs_request"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return c.gate.Observe(&managedprotocol.IncompatibleError{StatusCode: status, Detail: "the heartbeat answer is not a JSON object"})
+	}
+	caps, err := managedprotocol.Negotiate(answer.Protocol, status, c.gate.Own())
+	if err != nil {
+		return c.gate.Observe(err)
+	}
+	c.gate.Compatible(caps)
+
+	// A config block absent from the answer is not an instruction to revert:
+	// the agent keeps what it has. A malformed one is logged and ignored: a
+	// bad answer must not cost the agent its liveness reporting.
+	if c.configApplier != nil && present(answer.Config) {
+		var cfg agentconfig.ExchangePayload
+		if err := json.Unmarshal(answer.Config, &cfg); err != nil {
 			log.Printf("⚠️  Could not read the configuration from the heartbeat response: %v", err)
-		default:
-			if c.configApplier != nil && answer.Config != nil {
-				c.configApplier.Apply(answer.Config.Revision, answer.Config.Values)
-				// A restart is decided here rather than inside the applier: it
-				// is not a setting, and the applier's job is to make values
-				// true, not to end the process.
-				if c.restart != nil {
-					c.restart(time.Duration(answer.Config.RestartRequestAgeSeconds) * time.Second)
-				}
+		} else {
+			c.configApplier.Apply(cfg.Revision, cfg.Values)
+			// A restart is decided here rather than inside the applier: it
+			// is not a setting, and the applier's job is to make values
+			// true, not to end the process.
+			if c.restart != nil {
+				c.restart(time.Duration(cfg.RestartRequestAgeSeconds) * time.Second)
 			}
-			if c.logs != nil && answer.LogsRequest != nil && answer.LogsRequest.ID != c.lastLogRequest {
-				c.answerLogRequest(*answer.LogsRequest)
-			}
+		}
+	}
+	if c.logs != nil && present(answer.LogsRequest) {
+		var req agentlogs.Request
+		if err := json.Unmarshal(answer.LogsRequest, &req); err != nil {
+			log.Printf("⚠️  Could not read the log request from the heartbeat response: %v", err)
+		} else if req.ID != c.lastLogRequest {
+			c.answerLogRequest(req)
 		}
 	}
 
 	return nil
+}
+
+// present reports whether a JSON member was sent with a value.
+func present(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 // answerLogRequest sends this agent's recent log lines in reply to req. A
@@ -570,26 +595,20 @@ func (c *OutboundClient) SendLogs(req agentlogs.Request) error {
 	// Cleaned BEFORE it leaves the host: a credential in a log line must not
 	// cross the network. The platform cleans again as a backstop.
 	upload := agentlogs.Upload{RequestID: req.ID, Lines: agentlogs.Clean(c.logs.Tail(n), n)}
-	jsonData, err := json.Marshal(upload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal logs: %w", err)
+	if err := c.gate.Ready(); err != nil {
+		return err
 	}
 
 	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/logs", c.baseURL, c.agentID.String())
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	status, _, body, err := c.call(http.MethodPost, url, upload, 4096, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
+		if managedprotocol.IsIncompatible(err) {
+			return err
+		}
 		return fmt.Errorf("failed to send logs: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &LogUploadStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status != http.StatusOK {
+		return &LogUploadStatusError{StatusCode: status, Body: string(body)}
 	}
 	return nil
 }

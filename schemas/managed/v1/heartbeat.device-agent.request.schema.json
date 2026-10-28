@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/heartbeat.device-agent.request.schema.json",
+  "title": "Device agent heartbeat request",
+  "description": "POST /api/v1/device-interrogation-service/agents/{id}/heartbeat, every HEARTBEAT_INTERVAL (default 60 s).",
+  "type": "object",
+  "required": [
+    "status",
+    "timestamp"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": [
+        "active"
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "version": {
+      "type": "string"
+    },
+    "ip_address": {
+      "type": "string"
+    },
+    "interfaces": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "defs/host-address.json"
+      }
+    },
+    "log_export": {
+      "type": "boolean"
+    },
+    "config_revision": {
+      "type": "string"
+    },
+    "config_failures": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "config_pending_restart": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "config_running": {
+      "$ref": "defs/config-values.json"
+    },
+    "protocol_error": {
+      "type": "string"
+    }
+  }
+}

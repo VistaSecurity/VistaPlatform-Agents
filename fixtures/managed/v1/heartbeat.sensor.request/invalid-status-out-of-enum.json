@@ -1,0 +1,59 @@
+{
+  "dns_interfaces": [
+    "eth0"
+  ],
+  "capabilities": [
+    "identity_dns_v1",
+    "scan_plan_v1",
+    "verify_certificate_v1"
+  ],
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "status": "degraded",
+  "version": "5.3.0",
+  "last_heartbeat": "2026-01-02T03:04:05Z",
+  "uptime": 3600,
+  "memory_usage": 52428800,
+  "cpu_usage": 1.5,
+  "packets_captured": 1200,
+  "discoveries_made": 14,
+  "errors": 0,
+  "metrics": {
+    "uptime_seconds": 3600,
+    "degraded": false
+  },
+  "interface_stats": [
+    {
+      "interface_name": "eth0",
+      "packet_count": 1200,
+      "drop_count": 0,
+      "drop_rate_pct": 0
+    }
+  ],
+  "available_interfaces": [
+    "eth0",
+    "eth1"
+  ],
+  "config_revision": "rev-1",
+  "config_running": {
+    "active_probing": true,
+    "dedup_ttl_minutes": 30,
+    "extra_tls_ports": "8443"
+  },
+  "reporting_interval": 30,
+  "ip_address": "192.0.2.10",
+  "interfaces": [
+    {
+      "interface_name": "eth0",
+      "address": "192.0.2.10",
+      "prefix_length": 24,
+      "is_primary": true,
+      "mac": "00:00:5e:00:53:01"
+    },
+    {
+      "interface_name": "eth1",
+      "address": "2001:db8::10",
+      "prefix_length": 64
+    }
+  ],
+  "timestamp": "2026-01-02T03:04:05Z"
+}

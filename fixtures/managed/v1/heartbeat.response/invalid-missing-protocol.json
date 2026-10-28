@@ -1,0 +1,41 @@
+{
+  "commands": [
+    {
+      "id": "cmd-1",
+      "type": "discovery_job",
+      "priority": 5,
+      "payload": {
+        "job_id": "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
+        "tenant_id": "1c9e7a05-4d2b-4a63-9f18-7e5c2b0a3d64",
+        "options": {
+          "automatic_scan": true
+        },
+        "plan": {
+          "version": 1,
+          "attempt": 1,
+          "pace": "normal",
+          "targets": [
+            {
+              "target": "192.0.2.0/29",
+              "class": "private",
+              "depth": "standard",
+              "addresses": 8,
+              "tcp_ports": "22,443",
+              "udp_ports": "",
+              "tcp_port_count": 2,
+              "udp_port_count": 0,
+              "estimated_probes": 16,
+              "target_id": "11111111-2222-4333-8444-555555555555",
+              "skip_addresses": [
+                "192.0.2.1"
+              ]
+            }
+          ]
+        }
+      },
+      "requires_ack": true,
+      "expires_at": "2026-01-02T04:04:05Z",
+      "created_at": "2026-01-02T03:04:05Z"
+    }
+  ]
+}

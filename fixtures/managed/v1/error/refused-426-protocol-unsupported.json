@@ -1,0 +1,8 @@
+{
+  "code": "agent_protocol_unsupported",
+  "agent_protocol": 2,
+  "supported": [
+    1
+  ],
+  "message": "This agent speaks managed protocol 2; this platform (version 5.3.0) supports 1. Install the agent version listed under Discovery -> Sensors & Agents."
+}

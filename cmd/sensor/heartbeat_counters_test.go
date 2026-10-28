@@ -143,7 +143,7 @@ func heartbeatTestSensor(baseURL string) *Sensor {
 	}
 	return &Sensor{
 		config:      cfg,
-		apiClient:   api.NewOutboundClient(cfg),
+		apiClient:   negotiatedClient(cfg),
 		discoveries: make([]*models.CryptoDiscovery, 0),
 	}
 }
@@ -165,7 +165,7 @@ func sendHeartbeatAndCapture(t *testing.T, sensor *Sensor) *models.SensorHealth 
 		captured = &health
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"commands":[]}`))
+		_, _ = w.Write([]byte(`{"protocol":{"version":1,"capabilities":[]},"commands":[]}`))
 	}))
 	defer server.Close()
 

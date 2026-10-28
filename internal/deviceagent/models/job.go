@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 // Job represents a device interrogation job from the platform
@@ -27,6 +28,9 @@ type Job struct {
 	Parameters  map[string]interface{} `json:"parameters"`
 	CreatedAt   time.Time              `json:"created_at"`
 	ExpiresAt   *time.Time             `json:"expires_at,omitempty"`
+	// Protocol is the platform's managed protocol and the capabilities it will
+	// use with this agent. Required: a job without it is not run.
+	Protocol *managedprotocol.Protocol `json:"protocol"`
 }
 
 // Target returns the id of the thing the job is about, preferring the phase-1

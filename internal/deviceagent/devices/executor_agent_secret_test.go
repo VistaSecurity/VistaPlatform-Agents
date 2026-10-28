@@ -18,8 +18,8 @@ import (
 )
 
 // #2437, the WIRING: the executor opens a job's credential envelope with the
-// secrets Config.CredentialSecrets reports — the agent secret, or for an agent
-// that has not rotated yet its registration key. A test of the config helper
+// secrets Config.CredentialSecrets reports — the agent secret, never the
+// registration key (managed protocol 1, D-P7). A test of the config helper
 // alone stays green if the executor goes back to reading RegistrationKey.
 // Driven through the real Execute dispatch and the real Fortinet collector.
 func TestExecute_OpensCredentialsWithTheAgentSecret(t *testing.T) {
@@ -74,10 +74,27 @@ func TestExecute_OpensCredentialsWithTheAgentSecret(t *testing.T) {
 			t.Fatalf("credentials sealed under the spent registration key were accepted: %+v", got)
 		}
 	})
-	t.Run("an agent that has not rotated yet still opens what is sealed under its registration key", func(t *testing.T) {
+	t.Run("an agent holding only its registration key opens nothing: protocol 1 derives no key from it", func(t *testing.T) {
 		cfg := &config.Config{RegistrationKey: regKey}
-		if got := run(t, cfg, regKey); got == nil || !got.Success {
-			t.Fatalf("a pre-change agent could not use registration-key credentials: %+v", got)
+		if got := run(t, cfg, regKey); got == nil || got.Success {
+			t.Fatalf("credentials sealed under the registration key were accepted: %+v", got)
+		}
+	})
+	t.Run("an unsealed credentials map is refused, never used as plaintext", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.SetEnrolledAgentSecret(agentSecret, 1)
+		rec := &recordingClient{}
+		exec := &JobExecutor{submitter: rec, config: cfg, registry: di.NewRegistry()}
+		job := &models.Job{
+			ID: uuid.New(), Type: di.JobTypeDeviceDiscovery, DeviceType: "fortinet",
+			Credentials: map[string]interface{}{"username": "readonly", "password": "device-password-123"},
+			Parameters:  map[string]interface{}{"device_type": "fortinet", "management_url": srv.URL},
+		}
+		if err := exec.Execute(context.Background(), job); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if got := rec.last(); got == nil || got.Success {
+			t.Fatalf("an unsealed credential map was used: %+v", got)
 		}
 	})
 }

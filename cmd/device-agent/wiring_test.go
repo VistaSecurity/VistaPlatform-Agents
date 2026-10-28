@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
@@ -40,7 +41,7 @@ func TestAgentStartedWithHostInventoryOnKeepsItAfterTheFirstBeat(t *testing.T) {
 		beats    int
 	)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/heartbeat") {
 			// Job polling and inventory submission are not what this test is
 			// about; answer them so the loops do not log failures.
@@ -73,7 +74,7 @@ func TestAgentStartedWithHostInventoryOnKeepsItAfterTheFirstBeat(t *testing.T) {
 				Values:   values,
 			},
 		})
-	}))
+	})))
 	defer srv.Close()
 
 	// An agent as an operator configured it before the control plane existed:
@@ -143,7 +144,7 @@ func TestAgentStartedWithHostInventoryOnKeepsItAfterTheFirstBeat(t *testing.T) {
 // test exists to prove the test above is testing something — if the agent could
 // survive this, the first one would pass for the wrong reason.
 func TestABuiltInDefaultAnswerIsWhatUsedToSwitchHostInventoryOff(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/heartbeat") {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{}`))
@@ -158,7 +159,7 @@ func TestABuiltInDefaultAnswerIsWhatUsedToSwitchHostInventoryOff(t *testing.T) {
 				Values:   values,
 			},
 		})
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/error.schema.json",
+  "title": "Error body",
+  "description": "A refusal from the platform. 426 Upgrade Required with code agent_protocol_unsupported is the protocol refusal: no job is handed out and nothing is ingested; the agent stops collecting (exit 78 at enrollment) and logs the one line the protocol specifies.",
+  "type": "object",
+  "required": [
+    "code"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "agent_protocol": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "supported": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "minItems": 1
+    }
+  },
+  "if": {
+    "properties": {
+      "code": {
+        "const": "agent_protocol_unsupported"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "agent_protocol",
+      "supported",
+      "message"
+    ]
+  }
+}

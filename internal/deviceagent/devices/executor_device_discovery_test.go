@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation/devicetest"
@@ -51,7 +50,7 @@ func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 	devicetest.AllowListener(t, srv.Listener.Addr().String())
 
 	rec := &recordingClient{}
-	exec := &JobExecutor{submitter: rec, config: &config.Config{}, registry: di.NewRegistry()}
+	exec := &JobExecutor{submitter: rec, config: secretConfig(), registry: di.NewRegistry()}
 	job := &models.Job{
 		ID:          uuid.New(),
 		Type:        di.JobTypeDeviceDiscovery,
@@ -59,7 +58,7 @@ func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 		Credentials: map[string]interface{}{"username": "__api_token__", "password": deviceToken},
 		Parameters:  map[string]interface{}{"device_type": "fortinet", "management_url": srv.URL},
 	}
-	if err := exec.Execute(context.Background(), job); err != nil {
+	if err := exec.Execute(context.Background(), sealJob(job)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	got := rec.last()
@@ -93,7 +92,7 @@ func TestExecute_DeviceDiscovery_FailureIsTypedCodeOnly(t *testing.T) {
 	devicetest.AllowListener(t, addr)
 
 	rec := &recordingClient{}
-	exec := &JobExecutor{submitter: rec, config: &config.Config{}, registry: di.NewRegistry()}
+	exec := &JobExecutor{submitter: rec, config: secretConfig(), registry: di.NewRegistry()}
 	for _, c := range []struct {
 		name, deviceType string
 		want             di.IdentifyFailure
@@ -107,7 +106,7 @@ func TestExecute_DeviceDiscovery_FailureIsTypedCodeOnly(t *testing.T) {
 				Credentials: map[string]interface{}{"username": "u", "password": "device-password-123"},
 				Parameters:  map[string]interface{}{"device_type": c.deviceType, "management_url": "https://" + addr},
 			}
-			if err := exec.Execute(context.Background(), job); err != nil {
+			if err := exec.Execute(context.Background(), sealJob(job)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			got := rec.last()

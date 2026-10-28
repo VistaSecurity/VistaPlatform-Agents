@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/host-address.json",
+  "title": "Host interface address",
+  "description": "One address bound on the agent's host (shared/network InterfaceAddress).",
+  "type": "object",
+  "required": [
+    "interface_name",
+    "address"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "interface_name": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "prefix_length": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "is_primary": {
+      "type": "boolean"
+    },
+    "mac": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{2}(:[0-9a-f]{2}){5})?$"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/discovery-batch.schema.json",
+  "title": "Discovery batch",
+  "description": "POST /api/v1/sensor-manager/sensors/{id}/discoveries: at most 10,000 discoveries and 32 MiB. A dispatched job's results use the same route, discovery_method active with raw_metadata.job_id.",
+  "type": "object",
+  "required": [
+    "sensor_id",
+    "discoveries",
+    "batch_id",
+    "timestamp",
+    "count"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "sensor_id": {
+      "type": "string"
+    },
+    "batch_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "discoveries": {
+      "type": "array",
+      "items": {
+        "$ref": "defs/envelope.json"
+      },
+      "maxItems": 10000
+    }
+  }
+}

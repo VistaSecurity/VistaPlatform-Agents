@@ -1,0 +1,20 @@
+{
+  "id": "cmd-1",
+  "type": "discovery_job",
+  "priority": 5,
+  "payload": {
+    "job_id": "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
+    "targets": [
+      "192.0.2.10"
+    ],
+    "protocols": [
+      "TLS"
+    ],
+    "ports": [
+      443
+    ]
+  },
+  "requires_ack": true,
+  "expires_at": "2026-01-02T04:04:05Z",
+  "created_at": "2026-01-02T03:04:05Z"
+}

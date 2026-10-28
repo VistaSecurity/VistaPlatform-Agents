@@ -1,0 +1,5 @@
+# Nightly releases kept past the nightly retention period because a platform
+# release or recovery manifest pins their bytes. One tag per line
+# (nightly-YYYYMMDD-<12 hex>); '#' starts a comment. Added by a reviewed pull
+# request when such a manifest is cut; read by
+# scripts/release/prune-nightlies.mjs (docs/releasing.md, "Nightly retention").

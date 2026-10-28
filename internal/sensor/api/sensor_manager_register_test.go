@@ -15,6 +15,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 func signSensorCSR(t *testing.T, csrPEM string) (certPEM, caPEM string) {
@@ -88,6 +89,8 @@ func TestSensorManagerRegisterSwitchesAdvertisedURLAndEnablesMTLS(t *testing.T) 
 			"server_ca_cert":    caPEM,
 			"control_plane_url": "https://sensors.example.test:8444",
 			"config":            map[string]any{},
+			"agent_secret":      "test-agent-secret",
+			"protocol":          protocoltest.V1(),
 		}); err != nil {
 			t.Fatalf("encode registration response: %v", err)
 		}

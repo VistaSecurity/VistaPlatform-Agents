@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	sharednetwork "github.com/vistasecurity/vistaplatform-agents/shared/network"
 	"github.com/vistasecurity/vistaplatform-agents/shared/probeconsent"
 )
@@ -190,6 +191,11 @@ type SensorHealth struct {
 	// the common case and does not mean "no host block was ever reported."
 	Host      *HostIdentity `json:"host,omitempty"`
 	Timestamp time.Time     `json:"timestamp"`
+	// ProtocolError is the one line the sensor logged when the platform's
+	// last answer named no managed protocol, or one this sensor does not
+	// implement; empty otherwise. Reported so the console can say why a
+	// sensor that is heartbeating collects nothing.
+	ProtocolError string `json:"protocol_error,omitempty"`
 }
 
 // InterfaceStatEntry holds per-interface packet capture statistics
@@ -232,7 +238,10 @@ type CaptureConfig struct {
 
 // SensorCommands represents a collection of commands for a sensor
 type SensorCommands struct {
-	Commands []Command `json:"commands"`
+	// Protocol is the platform's managed protocol and the capabilities it will
+	// use with this sensor. Required: an answer without it is refused.
+	Protocol *managedprotocol.Protocol `json:"protocol"`
+	Commands []Command                 `json:"commands"`
 	// Config is the sensor's desired state (#1785), answered on every
 	// heartbeat. Absent from an older platform's reply, which the sensor treats
 	// as "no change" rather than as an instruction to revert — silence is not
@@ -286,16 +295,20 @@ type SensorRegistration struct {
 	// reported at registration so the platform records the real value from the
 	// start (set at install; changed later via update_config commands).
 	ReportingInterval int `json:"reporting_interval,omitempty"`
-	// CSR-based registration fields
-	CSR      string `json:"csr,omitempty"`       // Certificate Signing Request (PEM format)
-	SensorID string `json:"sensor_id,omitempty"` // Proposed sensor ID (UUID string) for CSR CN
+	// CSR is the PEM certificate signing request for the sensor's key, which
+	// never leaves the host. Always sent: protocol 1 has no registration
+	// without one, and no platform-generated key.
+	CSR      string `json:"csr"`
+	SensorID string `json:"sensor_id"` // Proposed sensor ID (UUID string), the CSR's CN
 	// Host is this sensor's own host identity, always sent at registration
 	// (registration happens once, so there is no throttle to apply). See
 	// [HostIdentity].
 	Host *HostIdentity `json:"host,omitempty"`
-	// SupportsAgentSecret tells the platform this build stores the per-sensor
-	// secret it issues at enrolment (#2437); without it none is issued.
-	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
+	// AgentKind and Protocol name this agent and the managed protocol it
+	// speaks (managed protocol 1). Protocol 1 always issues the per-sensor
+	// secret (#2437), so there is no flag asking for it.
+	AgentKind string                   `json:"agent_kind"`
+	Protocol  managedprotocol.Protocol `json:"protocol"`
 }
 
 // DiscoveryFinding represents a single discovery finding

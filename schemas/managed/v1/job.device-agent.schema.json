@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/job.device-agent.schema.json",
+  "title": "Device agent job",
+  "description": "GET /api/v1/device-interrogation-service/agents/{id}/jobs, with X-Agent-Capabilities: 204 with the protocol in its Vista-Agent-Protocol header when there is nothing to do, else 200 with this body. A type the agent does not run is answered with a result whose failure_code is unsupported_command; the type is therefore an open string. Credentials, when present, are sealed only.",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "protocol"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "protocol": {
+      "$ref": "defs/protocol.json"
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "device_interrogation, device_discovery (capability device_discovery), host_inventory; anything else is refused."
+    },
+    "asset_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "device_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "device_type": {
+      "type": "string"
+    },
+    "credentials": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "maxProperties": 0
+        },
+        {
+          "$ref": "credential-envelope.schema.json"
+        }
+      ]
+    },
+    "parameters": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

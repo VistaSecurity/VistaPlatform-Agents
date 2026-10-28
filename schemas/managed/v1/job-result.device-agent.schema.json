@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/job-result.device-agent.schema.json",
+  "title": "Device agent job result",
+  "description": "POST /api/v1/device-interrogation-service/agents/{id}/results, at most 32 MiB. Everything a collector returns has passed the agent's projection allowlists and Sanitize, and error text passes redaction, before it is sent (collect posture, never key material). facts, relationships, network and warnings are typed by the collectors (shared/deviceinterrogation); their vocabularies are under enums/.",
+  "type": "object",
+  "required": [
+    "job_id",
+    "success",
+    "completed_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string"
+    },
+    "failure_code": {
+      "type": "string"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "ip_address": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "protocol_version": {
+            "type": "string"
+          },
+          "asset_type": {
+            "type": "string"
+          },
+          "cipher_suite": {
+            "type": "string"
+          },
+          "supported_ciphers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "key_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "key_exchange_algorithm": {
+            "type": "string"
+          },
+          "hash_algorithm": {
+            "type": "string"
+          },
+          "tls_versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "certificate": {
+            "$ref": "defs/certificate.json"
+          },
+          "certificates": {
+            "type": "array",
+            "items": {
+              "$ref": "defs/certificate.json"
+            }
+          },
+          "cert_validation_status": {
+            "type": "string"
+          },
+          "cert_validation_error": {
+            "type": "string"
+          },
+          "ssh_info": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "banner": {
+                "type": "string"
+              },
+              "host_key_type": {
+                "type": "string"
+              },
+              "host_key_fingerprint": {
+                "type": "string"
+              },
+              "kex_algorithm": {
+                "type": "string"
+              },
+              "encryption_alg_c2s": {
+                "type": "string"
+              },
+              "encryption_alg_s2c": {
+                "type": "string"
+              },
+              "mac_alg_c2s": {
+                "type": "string"
+              },
+              "mac_alg_s2c": {
+                "type": "string"
+              },
+              "compression_alg": {
+                "type": "string"
+              },
+              "key_types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "device_info": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "vendor": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "firmware_version": {
+                "type": "string"
+              },
+              "serial_number": {
+                "type": "string"
+              },
+              "os_version": {
+                "type": "string"
+              }
+            }
+          },
+          "service_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "service_name": {
+                "type": "string"
+              },
+              "service_version": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "string"
+              },
+              "identification_method": {
+                "type": "string"
+              }
+            }
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "network": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "device_identity": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "identification": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "if": {
+    "properties": {
+      "success": {
+        "const": false
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "error"
+    ]
+  }
+}

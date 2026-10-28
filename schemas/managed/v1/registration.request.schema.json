@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/registration.request.schema.json",
+  "title": "Registration request",
+  "description": "POST /api/v1/sensor-manager/sensors/register (sensor) or /api/v1/device-interrogation-service/agents/register (device agent). The agent proposes its id and sends a CSR for a key that never leaves the host; protocol 1 has no registration without a CSR and no platform-generated key (D-P7). The agent secret is always issued, so there is no flag asking for it. Every request also carries the header Vista-Agent-Protocol: 1.",
+  "type": "object",
+  "required": [
+    "registration_key",
+    "csr",
+    "version",
+    "platform",
+    "agent_kind",
+    "protocol"
+  ],
+  "properties": {
+    "registration_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "csr": {
+      "type": "string",
+      "pattern": "^-----BEGIN CERTIFICATE REQUEST-----"
+    },
+    "version": {
+      "type": "string"
+    },
+    "platform": {
+      "type": "string"
+    },
+    "agent_kind": {
+      "enum": [
+        "sensor",
+        "device-agent"
+      ]
+    },
+    "protocol": {
+      "$ref": "defs/protocol.json"
+    }
+  },
+  "if": {
+    "properties": {
+      "agent_kind": {
+        "const": "sensor"
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "sensor_id",
+      "name",
+      "ip_address"
+    ],
+    "properties": {
+      "sensor_id": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "name": {
+        "type": "string"
+      },
+      "description": {
+        "type": "string"
+      },
+      "profile": {
+        "type": "string"
+      },
+      "network_interfaces": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "items": {
+          "type": "string"
+        }
+      },
+      "available_interfaces": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "ip_address": {
+        "type": "string"
+      },
+      "reporting_interval": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "host": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "fqdn": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "arch": {
+            "type": "string"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "defs/host-address.json"
+            }
+          }
+        }
+      }
+    }
+  },
+  "else": {
+    "required": [
+      "agent_id"
+    ],
+    "properties": {
+      "agent_id": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      }
+    }
+  },
+  "unevaluatedProperties": false
+}

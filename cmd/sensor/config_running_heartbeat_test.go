@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig"
 	"github.com/vistasecurity/vistaplatform-agents/shared/probeconsent"
 )
@@ -55,7 +56,9 @@ func (p *stubControlPlane) handler() http.HandlerFunc {
 		}
 		p.mu.Lock()
 		p.beats = append(p.beats, health)
-		resp := models.SensorCommands{Config: p.answer, OwnedNetworks: p.owned}
+		// A protocol-1 platform: an answer without its protocol object is
+		// refused, and nothing in it is applied.
+		resp := models.SensorCommands{Protocol: protocoltest.V1(), Config: p.answer, OwnedNetworks: p.owned}
 		p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)

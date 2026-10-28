@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 )
@@ -29,17 +28,17 @@ func stubExecutor(run func(ctx context.Context) (*di.InterrogateResult, error)) 
 	rec := &recordingClient{}
 	reg := di.NewRegistry()
 	reg.Register(stubInterrogator{run: run})
-	return &JobExecutor{submitter: rec, config: &config.Config{}, registry: reg}, rec
+	return &JobExecutor{submitter: rec, config: secretConfig(), registry: reg}, rec
 }
 
 func stubJob(params map[string]interface{}) *models.Job {
-	return &models.Job{
+	return sealJob(&models.Job{
 		ID:          uuid.New(),
 		Type:        "device_interrogation",
 		DeviceType:  "stub_device",
 		Credentials: map[string]interface{}{"username": "u", "password": "p"},
 		Parameters:  params,
-	}
+	})
 }
 
 // A device that never answers must not hold the poll loop. The stub ignores its

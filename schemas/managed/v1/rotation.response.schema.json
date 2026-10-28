@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/rotation.response.schema.json",
+  "title": "Certificate rotation response",
+  "description": "The new certificate and agent secret; every other certificate of the agent is revoked, and the replaced secret stays valid for 24 h. A private key in the answer is refused.",
+  "allOf": [
+    {
+      "type": "object",
+      "required": [
+        "client_cert",
+        "agent_secret"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "sensor_id": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "client_cert": {
+          "type": "string",
+          "pattern": "^-----BEGIN CERTIFICATE-----"
+        },
+        "server_ca_cert": {
+          "type": "string",
+          "pattern": "^-----BEGIN CERTIFICATE-----"
+        },
+        "certificate_expires_at": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "agent_secret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_secret_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "client_key"
+            ]
+          },
+          {
+            "required": [
+              "private_key"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

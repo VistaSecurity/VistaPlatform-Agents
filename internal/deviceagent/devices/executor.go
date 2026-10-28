@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
 
@@ -43,7 +44,11 @@ const maxJobTimeout = time.Hour
 // wrapper that decrypts credentials locally, runs the shared interrogator, and
 // POSTs the results home. The in-cluster platform agent wraps the same core.
 type JobExecutor struct {
-	submitter   resultSubmitter
+	submitter resultSubmitter
+	// negotiated reports whether the platform negotiated a capability with
+	// this agent (the client's protocol gate). Nil: no platform to negotiate
+	// with (tests), so nothing is refused for it.
+	negotiated  func(capability string) bool
 	config      *config.Config
 	registry    *di.Registry
 	auditLogger *audit.AuditLogger
@@ -55,16 +60,26 @@ type JobExecutor struct {
 // NewJobExecutor creates a new job executor.
 func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecutor {
 	return &JobExecutor{
-		submitter: retryingSubmitter(apiClient),
-		config:    cfg,
-		registry:  di.NewRegistry(),
+		submitter:  retryingSubmitter(apiClient),
+		negotiated: negotiatedBy(apiClient),
+		config:     cfg,
+		registry:   di.NewRegistry(),
 	}
+}
+
+// negotiatedBy is the client's capability check, or nil without a client.
+func negotiatedBy(c *api.OutboundClient) func(string) bool {
+	if c == nil {
+		return nil
+	}
+	return c.Gate().Has
 }
 
 // NewJobExecutorWithAudit creates a new job executor with audit logging enabled.
 func NewJobExecutorWithAudit(apiClient *api.OutboundClient, cfg *config.Config, auditLogger *audit.AuditLogger) *JobExecutor {
 	return &JobExecutor{
 		submitter:   retryingSubmitter(apiClient),
+		negotiated:  negotiatedBy(apiClient),
 		config:      cfg,
 		registry:    di.NewRegistry(),
 		auditLogger: auditLogger,
@@ -112,17 +127,36 @@ func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) 
 	}()
 
 	switch job.Type {
-	case "device_interrogation":
+	case JobTypeDeviceInterrogation:
 		return e.executeDeviceInterrogation(ctx, job, timeout)
-	case "cloud_discovery":
-		return e.executeCloudDiscovery(job)
 	case JobTypeHostInventory:
 		return e.executeHostInventory(ctx, job)
 	case di.JobTypeDeviceDiscovery:
+		if e.negotiated != nil && !e.negotiated(di.CapabilityDeviceDiscovery) {
+			return e.submitUnsupported(job, "the platform did not negotiate "+di.CapabilityDeviceDiscovery+" with this agent")
+		}
 		return e.executeDeviceDiscovery(ctx, job)
 	default:
-		return fmt.Errorf("unknown job type: %s", job.Type)
+		// Not a job this agent runs, cloud collection included (it is hosted):
+		// refused with unsupported_command (managed protocol 1, D-P2), never
+		// guessed at.
+		return e.submitUnsupported(job, fmt.Sprintf("unsupported job type: %s", job.Type))
 	}
+}
+
+// JobTypeDeviceInterrogation is the job that interrogates one device.
+const JobTypeDeviceInterrogation = "device_interrogation"
+
+// submitUnsupported reports a job this agent does not run as refused, with
+// failure_code unsupported_command. Nothing was run.
+func (e *JobExecutor) submitUnsupported(job *models.Job, reason string) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       job.ID,
+		Success:     false,
+		Error:       reason,
+		FailureCode: managedprotocol.CodeUnsupportedCommand,
+		CompletedAt: time.Now(),
+	})
 }
 
 // ReportError reports a job that could not be run or reported, redacted and
@@ -309,11 +343,6 @@ func (e *JobExecutor) submitDiscoveryFailure(job *models.Job, code di.IdentifyFa
 		FailureCode: string(code),
 		CompletedAt: time.Now(),
 	})
-}
-
-// executeCloudDiscovery executes a cloud discovery job.
-func (e *JobExecutor) executeCloudDiscovery(job *models.Job) error {
-	return e.submitFailure(job, "Cloud discovery should be handled by platform service")
 }
 
 // submitFailure builds and submits a failed JobResult.

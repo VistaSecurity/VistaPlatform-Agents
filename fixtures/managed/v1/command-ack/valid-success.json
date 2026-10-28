@@ -1,0 +1,12 @@
+{
+  "id": "9b4e3c2a-1d0f-4e8b-9a7c-6d5e4f3a2b1c",
+  "command_id": "cmd-1",
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "status": "success",
+  "message": "Discovery job completed: 1/1 target(s) answered, 1 result(s) submitted",
+  "response_data": {
+    "job_id": "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
+    "status": "completed"
+  },
+  "timestamp": "2026-01-02T03:04:05Z"
+}

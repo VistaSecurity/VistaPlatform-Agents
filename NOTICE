@@ -1,0 +1,134 @@
+Vista Platform Agents
+Copyright 2026 Lakeshore Labs LLC (d/b/a Vista Security)
+
+This product is licensed under the Apache License, Version 2.0. See LICENSE.
+
+This repository holds the customer-deployed agents of Vista Platform: the
+passive network sensor and the device interrogation agent. They are the same
+agents Vista Platform manages, and they are licensed here under Apache-2.0.
+Vista Platform itself (the services, user interfaces, Helm chart and container
+images) is not part of this repository and is not licensed under Apache-2.0.
+
+
+THIRD-PARTY COMPONENTS
+----------------------
+
+The released binaries link third-party Go modules. Each remains under its own
+licence. The complete list, with each module's full licence text, ships beside
+every release as THIRD_PARTY_LICENSES; go.mod and go.sum in this repository
+pin the exact versions.
+
+Linked into the released binaries:
+
+- The Go standard library. Copyright 2009 The Go Authors. BSD-3-Clause.
+- golang.org/x/crypto, golang.org/x/net, golang.org/x/sys, golang.org/x/term,
+  golang.org/x/text. Copyright 2009 The Go Authors. BSD-3-Clause, with the Go
+  additional patent grant (PATENTS).
+- github.com/santhosh-tekuri/jsonschema/v6 (test support only; not linked
+  into either agent binary). Apache-2.0; its LICENSE carries the licence text
+  with no copyright line, and the module names Santhosh Kumar Tekuri as its
+  author.
+- github.com/gopacket/gopacket (sensor). Copyright (c) 2012 Google, Inc. and
+  Copyright (c) 2009-2011 Andreas Krennmair. BSD-3-Clause.
+- github.com/google/uuid. Copyright (c) 2009,2014 Google Inc. BSD-3-Clause.
+- filippo.io/edwards25519 (device agent). Copyright (c) 2009 The Go Authors.
+  BSD-3-Clause.
+- github.com/lib/pq (device agent). Copyright (c) 2011-2013, 'pq'
+  Contributors; portions Copyright (c) 2011 Blake Mizerany. MIT.
+- gopkg.in/yaml.v3. MIT and Apache-2.0. Its NOTICE file reads:
+
+    Copyright 2011-2016 Canonical Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+
+Mozilla Public License 2.0 component
+------------------------------------
+
+- github.com/go-sql-driver/mysql (device agent, database interrogation) is
+  licensed under the Mozilla Public License, Version 2.0, a file-level copyleft.
+  It is linked unmodified. Its source code, at the exact version go.mod pins,
+  is available at https://github.com/go-sql-driver/mysql, and a copy of the
+  MPL-2.0 is at https://mozilla.org/MPL/2.0/. The Apache-2.0 licence of this
+  repository does not limit or alter your rights in that component's source
+  under the MPL-2.0.
+
+
+Packet capture libraries (not included)
+---------------------------------------
+
+The sensor captures packets through the operating system's capture library,
+which this project does not distribute:
+
+- Linux and macOS: libpcap, provided by your operating system or package
+  manager (BSD licence, https://www.tcpdump.org).
+- Windows: Npcap, which you install yourself from https://npcap.com. Npcap is
+  not open source and is licensed to you by Nmap Software LLC under its own
+  terms, not by us. Its free licence covers installation on up to five
+  systems; using it on more systems, or redistributing it, needs a commercial
+  licence from its publisher. Read those terms before deploying the Windows
+  sensor widely.
+
+
+THIRD-PARTY TEST FIXTURES
+-------------------------
+
+Some tests run against real network device command output redistributed from
+networktocode/ntc-templates (https://github.com/networktocode/ntc-templates),
+licensed under the Apache License 2.0, Copyright 2015 Jason Edelman / Network
+to Code, LLC. The output was sanitised (addresses rewritten to documentation
+ranges, serial numbers and credential-shaped text redacted) and is kept, with
+the project's licence file and a provenance record, under
+shared/deviceinterrogation/testdata/real/. These files are used by tests only
+and are not in the released binaries.
+
+
+THIRD-PARTY CHOICE LISTS
+------------------------
+
+Interface type names and related choice lists used to normalise interface
+names are taken from NetBox v4.3.5 (https://github.com/netbox-community/netbox),
+licensed under the Apache License 2.0, Copyright NetBox Labs and contributors.
+Only the keys and labels of those lists were extracted; no NetBox code is
+included.
+
+
+THIRD-PARTY DATA
+----------------
+
+The device agent embeds a projection (assignment prefix and registrant name)
+of the IEEE Registration Authority's public MA-L, MA-M and MA-S listings,
+https://standards.ieee.org/products-programs/regauth/, used to name the
+manufacturer behind a hardware address. The snapshot was fetched on
+2026-10-08. The data remains IEEE's; this entry is an attribution, and the
+Apache License 2.0 of this repository grants no rights in it.
+
+
+Cryptographic notice
+--------------------
+
+This software uses cryptography. It does not implement its own primitives; it
+uses the Go standard library and the golang.org/x/crypto packages.
+Distribution and use may be subject to export control or import restrictions
+in some jurisdictions.
+
+
+TRADEMARKS
+----------
+
+"Vista", "Vista Security", "Vista Platform", and the edition names "Vista
+Platform Core", "Vista Platform Enterprise" and "Vista Platform MSP" are
+trademarks of Lakeshore Labs LLC, which does business as Vista Security. The
+Apache License 2.0 grants no right to use them, except as required for
+reasonable and customary use in describing the origin of the work and
+reproducing this NOTICE file.

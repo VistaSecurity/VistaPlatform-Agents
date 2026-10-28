@@ -1,0 +1,32 @@
+{
+  "units": [
+    {
+      "target_id": "11111111-2222-4333-8444-555555555555",
+      "address": "192.0.2.2",
+      "attempt": 1,
+      "host": {
+        "liveness": "alive",
+        "liveness_evidence": "tcp",
+        "ports_requested": 2,
+        "open": [
+          443
+        ],
+        "open_count": 1,
+        "closed": 1,
+        "filtered": 0,
+        "local_errors": 0,
+        "not_probed": 0
+      },
+      "tcp": [
+        {
+          "addr": "192.0.2.2",
+          "port": 443,
+          "transport": "tcp",
+          "state": "open",
+          "protocol": "TLS",
+          "identified": true
+        }
+      ]
+    }
+  ]
+}

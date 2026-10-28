@@ -1,0 +1,8 @@
+{
+  "registration_key": "REG-0123456789abcdef0123456789abcdef",
+  "platform": "linux",
+  "version": "5.3.0",
+  "csr": "-----BEGIN CERTIFICATE REQUEST-----\nU1lOVEhFVElDLUNTUi1OT1QtQS1SRUFMLVJFUVVFU1Q=\n-----END CERTIFICATE REQUEST-----\n",
+  "agent_id": "6f1f0a7e-1d3c-4f0e-9a52-0c3b6f3d2a11",
+  "agent_kind": "device-agent"
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentlogs"
 )
 
@@ -57,7 +58,7 @@ func (p *fakeLogPlatform) handler(t *testing.T) http.Handler {
 
 func newLogClient(t *testing.T, p *fakeLogPlatform) (*OutboundClient, *agentlogs.Ring) {
 	t.Helper()
-	srv := httptest.NewServer(p.handler(t))
+	srv := httptest.NewServer(protocoltest.Speak1(p.handler(t)))
 	t.Cleanup(srv.Close)
 	ring := agentlogs.NewRing(100)
 	_, _ = ring.Write([]byte("old line\nconnecting to https://admin:hunter2@fw.example.net\njob 7 done\n"))
@@ -119,7 +120,7 @@ func TestLogRequestIsRetriedAfterAFailureButNotAfterAConflict(t *testing.T) {
 
 func TestAgentWithoutALogSourceNeitherClaimsNorUploads(t *testing.T) {
 	p := &fakeLogPlatform{requestID: "req-1"}
-	srv := httptest.NewServer(p.handler(t))
+	srv := httptest.NewServer(protocoltest.Speak1(p.handler(t)))
 	defer srv.Close()
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
 	if err := c.SendHeartbeat(); err != nil {

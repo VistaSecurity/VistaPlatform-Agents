@@ -1,0 +1,13 @@
+{
+  "id": "9b4e3c2a-1d0f-4e8b-9a7c-6d5e4f3a2b1d",
+  "command_id": "cmd-3",
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "status": "error",
+  "message": "Unknown command type: rewrite_firmware",
+  "response_data": {
+    "refused": true,
+    "reason": "Unknown command type: rewrite_firmware",
+    "code": "unsupported_command"
+  },
+  "timestamp": "2026-01-02T03:04:05Z"
+}

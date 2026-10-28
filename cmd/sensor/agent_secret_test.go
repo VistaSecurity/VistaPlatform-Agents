@@ -2,7 +2,9 @@ package main
 
 // #2437: the sensor is issued a per-sensor secret at enrolment and a fresh one at
 // every certificate rotation, keeps it 0600 beside its certificate, and no longer
-// keeps the single-use registration key once the secret is on disk. These run the
+// keeps the single-use registration key once the secret is on disk. Managed
+// protocol 1 always issues the secret, so an enrolment answer without one is
+// refused. These run the
 // REAL client against a fake platform, then the real persistence and the real
 // config loader — and the installer's own text, because the installer decides
 // "already enrolled with this key" from what the sensor leaves in the file.
@@ -28,7 +30,9 @@ import (
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentcreds"
+	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
 const (
@@ -93,7 +97,7 @@ func (f *fakeSensorPlatform) serve(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
 	f.sawRequest = append(f.sawRequest, body)
-	resp := map[string]any{"sensor_id": testSensorID, "client_cert": f.sign(body["csr"].(string)), "reporting_interval": 60}
+	resp := map[string]any{"sensor_id": testSensorID, "client_cert": f.sign(body["csr"].(string)), "reporting_interval": 60, "protocol": protocoltest.V1()}
 	if f.issue && f.issued < len(f.secrets) {
 		f.issued++
 		resp["agent_secret"] = f.secrets[f.issued-1]
@@ -129,8 +133,12 @@ func TestSensorSecret_EnrolmentDropsTheRegistrationKey(t *testing.T) {
 	if err := s.register(); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if got := p.sawRequest[0]["supports_agent_secret"]; got != true {
-		t.Fatalf("registration request supports_agent_secret = %v, want true", got)
+	proto, _ := p.sawRequest[0]["protocol"].(map[string]any)
+	if proto["version"] != float64(managedprotocol.Version) || p.sawRequest[0]["agent_kind"] != managedprotocol.AgentKindSensor {
+		t.Fatalf("registration request protocol = %v, agent_kind = %v; want protocol 1 from a sensor", p.sawRequest[0]["protocol"], p.sawRequest[0]["agent_kind"])
+	}
+	if _, asked := p.sawRequest[0]["supports_agent_secret"]; asked {
+		t.Fatal("registration request still asks for an agent secret; protocol 1 always issues one")
 	}
 
 	body, _ := os.ReadFile(path)
@@ -196,40 +204,41 @@ func assertInstallerRecognisesKey(t *testing.T, cfgPath, key string, want bool) 
 	}
 }
 
-// An older platform issues no secret: the sensor must keep the registration key.
-func TestSensorSecret_OlderPlatformKeepsTheRegistrationKey(t *testing.T) {
+// A platform that answers an enrolment without the secret protocol 1 always
+// issues has broken the protocol: the sensor applies nothing from the answer,
+// keeps its registration key and writes no identity.
+func TestSensorSecret_EnrolmentWithoutASecretIsRefused(t *testing.T) {
 	p := newFakeSensorPlatform(t, false)
 	s, path := enrollingSensor(t, p)
-	if err := s.register(); err != nil {
-		t.Fatalf("register: %v", err)
+	err := s.register()
+	if !managedprotocol.IsViolation(err) || !strings.Contains(err.Error(), "agent_secret") {
+		t.Fatalf("register = %v, want a protocol violation naming agent_secret", err)
+	}
+	if !isProtocolRefusal(err) {
+		t.Fatal("the refusal is not one the startup path stops on (exit 78)")
 	}
 	body, _ := os.ReadFile(path)
 	if !strings.Contains(string(body), testSensorRegKey) {
-		t.Fatalf("the registration key was dropped though no secret was issued:\n%s", body)
+		t.Fatalf("the registration key was dropped though the enrolment was refused:\n%s", body)
+	}
+	if s.config.SensorID != "" || s.config.Security.ClientCert != "" {
+		t.Fatalf("the refused answer was applied: sensor id %q, cert held %v", s.config.SensorID, s.config.Security.ClientCert != "")
 	}
 	if _, err := os.Stat(filepath.Join(s.config.Storage.DataPath, "certs", agentcreds.SecretFileName)); err == nil {
 		t.Fatal("a secret file was written though none was issued")
 	}
-	if runtime.GOOS != "windows" {
-		assertInstallerRecognisesKey(t, path, testSensorRegKey, true)
-	}
 }
 
 // Rotation replaces the secret; the replaced one is honoured for the window and
-// then dropped from disk. A sensor enrolled before secrets existed receives its
-// first at rotation and drops the registration key then.
-func TestSensorSecret_RotationAndMigration(t *testing.T) {
+// then dropped from disk. The registration key is never one of them.
+func TestSensorSecret_Rotation(t *testing.T) {
 	fastRotationRetries(t)
 
-	// Migration: enrolled by an older platform (no secret, key kept).
-	p := newFakeSensorPlatform(t, false)
+	p := newFakeSensorPlatform(t, true, "zeroth-secret", "first-secret", "second-secret")
 	s, path := enrollingSensor(t, p)
 	if err := s.register(); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	p.mu.Lock()
-	p.issue, p.secrets = true, []string{"first-secret", "second-secret"}
-	p.mu.Unlock()
 
 	reloaded, err := config.LoadFromFile(path)
 	if err != nil {
@@ -237,21 +246,21 @@ func TestSensorSecret_RotationAndMigration(t *testing.T) {
 	}
 	rs := &Sensor{config: reloaded, configPath: path, sensorManager: api.NewSensorManagerClient(reloaded)}
 	rs.rotateCertificateIfNeeded(rs.sensorManager)
-	if got := p.sawRequest[1]["supports_agent_secret"]; got != true {
-		t.Fatalf("rotation request supports_agent_secret = %v, want true", got)
+	if _, asked := p.sawRequest[1]["supports_agent_secret"]; asked {
+		t.Fatal("rotation request still asks for an agent secret; protocol 1 always issues one")
 	}
 
 	body, _ := os.ReadFile(path)
 	if strings.Contains(string(body), testSensorRegKey) || strings.Contains(string(body), "registrationKey:") {
-		t.Fatalf("the registration key is still in the config after migration:\n%s", body)
+		t.Fatalf("the registration key is in the config after rotation:\n%s", body)
 	}
 	after, err := config.LoadFromFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := after.AgentSecretState()
-	if st.Secret != "first-secret" || st.Previous != testSensorRegKey {
-		t.Fatalf("after migration state = %+v, want first-secret with the registration key as the previous", st)
+	if st.Secret != "first-secret" || st.Previous != "zeroth-secret" {
+		t.Fatalf("after rotation state = %+v, want first-secret with zeroth-secret as the previous", st)
 	}
 
 	// Second rotation: replaced again, previous is now the first secret.
@@ -262,7 +271,7 @@ func TestSensorSecret_RotationAndMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	st = again.AgentSecretState()
-	if st.Secret != "second-secret" || st.Version != 2 || st.Previous != "first-secret" {
+	if st.Secret != "second-secret" || st.Version != 3 || st.Previous != "first-secret" {
 		t.Fatalf("after second rotation state = %+v", st)
 	}
 

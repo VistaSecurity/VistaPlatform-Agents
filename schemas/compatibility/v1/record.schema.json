@@ -1,0 +1,764 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/VistaSecurity/VistaPlatform-Agents/schemas/compatibility/v1/record.schema.json",
+  "title": "Vista Platform agents: compatibility record, v1",
+  "description": "Which platform builds were tested with one agents release's exact bytes. A record is never edited: a newer record for the same bytes supersedes it and both stay published. 'pending' lets a platform build be tested with the bytes; only 'tested' for a platform version and edition lets that platform offer them. The $defs shared with schemas/release/v1/release.schema.json are kept identical by scripts/release-metadata.test.mjs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "record_id",
+    "issued_at",
+    "supersedes",
+    "agents_release",
+    "agents",
+    "protocol",
+    "modes",
+    "platform_compatibility",
+    "signer",
+    "notices"
+  ],
+  "properties": {
+    "schema": {
+      "const": "vista.agent-compatibility/v1"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^agents-[0-9A-Za-z.-]+-c[1-9][0-9]*$",
+      "description": "Unique and never reused: agents-<version or nightly id>-c<n>."
+    },
+    "issued_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "supersedes": {
+      "description": "The record this one replaces for the same bytes; the old record stays published. null for c1.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^agents-[0-9A-Za-z.-]+-c[1-9][0-9]*$"
+        }
+      ]
+    },
+    "agents_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "tag",
+        "channel",
+        "nightly_id",
+        "source_repo",
+        "source_sha",
+        "metadata"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/semver"
+        },
+        "tag": {
+          "$ref": "#/$defs/tag"
+        },
+        "channel": {
+          "$ref": "#/$defs/channel"
+        },
+        "nightly_id": {
+          "$ref": "#/$defs/nightly_id"
+        },
+        "source_repo": {
+          "$ref": "#/$defs/repo_url"
+        },
+        "source_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "metadata": {
+          "description": "agents-release.json of the same release, bound by digest.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "url",
+            "sha256"
+          ],
+          "properties": {
+            "url": {
+              "$ref": "#/$defs/asset_url"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "$ref": "#/$defs/agents"
+    },
+    "protocol": {
+      "$ref": "#/$defs/protocol"
+    },
+    "modes": {
+      "$ref": "#/$defs/modes"
+    },
+    "platform_compatibility": {
+      "description": "The tested claims. Empty for a nightly's first record, which names no platform.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/platform_claim"
+      }
+    },
+    "signer": {
+      "description": "The identity a verifier checks. Records whose claims are all 'pending' may be signed by the release or nightly workflow that published the bytes; a 'tested' or 'withdrawn' claim only by compatibility.yml.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issuer",
+        "identity"
+      ],
+      "properties": {
+        "issuer": {
+          "const": "https://token.actions.githubusercontent.com"
+        },
+        "identity": {
+          "$ref": "#/$defs/workflow_identity"
+        }
+      }
+    },
+    "notices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "license",
+        "third_party_notices_url",
+        "third_party_notices_sha256"
+      ],
+      "properties": {
+        "license": {
+          "const": "Apache-2.0"
+        },
+        "third_party_notices_url": {
+          "$ref": "#/$defs/asset_url"
+        },
+        "third_party_notices_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "required": [
+          "platform_compatibility"
+        ],
+        "properties": {
+          "platform_compatibility": {
+            "type": "array",
+            "contains": {
+              "type": "object",
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "tested",
+                    "withdrawn"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "signer": {
+            "type": "object",
+            "properties": {
+              "identity": {
+                "type": "string",
+                "pattern": "/\\.github/workflows/compatibility\\.yml@refs/heads/main$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": [
+          "agents_release"
+        ],
+        "properties": {
+          "agents_release": {
+            "type": "object",
+            "required": [
+              "channel"
+            ],
+            "properties": {
+              "channel": {
+                "const": "stable"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "artifacts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "provenance": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": [
+          "agents_release"
+        ],
+        "properties": {
+          "agents_release": {
+            "type": "object",
+            "required": [
+              "channel"
+            ],
+            "properties": {
+              "channel": {
+                "const": "nightly"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "agents_release": {
+            "type": "object",
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^nightly-"
+              },
+              "nightly_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "agents_release": {
+            "type": "object",
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^v"
+              },
+              "nightly_id": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "tag": {
+      "description": "v<semver> for a tagged release (release candidates as -rc.<n>), nightly-<YYYYMMDD>-<12-hex source sha> for a nightly (D19).",
+      "type": "string",
+      "pattern": "^(v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-rc\\.(0|[1-9][0-9]*))?|nightly-[0-9]{8}-[0-9a-f]{12})$"
+    },
+    "channel": {
+      "enum": [
+        "stable",
+        "prerelease",
+        "nightly"
+      ]
+    },
+    "nightly_id": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^nightly-[0-9]{8}-[0-9a-f]{12}$"
+        }
+      ]
+    },
+    "repo_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "asset_url": {
+      "description": "An immutable release-asset URL of one tag. Never a moving pointer: /releases/latest/... does not match, and a tag named latest is refused.",
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[A-Za-z0-9._-]+/[A-Za-z0-9._+-]+$",
+      "not": {
+        "type": "string",
+        "pattern": "/releases/download/latest/"
+      }
+    },
+    "workflow_identity": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/(release\\.yml@refs/tags/v[0-9A-Za-z.-]+|nightly\\.yml@refs/heads/main|compatibility\\.yml@refs/heads/main)$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "arch",
+        "type",
+        "file",
+        "url",
+        "sha256",
+        "size",
+        "signature",
+        "provenance",
+        "runtime_qualified",
+        "native_signing",
+        "requires"
+      ],
+      "properties": {
+        "os": {
+          "enum": [
+            "linux",
+            "darwin",
+            "windows"
+          ]
+        },
+        "arch": {
+          "description": "any for an installer script, which runs on every architecture of its OS.",
+          "enum": [
+            "amd64",
+            "arm64",
+            "386",
+            "any"
+          ]
+        },
+        "type": {
+          "enum": [
+            "binary",
+            "installer",
+            "package"
+          ]
+        },
+        "file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._+-]+$"
+        },
+        "url": {
+          "$ref": "#/$defs/asset_url"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "signature": {
+          "description": "The cosign bundle of this file, a release asset of the same release.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bundle_url",
+            "sha256"
+          ],
+          "properties": {
+            "bundle_url": {
+              "$ref": "#/$defs/asset_url"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "provenance": {
+          "description": "The SLSA build-provenance attestation naming this file. null only where the release metadata says provenance was unavailable (a nightly or a release candidate built while the repository was private).",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "url",
+                "sha256",
+                "predicate_type"
+              ],
+              "properties": {
+                "url": {
+                  "$ref": "#/$defs/asset_url"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "predicate_type": {
+                  "const": "https://slsa.dev/provenance/v1"
+                }
+              }
+            }
+          ]
+        },
+        "runtime_qualified": {
+          "description": "true only when this release's workflow executed this artifact on a GitHub-hosted runner of its OS and architecture. false = compile-only: never advertised as supported.",
+          "type": "boolean"
+        },
+        "native_signing": {
+          "description": "Platform-native code signing. The cosign signature does not imply it.",
+          "enum": [
+            "none",
+            "authenticode",
+            "notarized"
+          ]
+        },
+        "requires": {
+          "description": "The capture runtime the host must provide; never bundled.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "libpcap",
+              "npcap"
+            ]
+          }
+        },
+        "sbom": {
+          "description": "CycloneDX SBOM of a binary, generated from the module list compiled into it.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "url",
+            "sha256",
+            "format"
+          ],
+          "properties": {
+            "url": {
+              "$ref": "#/$defs/asset_url"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "format": {
+              "const": "CycloneDX-1.6-json"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "installer"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "arch": {
+                "const": "any"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "arch": {
+                "enum": [
+                  "amd64",
+                  "arm64",
+                  "386"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "binary"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "required": [
+              "sbom"
+            ],
+            "properties": {
+              "sbom": true
+            }
+          }
+        }
+      ]
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "variant",
+          "version",
+          "artifacts"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "variant": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "version": {
+            "$ref": "#/$defs/semver"
+          },
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/artifact"
+            }
+          }
+        }
+      }
+    },
+    "protocol": {
+      "description": "MANAGED_PROTOCOL_ADR D-P1: the managed protocol versions and the capabilities each agent kind reports.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "managed_versions",
+        "capabilities",
+        "output_versions"
+      ],
+      "properties": {
+        "managed_versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$"
+            }
+          }
+        },
+        "output_versions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "managed",
+        "standalone"
+      ],
+      "properties": {
+        "managed": {
+          "enum": [
+            "supported",
+            "pending"
+          ]
+        },
+        "standalone": {
+          "enum": [
+            "none",
+            "preview",
+            "supported"
+          ]
+        }
+      }
+    },
+    "platform_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "editions",
+        "platform_versions",
+        "status",
+        "tested_at",
+        "qualification_ref"
+      ],
+      "properties": {
+        "editions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "core",
+              "enterprise",
+              "msp"
+            ]
+          }
+        },
+        "platform_versions": {
+          "description": "Exact platform versions; ranges are a later, deliberate change (OA-4).",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/semver"
+          }
+        },
+        "status": {
+          "enum": [
+            "tested",
+            "pending",
+            "withdrawn"
+          ]
+        },
+        "tested_at": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/timestamp"
+            }
+          ]
+        },
+        "qualification_ref": {
+          "description": "An opaque private evidence id; no private detail.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "tested"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "tested_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "qualification_ref": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "tested_at": {
+                "type": "null"
+              },
+              "qualification_ref": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

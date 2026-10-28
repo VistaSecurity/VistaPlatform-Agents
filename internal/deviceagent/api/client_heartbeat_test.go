@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 // The heartbeat must carry the binary's stamped version so an in-place binary
@@ -19,12 +20,12 @@ import (
 // treats "" as not-reported rather than blanking the stored value).
 func TestSendHeartbeatCarriesStampedVersion(t *testing.T) {
 	var got map[string]interface{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &got)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := &config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()}

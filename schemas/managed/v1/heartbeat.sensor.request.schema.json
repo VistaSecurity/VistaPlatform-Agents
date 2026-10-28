@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/heartbeat.sensor.request.schema.json",
+  "title": "Sensor heartbeat request",
+  "description": "POST /api/v1/sensor-manager/sensors/{id}/heartbeat, every HeartbeatInterval (default 60 s). sensor_id equals the path id. protocol_error carries the agent's refusal line while the platform's last answer named no protocol it implements.",
+  "type": "object",
+  "required": [
+    "sensor_id",
+    "status",
+    "capabilities",
+    "timestamp"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "sensor_id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "active",
+        "inactive",
+        "error",
+        "offline"
+      ]
+    },
+    "version": {
+      "type": "string"
+    },
+    "capabilities": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "dns_interfaces": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "last_heartbeat": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "uptime": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "memory_usage": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cpu_usage": {
+      "type": "number"
+    },
+    "packets_captured": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "discoveries_made": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "errors": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "metrics": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "interface_stats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "interface_name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "interface_name": {
+            "type": "string"
+          },
+          "packet_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drop_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drop_rate_pct": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "available_interfaces": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "config_revision": {
+      "type": "string"
+    },
+    "config_failures": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "config_pending_restart": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "config_running": {
+      "$ref": "defs/config-values.json"
+    },
+    "reporting_interval": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ip_address": {
+      "type": "string"
+    },
+    "interfaces": {
+      "type": "array",
+      "items": {
+        "$ref": "defs/host-address.json"
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "fqdn": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "defs/host-address.json"
+          }
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "protocol_error": {
+      "type": "string"
+    }
+  }
+}

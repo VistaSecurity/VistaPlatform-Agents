@@ -13,6 +13,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 )
 
 var noWait = RetryPolicy{Attempts: 5, Backoff: time.Millisecond, Sleep: func(context.Context, time.Duration) {}}
@@ -67,6 +68,7 @@ func TestRetryingSubmitter_DeliversThroughRealClientAfterBlips(t *testing.T) {
 	defer srv.Close()
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String(), DataPath: t.TempDir()})
+	protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 	rs := &RetryingSubmitter{Client: c, Policy: noWait}
 	if err := rs.SubmitResult(&models.JobResult{JobID: uuid.New(), Success: true}); err != nil {
 		t.Fatalf("SubmitResult: %v", err)

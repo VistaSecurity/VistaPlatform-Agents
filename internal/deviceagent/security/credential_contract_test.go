@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentcreds"
@@ -79,15 +80,10 @@ func TestCredentialContract_AgentSide_RejectsMasterEncryptedShape(t *testing.T) 
 		t.Fatal("the master-encrypted shape is being treated as a canonical envelope")
 	}
 
-	// DecryptCredentials still returns it verbatim for backward compatibility
-	// with genuinely-plaintext platforms; the guarantee this test pins is that
-	// the platform no longer produces it (see the platform-side contract test),
-	// and that the agent does not pretend to have decrypted anything.
+	// Managed protocol 1 (D-P7): an unsealed map is refused outright, so the
+	// agent neither uses it nor pretends to have decrypted anything.
 	got, err := DecryptCredentials(legacy, agentcreds.ContractVector.JobID, agentcreds.ContractVector.Secret)
-	if err != nil {
-		t.Fatalf("DecryptCredentials = %v, want nil", err)
-	}
-	if got["password"] != "abcd****wxyz" {
-		t.Fatalf("password = %v; the agent must not claim to have decrypted an unsealed payload", got["password"])
+	if !errors.Is(err, ErrUnsealedCredentials) || got != nil {
+		t.Fatalf("DecryptCredentials = %v, %v; want ErrUnsealedCredentials and nothing", got, err)
 	}
 }

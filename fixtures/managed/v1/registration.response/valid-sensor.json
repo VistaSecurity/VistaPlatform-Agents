@@ -1,0 +1,24 @@
+{
+  "sensor_id": "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+  "client_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "server_ca_cert": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNBLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+  "certificate_expires_at": "2027-01-02T03:04:05Z",
+  "control_plane_url": "https://agents.example.test:8444",
+  "agent_secret": "c3ludGhldGljLWFnZW50LXNlY3JldA==",
+  "agent_secret_version": 1,
+  "reporting_interval": 30,
+  "features": {
+    "active_probing": true,
+    "network_discovery": true,
+    "host_observation": true
+  },
+  "config": {},
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "identity_dns_v1",
+      "scan_plan_v1",
+      "verify_certificate_v1"
+    ]
+  }
+}

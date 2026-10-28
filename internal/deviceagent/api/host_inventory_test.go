@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 )
@@ -42,14 +43,15 @@ func hostInventoryFixture() (*hostinventory.Report, *di.InterrogateResult) {
 
 func TestSubmitHostInventory_413IsATypedErrorCarryingTheMeasuredSize(t *testing.T) {
 	var requests int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests++
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_, _ = w.Write([]byte(`{"error":"too big","max_bytes":33554432,"detail":"not a transient failure"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
+	protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 	report, observations := hostInventoryFixture()
 
 	err := c.SubmitHostInventory(report, observations)
@@ -85,12 +87,13 @@ func TestSubmitHostInventory_413IsATypedErrorCarryingTheMeasuredSize(t *testing.
 // anyone looking again.
 func TestSubmitHostInventory_OtherFailuresAreNotReportTooLarge(t *testing.T) {
 	for _, status := range []int{http.StatusInternalServerError, http.StatusBadRequest, http.StatusUnauthorized} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(`{"error":"nope"}`))
-		}))
+		})))
 
 		c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
+		protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 		report, observations := hostInventoryFixture()
 		err := c.SubmitHostInventory(report, observations)
 		srv.Close()
@@ -107,13 +110,14 @@ func TestSubmitHostInventory_OtherFailuresAreNotReportTooLarge(t *testing.T) {
 }
 
 func TestSubmitHostInventory_AcceptedIsNotAnError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"status":"materialised"}`))
-	}))
+	})))
 	defer srv.Close()
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
+	protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 	report, observations := hostInventoryFixture()
 	if err := c.SubmitHostInventory(report, observations); err != nil {
 		t.Fatalf("202 Accepted was reported as a failure: %v", err)
@@ -136,10 +140,10 @@ func TestSubmitHostInventory_AcceptedIsNotAnError(t *testing.T) {
 // SubmitHostInventory and the first assertion fails.
 func TestSubmitHostInventory_ShipsThePackageListOnce(t *testing.T) {
 	var body []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(protocoltest.Speak1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusAccepted)
-	}))
+	})))
 	defer srv.Close()
 
 	report, observations := hostInventoryFixture()
@@ -150,6 +154,7 @@ func TestSubmitHostInventory_ShipsThePackageListOnce(t *testing.T) {
 	}
 
 	c := NewOutboundClient(&config.Config{PlatformURL: srv.URL, AgentID: uuid.New().String()})
+	protocoltest.Open(c.Gate()) // as after a protocol-1 heartbeat
 	if err := c.SubmitHostInventory(report, observations); err != nil {
 		t.Fatalf("SubmitHostInventory: %v", err)
 	}

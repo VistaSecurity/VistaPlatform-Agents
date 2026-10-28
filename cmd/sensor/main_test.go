@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/capture"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
@@ -230,7 +229,7 @@ func TestRestartCommandFlushesBufferedDiscoveriesAfterAck(t *testing.T) {
 	cfg := &config.Config{SensorID: sensorID, ControlPlaneURL: server.URL}
 	s := &Sensor{
 		config:       cfg,
-		apiClient:    api.NewOutboundClient(cfg),
+		apiClient:    negotiatedClient(cfg),
 		discoveries:  []*models.CryptoDiscovery{{ID: "disc-1", SensorID: sensorID, Protocol: "TLS", DestIP: "203.0.113.10", Port: 443}},
 		restartChan:  make(chan struct{}, 1),
 		restartDelay: time.Nanosecond,
@@ -292,7 +291,7 @@ func TestCleanupSubmitsPendingRetryQueue(t *testing.T) {
 	}
 	s := &Sensor{
 		config:    cfg,
-		apiClient: api.NewOutboundClient(cfg),
+		apiClient: negotiatedClient(cfg),
 		pendingRetry: []*models.CryptoDiscovery{
 			{ID: "retry-1", SensorID: sensorID, Protocol: "TLS", DestIP: "192.0.2.10", Port: 443},
 			{ID: "retry-2", SensorID: sensorID, Protocol: "SSH", DestIP: "192.0.2.11", Port: 22},
@@ -352,7 +351,7 @@ func TestCleanupSubmitsDiscoveriesLeftInCaptureChannel(t *testing.T) {
 
 	s := &Sensor{
 		config:        cfg,
-		apiClient:     api.NewOutboundClient(cfg),
+		apiClient:     negotiatedClient(cfg),
 		packetCapture: packetCapture,
 		discoveries:   make([]*models.CryptoDiscovery, 0),
 	}
