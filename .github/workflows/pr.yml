@@ -78,7 +78,7 @@ jobs:
 
   build-test:
     name: build-test (linux/amd64, cgo)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     env:
       CGO_ENABLED: '1'
