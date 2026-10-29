@@ -8,8 +8,11 @@
 #     nothing is replaced, re-uploaded or overwritten (no --clobber anywhere);
 #     a published release is never changed, and a quarantined draft is
 #     inspected and deleted by a maintainer before a re-run;
-#   - only a stable release may become "latest"; a nightly or a release
-#     candidate is published as a prerelease and never moves that pointer.
+#   - only a stable release may become "latest", and only when its version is
+#     the highest stable one among the published releases: a nightly or a
+#     release candidate is published as a prerelease and never moves that
+#     pointer, and a patch for an older line (v5.3.1 after v5.4.0) is
+#     published with --latest=false so it cannot pull the pointer backwards.
 #
 #   github-release.sh precheck     REPO TAG
 #   github-release.sh nightly-tag  REPO TAG SHA        # create the nightly tag at SHA
@@ -24,6 +27,20 @@ die() { echo "github-release: $*" >&2; exit 1; }
 
 releases_for_tag() { # REPO TAG -> "id draft" lines, drafts included
   gh api --paginate "repos/$1/releases?per_page=100" --jq ".[] | select(.tag_name == \"$2\") | \"\(.id) \(.draft)\""
+}
+
+# Is TAG (a stable vX.Y.Z) the highest stable version among the published
+# releases? Drafts and prereleases do not count, and neither does any tag that
+# is not exactly vX.Y.Z (a release candidate published without the prerelease
+# flag, a nightly): they are not stable versions. A failed listing is an error,
+# never a default either way.
+is_highest_stable() { # REPO TAG
+  local listing published top
+  listing=$(gh release list --repo "$1" --limit 1000 --json tagName,isDraft,isPrerelease \
+    --jq '.[] | "\(.tagName) \(.isDraft) \(.isPrerelease)"') || die "could not list the releases of $1"
+  published=$(awk '$2 == "false" && $3 == "false" { print $1 }' <<<"$listing")
+  top=$(printf '%s\n%s\n' "$published" "$2" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n 1)
+  [ "$top" = "$2" ]
 }
 
 case "$cmd" in
@@ -67,7 +84,12 @@ case "$cmd" in
   publish)
     repo=$1 tag=$2 channel=$3 sha=$4
     if [ "$channel" = stable ]; then
-      gh release edit "$tag" --repo "$repo" --draft=false --latest
+      if is_highest_stable "$repo" "$tag"; then
+        gh release edit "$tag" --repo "$repo" --draft=false --latest
+      else
+        echo "github-release: $tag is not the highest stable version; it is published without becoming latest"
+        gh release edit "$tag" --repo "$repo" --draft=false --latest=false
+      fi
     else
       gh release edit "$tag" --repo "$repo" --draft=false --prerelease --latest=false
     fi
@@ -76,7 +98,7 @@ case "$cmd" in
     echo "github-release: published $tag ($channel) at $sha"
     ;;
   *)
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac

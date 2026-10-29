@@ -26,6 +26,12 @@
 //   trigger         no `pull_request_target` and no `workflow_run`: both run
 //                   with the base repository's privileges in reach of
 //                   untrusted code or artefacts.
+//   reusable        a workflow that declares `workflow_call` declares no other
+//                   trigger. A reusable workflow runs inside its callers and
+//                   is meant to be reached only through them; a second trigger
+//                   (a push, a pull request, a manual dispatch) would let it
+//                   run on its own, outside the caller's environment and
+//                   identity, building bytes nobody signs for.
 //   permissions     every workflow declares top-level `permissions:`. In a
 //                   workflow triggered by a pull-request event, every
 //                   permission (top-level and per job) is `read` or `none`.
@@ -751,6 +757,10 @@ export function checkWorkflowText(text, { composite = false } = {}) {
   const triggers = triggersOf(doc);
   if (triggers.length === 0) add('trigger', 'no "on:" triggers found');
   for (const t of FORBIDDEN_TRIGGERS) if (triggers.includes(t)) add('trigger', `"${t}" is not allowed`);
+  if (triggers.includes('workflow_call')) {
+    const others = triggers.filter((t) => t !== 'workflow_call');
+    if (others.length > 0) add('reusable', `a workflow that declares workflow_call may declare no other trigger (also: ${others.join(', ')})`);
+  }
   const prTriggered = triggers.some((t) => PULL_REQUEST_TRIGGERS.includes(t) || t === 'pull_request_target');
 
   if (!Object.prototype.hasOwnProperty.call(doc, 'permissions')) {

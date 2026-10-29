@@ -5,7 +5,7 @@
 // rule's name. The repository's own workflows must pass as they stand.
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +16,28 @@ import { checkRepository, checkWorkflowText, parseYaml, YamlSubsetError } from '
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, 'check-workflows.mjs');
+
+// Where this file's fixtures live: $VISTA_TEST_TMPDIR when set; otherwise
+// `.scratch/` at the repository root (gitignored, created on demand);
+// otherwise, only when the checkout is not writable, the operating system's
+// temp directory, a fallback that says so in `source`. Same rule as
+// scripts/release/fixture.mjs, repeated here because this file also ships,
+// byte for byte, in a repository that has no release scripts.
+export function scratchBase(env = process.env) {
+  if (env.VISTA_TEST_TMPDIR) {
+    const dir = path.resolve(env.VISTA_TEST_TMPDIR);
+    mkdirSync(dir, { recursive: true });
+    return { dir, source: 'VISTA_TEST_TMPDIR' };
+  }
+  const dir = path.join(here, '..', '.scratch');
+  try {
+    mkdirSync(dir, { recursive: true });
+    accessSync(dir, constants.W_OK);
+    return { dir, source: 'checkout' };
+  } catch {
+    return { dir: tmpdir(), source: 'os.tmpdir (fallback: the checkout is not writable)' };
+  }
+}
 
 const CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1';
 const SETUP_GO = 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0';
@@ -363,6 +385,38 @@ for (const [name, mutate] of Object.entries(reusableMutations)) {
   });
 }
 
+// A workflow that declares workflow_call declares no other trigger.
+const reusableTriggerMutations = {
+  'push added': (t) => replaceOnce(t, 'on:\n', 'on:\n  push:\n    branches: [main]\n'),
+  'pull_request added': (t) => replaceOnce(t, 'on:\n', 'on:\n  pull_request:\n'),
+  'workflow_dispatch added': (t) => replaceOnce(t, 'on:\n', 'on:\n  workflow_dispatch:\n'),
+  'schedule added': (t) => replaceOnce(t, 'on:\n', "on:\n  schedule:\n    - cron: '17 3 * * *'\n"),
+  'the list form [workflow_call, push]': (t) => replaceOnce(t, /on:\n  workflow_call:\n(?:    .*\n|      .*\n|        .*\n)*?(?=permissions:)/.exec(t)[0], 'on: [workflow_call, push]\n'),
+};
+
+for (const [name, mutate] of Object.entries(reusableTriggerMutations)) {
+  test(`reusable: workflow_call with ${name} fails (rule reusable)`, () => {
+    const mutated = mutate(GOOD_REUSABLE);
+    assert.notEqual(mutated, GOOD_REUSABLE);
+    assert.ok(rules(mutated).includes('reusable'), JSON.stringify(rules(mutated)));
+  });
+}
+
+test('reusable: workflow_call alone passes, and so does a workflow with other triggers and no workflow_call (not over-strict)', () => {
+  assert.ok(!rules(GOOD_REUSABLE).includes('reusable'));
+  assert.deepEqual(rules(GOOD_PR), []);
+});
+
+// The real reusable workflow with a push trigger added. It exists in the
+// release repository only; the same test file also ships where it does not.
+const REAL_BUILD = path.join(here, '..', '.github', 'workflows', 'build-agents.yml');
+test('reusable: build-agents.yml with a push trigger added fails (the real file)', { skip: !existsSync(REAL_BUILD) && 'this repository has no build-agents.yml' }, () => {
+  const real = readFileSync(REAL_BUILD, 'utf8');
+  assert.ok(!rules(real).includes('reusable'), 'the real workflow keeps the rule');
+  const mutated = replaceOnce(real, 'on:\n  workflow_call:', 'on:\n  push:\n    branches: [main]\n  workflow_call:');
+  assert.ok(rules(mutated).includes('reusable'), JSON.stringify(rules(mutated)));
+});
+
 test('trusted: a cache restore in a trusted workflow fails (rule cache)', () => {
   const t = replaceOnce(GOOD_TRUSTED, '      - run: make\n', '      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4\n        with:\n          path: x\n          key: k\n      - run: make\n');
   assert.ok(rules(t).includes('cache'));
@@ -431,7 +485,7 @@ for (const [name, text] of Object.entries({
 // --- the command line -----------------------------------------------------
 
 function cli(files) {
-  const dir = mkdtempSync(path.join(tmpdir(), 'check-workflows-'));
+  const dir = mkdtempSync(path.join(scratchBase().dir, 'check-workflows-'));
   try {
     mkdirSync(path.join(dir, '.github', 'workflows'), { recursive: true });
     for (const [name, text] of Object.entries(files)) writeFileSync(path.join(dir, '.github', 'workflows', name), text);
@@ -448,4 +502,33 @@ test('cli: exit 0 clean, 1 on a violation, 2 when a file cannot be read', () => 
   assert.match(bad.stderr, /other\.yml.*\[runner\]/);
   assert.equal(cli({ 'pr.yml': GOOD_PR, 'odd.yml': 'a: &x 1\n' }).status, 2);
   assert.equal(cli({}).status, 2, 'no workflows at all must not pass');
+});
+
+// --- where fixtures live ------------------------------------------------------
+
+test('fixtures: the default location is .scratch/ in the checkout, not the system temp directory', () => {
+  const base = scratchBase({});
+  assert.equal(base.dir, path.join(here, '..', '.scratch'));
+  assert.equal(base.source, 'checkout');
+  assert.ok(existsSync(base.dir), 'created on demand');
+});
+
+test('fixtures: .scratch/ is gitignored, and VISTA_TEST_TMPDIR wins', () => {
+  assert.match(readFileSync(path.join(here, '..', '.gitignore'), 'utf8'), /^\.scratch\/$/m);
+  const where = path.join(scratchBase().dir, 'override-check');
+  try {
+    assert.deepEqual(scratchBase({ VISTA_TEST_TMPDIR: where }), { dir: where, source: 'VISTA_TEST_TMPDIR' });
+    assert.ok(existsSync(where));
+  } finally {
+    rmSync(where, { recursive: true, force: true });
+  }
+});
+
+test('fixtures: the command-line tests leave nothing behind, on success or on failure', () => {
+  const before = existsSync(scratchBase().dir) ? readdirSync(scratchBase().dir).filter((n) => n.startsWith('check-workflows-')) : [];
+  cli({ 'pr.yml': GOOD_PR });
+  cli({ 'pr.yml': replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04', 'runs-on: [self-hosted]') });
+  cli({ 'odd.yml': 'a: &x 1\n' });
+  const after = readdirSync(scratchBase().dir).filter((n) => n.startsWith('check-workflows-'));
+  assert.deepEqual(after, before);
 });

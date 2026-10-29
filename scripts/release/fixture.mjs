@@ -5,7 +5,7 @@
 // everything else about it is what a release job would produce.
 
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -22,14 +22,44 @@ export const SOURCE_TIME = '2026-11-19T10:20:30Z';
 export const REPO = 'VistaSecurity/VistaPlatform-Agents';
 export const MODULE = 'github.com/vistasecurity/vistaplatform-agents';
 
+// Where fixtures live. In order: $VISTA_TEST_TMPDIR when set; otherwise
+// `.scratch/` at the repository root (gitignored, created on demand), so a
+// run leaves nothing in a shared system temp directory and a leftover is
+// visible next to the code that made it; otherwise, only when the checkout
+// is not writable, the operating system's temp directory. That last case is
+// a stated fallback, reported in `source`, never a silent default.
+export function scratchBase(env = process.env) {
+  if (env.VISTA_TEST_TMPDIR) {
+    const dir = path.resolve(env.VISTA_TEST_TMPDIR);
+    mkdirSync(dir, { recursive: true });
+    return { dir, source: 'VISTA_TEST_TMPDIR' };
+  }
+  const dir = path.join(REPO_ROOT, '.scratch');
+  try {
+    mkdirSync(dir, { recursive: true });
+    accessSync(dir, constants.W_OK);
+    return { dir, source: 'checkout' };
+  } catch {
+    return { dir: tmpdir(), source: 'os.tmpdir (fallback: the checkout is not writable)' };
+  }
+}
+
 const made = [];
+// Removed when the test process exits, whether its tests passed or failed
+// (the exit event also fires for an uncaught exception).
 process.on('exit', () => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
 
-// A temporary directory removed when the test process exits.
+// A temporary directory under scratchBase(), removed when the process exits.
 export function tempDir(prefix = 'agents-release-') {
-  const d = mkdtempSync(path.join(tmpdir(), prefix));
+  const d = mkdtempSync(path.join(scratchBase().dir, prefix));
   made.push(d);
   return d;
+}
+
+// The environment for a child process that makes temporary files of its own
+// (mktemp honours TMPDIR), so those land in the scratch directory too.
+export function scratchEnv(extra = {}) {
+  return { ...process.env, TMPDIR: scratchBase().dir, ...extra };
 }
 
 // A repository root with the real release surface and schemas, and fake

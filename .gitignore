@@ -20,3 +20,6 @@ node_modules/
 # Deliberately NOT ignored: *.pem, *.key, config.yaml. Test fixtures and the
 # sensor's example configuration use those names, and an ignore rule would
 # make `git add` drop them without a word.
+
+# Test fixtures (scripts/release/fixture.mjs, VISTA_TEST_TMPDIR overrides)
+.scratch/
