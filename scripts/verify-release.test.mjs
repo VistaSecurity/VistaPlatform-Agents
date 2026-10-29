@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { tarGz } from './release/archive.mjs';
-import { REPO, makeRelease, tempDir } from './release/fixture.mjs';
+import { REPO, makeRelease, scratchEnv, tempDir } from './release/fixture.mjs';
 import { compatibilityIdentity, identityRegexps, releaseIdentity, sha256File } from './release/lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -27,7 +27,7 @@ assert.deepEqual(base.errors, []);
 function verify(dir, { tag = 'v5.3.0', repo = REPO, skip = true } = {}) {
   const args = [VERIFY, '--repo', repo, '--tag', tag, '--dir', dir];
   if (skip) args.push('--skip-signatures');
-  return spawnSync('bash', args, { encoding: 'utf8' });
+  return spawnSync('bash', args, { encoding: 'utf8', env: scratchEnv() });
 }
 
 // A fresh copy of the good release for each mutation.
@@ -48,7 +48,7 @@ test('a consistent release passes, and the output says signatures were NOT verif
 test('without --skip-signatures the script never reports success unless it can verify', () => {
   // With no cosign on PATH it must stop (exit 2), not pass silently.
   const r = spawnSync('bash', [VERIFY, '--repo', REPO, '--tag', 'v5.3.0', '--dir', base.assets], {
-    encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' },
+    encoding: 'utf8', env: scratchEnv({ PATH: '/usr/bin:/bin' }),
   });
   if (r.status === 2) assert.match(r.stderr, /cosign is required|gh is required/);
   else assert.notEqual(r.status, 0, 'placeholder bundles must not verify');

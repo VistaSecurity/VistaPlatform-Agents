@@ -13,8 +13,9 @@
   later on their own.
 - `shared/`: the code both agents use, maintained here and nowhere else.
 - Nightly and tagged builds, installers and compatibility metadata, published
-  as this repository's releases. Releases are signed; build provenance is
-  attached once the repository is public.
+  as this repository's releases. Every artefact carries a Sigstore signature.
+  Build provenance is unavailable until the repository is public; a release
+  built before then records that in its metadata.
 
 The source arrives with the extraction work order (WO-04). Until the
 extraction lands, the Go jobs of the pull-request gate fail because there is no
@@ -29,10 +30,12 @@ head of `main` every night, under `nightly-YYYYMMDD-<commit>`. Both build every
 target on GitHub-hosted runners, run the Linux builds on linux/amd64 and
 linux/arm64, and publish each binary, package and installer with a Sigstore
 signature, an SBOM, `SHA256SUMS`, the release metadata `agents-release.json`
-and a compatibility record. SLSA build provenance is attached once the
-repository is public; until then a release records that it has none, and why.
-`compatibility.yml` signs later
-records, which say which platform versions were tested with those bytes.
+and a compatibility record. Signatures are present on every release. SLSA
+build provenance is unavailable until the repository is public: a release built
+while it is private says so in `agents-release.json` (`provenance.status:
+"unavailable"`, with the reason) and has no `provenance.intoto.jsonl`, and a
+stable release is not published without provenance. `compatibility.yml` signs
+later records, which say which platform versions were tested with those bytes.
 How to verify a download: `docs/verify-release.md`. How releases are made and
 what protects them: `docs/releasing.md`.
 

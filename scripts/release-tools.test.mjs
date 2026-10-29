@@ -5,8 +5,8 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { arch as hostArch, platform } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { arch as hostArch, platform, tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { tarGz, zip } from './release/archive.mjs';
 import { checkBuildInfo, checkVersionStamp } from './release/buildinfo.mjs';
 import { classifyChanges } from './release/compat-check.mjs';
-import { MODULE, SHA, buildInfoFor, makeRelease, tempDir } from './release/fixture.mjs';
-import { assetUrl, loadSurface, nightlyIdentifiers, parseTag } from './release/lib.mjs';
+import { MODULE, SHA, buildInfoFor, makeRelease, scratchBase, tempDir } from './release/fixture.mjs';
+import { REPO_ROOT, assetUrl, loadSurface, nightlyIdentifiers, parseTag } from './release/lib.mjs';
 import { plan } from './release/prune-nightlies.mjs';
 import { resolve } from './release/resolve.mjs';
 
@@ -247,6 +247,7 @@ case "$*" in
   *"git/ref/tags/"*) echo "$FAKE_REF_SHA" ;;
   *"/commits/"*) echo "$FAKE_COMMIT" ;;
   "release view"*) echo "\${FAKE_ASSETS:-0}" ;;
+  "release list"*) [ "\${FAKE_LIST_RC:-0}" = 0 ] || exit "$FAKE_LIST_RC"; printf '%s' "\${FAKE_LIST:-}"; [ -z "\${FAKE_LIST:-}" ] || echo ;;
   "release "*) ;;
   *) echo "unexpected gh call: $*" >&2; exit 99 ;;
 esac
@@ -267,6 +268,7 @@ function ghRelease(args, env = {}) {
 }
 
 const REPO_SLUG = 'VistaSecurity/VistaPlatform-Agents';
+const editCall = (r) => r.calls.find((c) => c.startsWith('release edit'));
 
 test('publish: precheck passes with no release, and fails on a draft or a published one', () => {
   assert.equal(ghRelease(['precheck', REPO_SLUG, 'v5.3.0']).status, 0);
@@ -288,18 +290,53 @@ test('publish: a draft is created against an existing tag, never as latest; only
   }
 });
 
-test('publish: only stable becomes latest, and a published tag must resolve to the built commit', () => {
+test('publish: a published tag must resolve to the built commit, and only a stable release can become latest', () => {
   const stable = ghRelease(['publish', REPO_SLUG, 'v5.3.0', 'stable', SHA], { FAKE_COMMIT: SHA });
   assert.equal(stable.status, 0);
-  assert.match(stable.calls[0], /^release edit v5\.3\.0 .*--draft=false --latest$/);
+  assert.match(editCall(stable), /^release edit v5\.3\.0 .*--draft=false --latest$/);
   for (const [tag, channel] of [['v5.3.0-rc.1', 'prerelease'], ['nightly-20261119-1a2b3c4d5e6f', 'nightly']]) {
-    const r = ghRelease(['publish', REPO_SLUG, tag, channel, SHA], { FAKE_COMMIT: SHA });
+    const r = ghRelease(['publish', REPO_SLUG, tag, channel, SHA], { FAKE_COMMIT: SHA, FAKE_LIST: '' });
     assert.equal(r.status, 0);
-    assert.match(r.calls[0], /--draft=false --prerelease --latest=false$/);
+    assert.match(editCall(r), /--draft=false --prerelease --latest=false$/);
+    assert.doesNotMatch(editCall(r), /--latest( |$)/, 'a prerelease or nightly is never latest');
+    assert.ok(!r.calls.some((c) => c.startsWith('release list')), 'a prerelease needs no comparison');
   }
   const moved = ghRelease(['publish', REPO_SLUG, 'v5.3.0', 'stable', SHA], { FAKE_COMMIT: 'f'.repeat(40) });
   assert.equal(moved.status, 1);
   assert.match(moved.out, /not the built commit/);
+});
+
+// The latest pointer: a stable release takes it only when no higher stable
+// version is already published. Each row is the publishing tag and the
+// releases GitHub lists ("tag draft prerelease" lines) and the outcome.
+const latestRows = [
+  ['the first release', 'v5.4.0', '', true],
+  ['only lower versions published', 'v5.4.0', 'v5.3.0 false false\nv5.3.1 false false\nv4.9.9 false false', true],
+  ['a patch for an older line after a newer minor', 'v5.3.1', 'v5.4.0 false false\nv5.3.0 false false', false],
+  ['a patch for an older major after a newer one', 'v4.9.9', 'v5.0.0 false false', false],
+  ['numeric, not lexical, order (5.9.1 after 5.10.0)', 'v5.9.1', 'v5.10.0 false false\nv5.9.0 false false', false],
+  ['numeric, not lexical, order (5.10.0 after 5.9.9)', 'v5.10.0', 'v5.9.9 false false', true],
+  ['a higher draft does not count', 'v5.3.1', 'v5.4.0 true false\nv5.3.0 false false', true],
+  ['a higher prerelease does not count', 'v5.3.1', 'v5.4.0 false true\nv5.3.0 false false', true],
+  ['a release candidate published as stable does not count', 'v5.4.0', 'v5.5.0-rc.1 false false\nv5.3.0 false false', true],
+  ['a nightly published as stable does not count', 'v5.4.0', 'nightly-20261119-1a2b3c4d5e6f false false\nv5.3.0 false false', true],
+];
+for (const [name, tag, list, latest] of latestRows) {
+  test(`publish: latest pointer, ${name}: ${latest ? '--latest' : '--latest=false'}`, () => {
+    const r = ghRelease(['publish', REPO_SLUG, tag, 'stable', SHA], { FAKE_COMMIT: SHA, FAKE_LIST: list });
+    assert.equal(r.status, 0, r.out);
+    const edit = editCall(r);
+    assert.ok(edit.startsWith(`release edit ${tag} `), edit);
+    assert.match(edit, latest ? /--draft=false --latest$/ : /--draft=false --latest=false$/);
+    assert.ok(r.calls.filter((c) => c.startsWith('release edit')).length === 1, 'one edit, published once');
+  });
+}
+
+test('publish: a failed release listing stops the run before anything is published', () => {
+  const r = ghRelease(['publish', REPO_SLUG, 'v5.3.0', 'stable', SHA], { FAKE_COMMIT: SHA, FAKE_LIST_RC: '1' });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /could not list the releases/);
+  assert.ok(!r.calls.some((c) => c.startsWith('release edit')), 'no guess either way');
 });
 
 test('publish: upload never clobbers and fails when the draft holds another number of assets', () => {
@@ -322,4 +359,55 @@ test('publish: a nightly tag must name the commit, is never moved, and must read
   assert.equal(exists.status, 1);
   assert.match(exists.out, /never moved/);
   assert.equal(ghRelease(['nightly-tag', REPO_SLUG, tag, SHA], { FAKE_REF_SHA: 'f'.repeat(40) }).status, 1);
+});
+
+// --- where fixtures live ------------------------------------------------------
+//
+// Under the checkout's gitignored .scratch/ unless VISTA_TEST_TMPDIR says
+// otherwise; the operating system's temp directory is a stated fallback for an
+// unwritable checkout, never the default. And a fixture is removed when the
+// test process ends, passed or failed.
+
+test('fixtures: the default location is .scratch/ in the checkout, not the system temp directory', () => {
+  const base = scratchBase({});
+  assert.equal(base.dir, path.join(REPO_ROOT, '.scratch'));
+  assert.equal(base.source, 'checkout');
+  assert.ok(existsSync(base.dir), 'created on demand');
+  const d = tempDir('where-');
+  assert.equal(path.dirname(d), scratchBase().dir, 'tempDir uses the scratch base');
+  if (!process.env.VISTA_TEST_TMPDIR) {
+    assert.equal(path.dirname(d), path.join(REPO_ROOT, '.scratch'));
+    assert.notEqual(path.dirname(d), tmpdir(), 'not the system temp directory (even when the checkout is itself under it)');
+  }
+});
+
+test('fixtures: .scratch/ is gitignored', () => {
+  assert.match(readFileSync(path.join(REPO_ROOT, '.gitignore'), 'utf8'), /^\.scratch\/$/m);
+});
+
+test('fixtures: VISTA_TEST_TMPDIR wins, and is created if missing', () => {
+  const where = path.join(tempDir('override-'), 'chosen', 'deep');
+  const base = scratchBase({ VISTA_TEST_TMPDIR: where });
+  assert.deepEqual(base, { dir: where, source: 'VISTA_TEST_TMPDIR' });
+  assert.ok(existsSync(where));
+});
+
+test('fixtures: a process that makes one removes it on success and on failure', () => {
+  const script = `
+    import { tempDir } from ${JSON.stringify(new URL('./release/fixture.mjs', import.meta.url).href)};
+    import { writeFileSync } from 'node:fs';
+    import path from 'node:path';
+    const d = tempDir('leak-');
+    writeFileSync(path.join(d, 'f'), 'x');
+    console.log(d);
+    if (process.env.FAIL) throw new Error('a failing test');
+  `;
+  const where = tempDir('leakcheck-');
+  for (const fail of [false, true]) {
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, VISTA_TEST_TMPDIR: where, ...(fail ? { FAIL: '1' } : {}) } });
+    assert.equal(r.status === 0, !fail, r.stderr);
+    const d = r.stdout.trim();
+    assert.equal(path.dirname(d), where, 'it honoured VISTA_TEST_TMPDIR');
+    assert.ok(!existsSync(d), `${fail ? 'failed' : 'passed'} run left ${d} behind`);
+  }
 });

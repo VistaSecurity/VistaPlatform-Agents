@@ -8,7 +8,7 @@ Customers verify releases as `docs/verify-release.md` describes.
 
 | Workflow | Trigger | Signs with | Publishes |
 |---|---|---|---|
-| `.github/workflows/release.yml` | push of a `vX.Y.Z` or `vX.Y.Z-rc.N` tag; or `gh workflow run release.yml --ref <tag> -f tag=<tag>` | `release.yml@refs/tags/<tag>` | a release for the tag; `vX.Y.Z-rc.N` as a prerelease; only `vX.Y.Z` may become latest |
+| `.github/workflows/release.yml` | push of a `vX.Y.Z` or `vX.Y.Z-rc.N` tag; or `gh workflow run release.yml --ref <tag> -f tag=<tag>` | `release.yml@refs/tags/<tag>` | a release for the tag; `vX.Y.Z-rc.N` as a prerelease; only a `vX.Y.Z` that is the highest stable version published may become latest (an older line's patch is published with `--latest=false`) |
 | `.github/workflows/nightly.yml` | daily at 03:17 UTC; or `gh workflow run nightly.yml --ref main` | `nightly.yml@refs/heads/main` | a prerelease under the new tag `nightly-YYYYMMDD-<12 hex>`, never latest; skipped when the head of `main` already has a nightly |
 | `.github/workflows/compatibility.yml` | push to `main` that adds `compatibility/records/<record_id>.json` | `compatibility.yml@refs/heads/main` | the signed record, attached to the release it describes |
 
