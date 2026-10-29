@@ -1,0 +1,134 @@
+{
+  "schema": "vista.agent-compatibility/v1",
+  "record_id": "agents-5.3.0-rc.1-c2",
+  "issued_at": "2026-10-29T19:16:40Z",
+  "supersedes": "agents-5.3.0-rc.1-c1",
+  "agents_release": {
+    "version": "5.3.0-rc.1",
+    "tag": "v5.3.0-rc.1",
+    "channel": "prerelease",
+    "nightly_id": null,
+    "source_repo": "https://github.com/VistaSecurity/VistaPlatform-Agents",
+    "source_sha": "00ca0db0770c2c4ea624eeb94b8c97dd7f5c1cd4",
+    "metadata": {
+      "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/agents-release.json",
+      "sha256": "d7f375b1d021aa1a2bc535720541de77a3dc83cf936eb6ede48f46479348e208"
+    }
+  },
+  "agents": [
+    {
+      "kind": "sensor",
+      "variant": "default",
+      "version": "5.3.0-rc.1",
+      "artifacts": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-sensor_5.3.0-rc.1_linux_amd64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-sensor_5.3.0-rc.1_linux_amd64",
+          "sha256": "1df9c7a194ad0808665c1bc678b89e238df7dba024dcb7003d2224e03ce06a53",
+          "size": 15736336,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-sensor_5.3.0-rc.1_linux_amd64.sigstore.json",
+            "sha256": "877faf4db11f0fcde28dfeaf1988607ea1c5faef44f1d0ef731dac4671b8a819"
+          },
+          "provenance": null,
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "libpcap"
+          ],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-sensor_5.3.0-rc.1_linux_amd64.cdx.json",
+            "sha256": "a1b45b99883cc463c1117385bac7db45e376a75054a0ccd9152639fb8cffb447",
+            "format": "CycloneDX-1.6-json"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "device-agent",
+      "variant": "default",
+      "version": "5.3.0-rc.1",
+      "artifacts": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-device-agent_5.3.0-rc.1_linux_amd64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-device-agent_5.3.0-rc.1_linux_amd64",
+          "sha256": "7e9775f1b3e553893a4f926cd08223842896c77f51208db4bb2314547ed9ccf1",
+          "size": 17819930,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-device-agent_5.3.0-rc.1_linux_amd64.sigstore.json",
+            "sha256": "c49650fe220be3226b392bc900bbabd766094866c14882c366ea682ed368ea11"
+          },
+          "provenance": null,
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/vista-device-agent_5.3.0-rc.1_linux_amd64.cdx.json",
+            "sha256": "d0f45c65e807c4477c3f097097219cacd4910333bcf9d4b70fba85ee5eda365b",
+            "format": "CycloneDX-1.6-json"
+          }
+        }
+      ]
+    }
+  ],
+  "protocol": {
+    "managed_versions": [
+      1
+    ],
+    "capabilities": {
+      "sensor": [
+        "identity_dns_v1",
+        "scan_plan_v1",
+        "verify_certificate_v1"
+      ],
+      "device-agent": [
+        "device_discovery"
+      ]
+    },
+    "output_versions": []
+  },
+  "modes": {
+    "managed": "pending",
+    "standalone": "none"
+  },
+  "platform_compatibility": [
+    {
+      "editions": [
+        "core"
+      ],
+      "platform_versions": [
+        "5.3.0-rc.1"
+      ],
+      "status": "tested",
+      "tested_at": "2026-10-29T19:16:40Z",
+      "qualification_ref": "qual-core-5.3.0-rc.1-b4fc77fada5f"
+    },
+    {
+      "editions": [
+        "enterprise",
+        "msp"
+      ],
+      "platform_versions": [
+        "5.3.0-rc.1"
+      ],
+      "status": "pending",
+      "tested_at": null,
+      "qualification_ref": null
+    }
+  ],
+  "signer": {
+    "issuer": "https://token.actions.githubusercontent.com",
+    "identity": "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/compatibility.yml@refs/heads/main"
+  },
+  "notices": {
+    "license": "Apache-2.0",
+    "third_party_notices_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0-rc.1/THIRD_PARTY_LICENSES",
+    "third_party_notices_sha256": "b2d64c2ffa8ef7acab6c2e4ca814cc5d973de3ee0bfdb17c95ee3d1ebd6da9cf"
+  }
+}
