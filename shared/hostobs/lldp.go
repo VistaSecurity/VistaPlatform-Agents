@@ -131,8 +131,20 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 				// Interface alias, port component, interface name, locally
 				// assigned — an opaque string chosen by the operator. Kept as
 				// evidence; it is not a name the platform can resolve.
-				if s := boundIdentifier(string(id)); s != "" {
-					obs.setAttr("lldp_chassis_id", s)
+				s := boundIdentifier(string(id))
+				if s == "" {
+					continue
+				}
+				obs.setAttr("lldp_chassis_id", s)
+				// Unless the string IS a MAC address. Some gateways advertise
+				// their base (chassis) MAC as text under a non-MAC subtype,
+				// usually "locally assigned". Taking the Ethernet source below
+				// instead would key the device on the MAC of whichever port
+				// sent the frame, while ARP from the same device keys it on
+				// the base MAC: one device, two records. The port's own
+				// identity stays in lldp_port_id.
+				if mac := lldpMACFromText(s); mac != "" {
+					obs.MAC = mac
 				}
 			}
 
@@ -230,8 +242,9 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 		return nil, ErrNotApplicable
 	}
 
-	// Fall back to the Ethernet source when the chassis ID was not a MAC: the
-	// frame still came from the advertiser's port.
+	// Fall back to the Ethernet source when the chassis ID was not a MAC, in
+	// either the MAC subtype or a MAC written as text: the frame still came
+	// from the advertiser's port.
 	if obs.MAC == "" {
 		obs.MAC = NormalizeMAC(f.SrcMAC)
 	}
@@ -241,6 +254,47 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 		return nil, ErrNotApplicable
 	}
 	return obs, nil
+}
+
+// lldpMACFromText returns s as a normalised MAC address when it is written in
+// one of the three common MAC spellings — six two-digit groups separated by
+// ':' or by '-' (one separator throughout), or three four-digit groups
+// separated by '.' — and "" otherwise.
+//
+// The shape is checked here rather than left to [NormalizeMAC], which skips
+// separators wherever they fall: an operator-chosen chassis string is free
+// text, and only a value that is unmistakably a MAC may become the identity
+// the device is keyed on. Twelve bare hex digits are refused for the same
+// reason: they are as likely a serial number as an address.
+func lldpMACFromText(s string) string {
+	isHex := func(c byte) bool {
+		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	}
+	var group int
+	var sep byte
+	switch len(s) {
+	case 17: // aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff
+		group, sep = 2, s[2]
+		if sep != ':' && sep != '-' {
+			return ""
+		}
+	case 14: // aabb.ccdd.eeff
+		group, sep = 4, '.'
+	default:
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		if (i+1)%(group+1) == 0 {
+			if s[i] != sep {
+				return ""
+			}
+			continue
+		}
+		if !isHex(s[i]) {
+			return ""
+		}
+	}
+	return NormalizeMAC(s)
 }
 
 // lldpAddrFromIANA converts an IANA address-family-numbered address (1 = IPv4,
