@@ -13,7 +13,11 @@ import "strings"
 // veth, a bridge or a tunnel MAC is generated, so minting identity from one
 // produces a new asset on every container restart. Bridges that CI and
 // container workloads create and destroy also churn: an identity block that
-// changes every few minutes is re-sent every few minutes.
+// changes every few minutes is re-sent every few minutes. And some of these
+// MACs belong to something else: a macvtap or macvlan interface carries a
+// guest's MAC on its host, and a VRRP interface carries the virtual MAC of an
+// address that moves between routers. Those can look burned in, so the
+// locally-administered bit does not catch them.
 //
 // One rule for both collectors that describe their own host: the device
 // agent's host inventory (shared/hostinventory) and the sensor's
@@ -32,7 +36,11 @@ var virtualInterfacePrefixes = []string{
 	"docker", "br-", "veth", "cni", "flannel", "cali", "cilium", "kube-",
 	"vxlan", "weave", "podman", "lxcbr", "lxdbr",
 	// Hypervisors. `veth` above also covers Hyper-V's `vEthernet (...)`.
-	"virbr", "vmnet", "vboxnet",
+	// macvtap and macvlan are how a guest attaches directly to a host NIC.
+	"virbr", "vmnet", "vboxnet", "macvtap", "macvlan",
+	// keepalived's `vrrp.<vrid>`. The dot keeps the prefix from reaching a NIC
+	// an operator happens to have named `vrrp`.
+	"vrrp.",
 	// Tunnels and overlays.
 	"tun", "tap", "wg", "utun", "tailscale", "gif", "stf",
 	// macOS: the bridge Internet Sharing and VM tools create, AirDrop / AWDL
