@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/netip"
 	"strings"
@@ -78,6 +79,10 @@ const (
 	// LLDP from a Cisco access switch.
 	lldpHex = "020704001a2f1122330416054769676162697445746865726e6574312f302f323406020078080e55706c696e6b20746f20636f72650a186163636573732d73772d332e636f72702e6578616d706c650c23436973636f20494f5320536f6674776172652c2043333735304520536f6674776172650e0400140014100c0501c0a80a020200000018000000"
 	// mDNS response announcing hp-printer.local with an _ipp._tcp service.
+	// LLDP whose chassis ID is the device's base MAC written as text
+	// (d8:b3:70:00:00:01), sent from one of its ports (d8:b3:70:00:00:02).
+	lldpTextChassisHex = "02120764383a62333a37303a30303a30303a3031040703d8b370000002060200780a09676174657761792d310e04001400140000"
+
 	mdnsHex = "1234840000000004000000000a68702d7072696e746572056c6f63616c0000018001000000780004c0a80a4d0b4850204c617365724a6574045f697070045f746370056c6f63616c00002180010000007800180000000002770a68702d7072696e746572056c6f63616c00045f697070045f746370056c6f63616c00000c000100000078001d0b4850204c617365724a6574045f697070045f746370056c6f63616c000a68702d7072696e746572056c6f63616c00001080010000007800060574793d4850"
 )
 
@@ -220,6 +225,52 @@ func TestHostObsPipelineEmitsDiscovery(t *testing.T) {
 	}
 	if m["host_observations_decoded"].(int64) != 1 {
 		t.Errorf("decoded = %v, want 1", m["host_observations_decoded"])
+	}
+}
+
+// A multi-port device's two addresses leave the sensor together: from a real
+// Ethernet frame, through the pipeline and into the JSON the platform receives,
+// the chassis MAC is the subject and the sending port rides beside it. The
+// platform's own frames for that port (ARP, DHCP) have nothing else to meet.
+func TestHostObsPipelineKeepsTheLLDPSourceMAC(t *testing.T) {
+	out := make(chan *models.CryptoDiscovery, 8)
+	p := newHostObsPipeline("sensor-1", out, time.Millisecond, hostobs.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Start(ctx)
+
+	port := net.HardwareAddr{0xd8, 0xb3, 0x70, 0x00, 0x00, 0x02}
+	nearestBridge := net.HardwareAddr{0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e}
+	p.Offer(buildEthernet(t, port, nearestBridge, layers.EthernetTypeLinkLayerDiscovery, mustHex(t, lldpTextChassisHex)), "eth0")
+	cancel()
+	p.Stop()
+
+	var d *models.CryptoDiscovery
+	select {
+	case d = <-out:
+	default:
+		t.Fatal("no discovery emitted")
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent struct {
+		RawMetadata struct {
+			HostObservation struct {
+				MAC        string         `json:"mac"`
+				Attributes map[string]any `json:"attributes"`
+			} `json:"host_observation"`
+		} `json:"raw_metadata"`
+	}
+	if err := json.Unmarshal(raw, &sent); err != nil {
+		t.Fatal(err)
+	}
+	obs := sent.RawMetadata.HostObservation
+	if obs.MAC != "d8:b3:70:00:00:01" {
+		t.Errorf("mac = %q, want the chassis MAC", obs.MAC)
+	}
+	if got := obs.Attributes[hostobs.AttrLLDPSourceMAC]; got != "d8:b3:70:00:00:02" {
+		t.Errorf("%s = %v, want the frame's source: %s", hostobs.AttrLLDPSourceMAC, got, raw)
 	}
 }
 

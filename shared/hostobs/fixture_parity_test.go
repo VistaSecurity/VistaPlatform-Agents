@@ -54,6 +54,13 @@ func TestCopiedFixturesAreByteIdentical(t *testing.T) {
 			},
 		},
 		{
+			name:  "lldp text chassis",
+			canon: lldpTextChassisMACHex,
+			copies: []fixtureCopy{
+				{sensorTest, "lldpTextChassisHex"},
+			},
+		},
+		{
 			name:  "mdns",
 			canon: mdnsResponseHex,
 			copies: []fixtureCopy{
