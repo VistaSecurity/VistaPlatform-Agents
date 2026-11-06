@@ -106,3 +106,38 @@ test('a key from the environment satisfies the key requirement', t => {
   });
   assert.doesNotMatch(result.stdout + result.stderr, /--url and --key are required/);
 });
+
+// The loose release asset is vista-device-agent_<version>_linux_<arch>; the
+// archive holds device-agent. Either works without a rename.
+const arch = { x64: 'amd64', arm64: 'arm64' }[process.arch];
+function runWith(t, files) {
+  const cwd = mkdtempSync(join(tmpdir(), 'device-agent-installer-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(cwd, name), body, { mode: 0o755 });
+  const result = spawnSync('bash', [installer, '--check-dependencies'], { cwd, encoding: 'utf8', timeout: 5000, input: '' });
+  assert.ifError(result.error);
+  return { ...result, output: result.stdout + result.stderr };
+}
+
+test('the loose release file for this machine is accepted under its release name', { skip: !arch && 'unknown machine' }, t => {
+  const result = runWith(t, {
+    [`vista-device-agent_5.4.0_linux_${arch}`]: works,
+    [`vista-device-agent_5.4.0_linux_${arch}.tar.gz`]: '#!/bin/sh\nexit 90\n',
+    [`vista-device-agent_5.4.0_windows_${arch}.exe`]: '#!/bin/sh\nexit 90\n',
+  });
+  assert.equal(result.status, 0, result.output);
+});
+
+test('no binary, or two release files, fail naming both accepted names', { skip: !arch && 'unknown machine' }, t => {
+  let result = runWith(t, {});
+  assert.equal(result.status, 1);
+  assert.match(result.output, /\.\/device-agent/);
+  assert.match(result.output, new RegExp(`vista-device-agent_<version>_linux_${arch}`));
+  result = runWith(t, { [`vista-device-agent_5.3.0_linux_${arch}`]: works, [`vista-device-agent_5.4.0_linux_${arch}`]: works });
+  assert.equal(result.status, 1);
+  assert.match(result.output, /keep only the one/);
+});
+
+test('on another system it names the installer for that system', () => {
+  assert.match(code, /On macOS use install-device-agent-macos\.sh; on Windows use install-device-agent\.ps1\./);
+});
