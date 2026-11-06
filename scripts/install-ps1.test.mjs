@@ -7,13 +7,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 const read = name => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
 // Comments explain history and may name what is forbidden; only code counts.
-const code = text =>
+const codeOf = text =>
   text.replace(/<#[\s\S]*?#>/g, '').split('\n').filter(line => !line.trimStart().startsWith('#')).join('\n');
 
-const sensorPs1 = code(read('install-sensor.ps1'));
+const sensorPs1 = codeOf(read('install-sensor.ps1'));
 const sensorMain = read('../cmd/sensor/main.go');
 
 // A sensor that cannot capture stops before it registers (the key stays
@@ -51,3 +52,77 @@ for (const name of ['install-sensor.ps1']) {
     assert.deepEqual(offenders, []);
   });
 }
+
+// install-sensor.ps1 as text, and pwsh for the tests that run its functions
+// (on GitHub's Linux runners; they skip without it).
+const raw = read('install-sensor.ps1');
+const code = sensorPs1;
+const pwsh = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0 ? 'pwsh' : null;
+const needsPwsh = { skip: !pwsh && 'pwsh not available' };
+
+// --- Reconfiguring an existing service --------------------------------------
+// Under Windows PowerShell 5.1, `sc.exe config <name> binPath= "<quoted path>"`
+// printed its usage text and changed nothing (exit 1639, output discarded), so
+// a re-run never re-enabled a service the installer had disabled and a new
+// command line never reached an existing service. PowerShell 7, which these
+// tests run, passes the quotes intact, so the bug itself cannot be reproduced
+// here: what is tested is that the installer reads the service back and fails
+// when the change did not take, which a no-op cannot pass.
+const serviceRegion = raw.slice(raw.indexOf('#region service-config'), raw.indexOf('#endregion service-config'));
+
+// Runs Set-ServiceStartup against a stand-in Win32_Service whose Change
+// behaves as `change` says, starting Disabled with an old command line.
+function setServiceStartup(change) {
+  const script = `${serviceRegion}
+$state = @{ PathName = 'C:\\old.exe'; StartMode = 'Disabled' }
+$get = { param($n) if ($n -eq 'Svc') { [pscustomobject]$state } }
+$change = {
+  param($svc, $path)
+  switch ($env:CHANGE) {
+    'works'  { $state.PathName = $path; $state.StartMode = 'Auto'; 0 }
+    'noop'   { 0 }
+    'path'   { $state.PathName = $path; 0 }
+    'denied' { 2 }
+  }
+}
+try { Set-ServiceStartup 'Svc' $env:WANT -Get $get -Change $change; "OK $($state.PathName) $($state.StartMode)" }
+catch { "ERROR: " + $_.Exception.Message }`;
+  const want = '"C:\\Program Files\\Vista Agent\\agent.exe" -config "C:\\Program Files\\Vista Agent\\a b.yaml" -ca-fingerprint ab';
+  const r = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', env: { ...process.env, CHANGE: change, WANT: want } });
+  return { out: (r.stdout + r.stderr).trim(), want };
+}
+
+test('reconfiguring a service sets its command line and start mode and reads them back', needsPwsh, () => {
+  const { out, want } = setServiceStartup('works');
+  assert.equal(out, `OK ${want} Auto`);
+});
+
+test('a reconfigure that changes nothing fails loudly', needsPwsh, () => {
+  assert.match(setServiceStartup('noop').out, /^ERROR: Service Svc was not reconfigured/);
+  assert.match(setServiceStartup('path').out, /^ERROR: Service Svc was not reconfigured/, 'a service left Disabled passed');
+  assert.match(setServiceStartup('denied').out, /^ERROR: Could not reconfigure service Svc: Win32_Service.Change returned 2/);
+});
+
+test('both the new and the existing service go through the checked reconfigure', () => {
+  assert.doesNotMatch(code, /sc(\.exe)?\s+config\b/, 'sc.exe config is back: Windows PowerShell 5.1 mangles its quoted binPath');
+  const set = code.indexOf('Set-ServiceStartup $ServiceName $binPath');
+  assert.ok(set > code.indexOf('New-Service'), 'a new service is not read back');
+  assert.ok(set > code.indexOf('Service already exists'), 'an existing service is not reconfigured through Set-ServiceStartup');
+  assert.ok(set < code.indexOf('Start-Service'), 'the service starts before it is reconfigured');
+});
+
+// A native command that changes the host must have its exit status checked
+// on the next line: its output is discarded, so nothing else would show it
+// did nothing.
+test('no state-changing native command has its exit status ignored', () => {
+  const lines = code.split('\n');
+  const unchecked = [];
+  lines.forEach((line, i) => {
+    if (/^\s*(&\s*)?(sc|icacls)(\.exe)?\s/i.test(line) && !/^\s*if \(\$LASTEXITCODE -ne 0\)/.test(lines[i + 1] || '')) {
+      unchecked.push(line.trim());
+    }
+  });
+  assert.deepEqual(unchecked, []);
+  assert.ok(lines.filter((l) => /^\s*(&\s*)?(sc|icacls)(\.exe)?\s/i.test(l)).length >= 2, 'the guard matches nothing');
+});
