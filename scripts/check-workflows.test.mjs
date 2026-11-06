@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { checkRepository, checkWorkflowText, parseYaml, YamlSubsetError } from './check-workflows.mjs';
+import { HOSTED_LABELS, checkRepository, checkWorkflowText, parseYaml, YamlSubsetError } from './check-workflows.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, 'check-workflows.mjs');
@@ -103,7 +103,7 @@ for (const [name, mutate] of Object.entries(runnerMutations)) {
 }
 
 test('runner: hosted matrix and hosted list pass', () => {
-  const t = replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04', 'strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-14, windows-latest]\n    runs-on: ${{ matrix.os }}');
+  const t = replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04', 'strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-15, macos-15-intel]\n    runs-on: ${{ matrix.os }}');
   assert.deepEqual(rules(t), []);
   assert.deepEqual(rules(replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04', 'runs-on: [ubuntu-24.04-arm]')), []);
 });
@@ -531,4 +531,33 @@ test('fixtures: the command-line tests leave nothing behind, on success or on fa
   cli({ 'odd.yml': 'a: &x 1\n' });
   const after = readdirSync(scratchBase().dir).filter((n) => n.startsWith('check-workflows-'));
   assert.deepEqual(after, before);
+});
+
+// --- runner allowlist = the labels in use ---------------------------------
+
+test('runner: a withdrawn or floating macOS label fails', () => {
+  for (const label of ['macos-14', 'macos-13', 'macos-latest', 'ubuntu-latest']) {
+    assert.ok(rules(replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04', `runs-on: ${label}`)).includes('runner'), label);
+  }
+});
+
+test("runner: HOSTED_LABELS is exactly the set of labels this repository's workflows use", () => {
+  const { labels, errors } = checkRepository(path.join(here, '..'));
+  assert.deepEqual(errors, []);
+  assert.deepEqual([...HOSTED_LABELS].sort(), [...labels].sort(),
+    'a label is allowed that no workflow uses (remove it), or the reverse');
+});
+
+test('runner: the labels a repository uses are collected from runs-on and matrices', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'check-workflows-'));
+  try {
+    mkdirSync(path.join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(path.join(root, '.github', 'workflows', 'pr.yml'), GOOD_PR);
+    writeFileSync(path.join(root, '.github', 'workflows', 'm.yml'), replaceOnce(GOOD_PR, 'runs-on: ubuntu-24.04',
+      'strategy:\n      matrix:\n        include:\n          - {os: macos-15}\n          - {os: macos-14}\n    runs-on: ${{ matrix.os }}'));
+    const { labels } = checkRepository(root);
+    assert.deepEqual([...labels].sort(), ['macos-14', 'macos-15', 'ubuntu-24.04']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
