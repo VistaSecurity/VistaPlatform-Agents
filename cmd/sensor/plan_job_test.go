@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,7 +27,9 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/enrichment"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocolschema"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
+	"github.com/vistasecurity/vistaplatform-agents/shared/discovery/tlsendpointtest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform-agents/shared/sensordispatch/planrun"
@@ -231,6 +234,77 @@ func TestPlanJob_ReportsEachHostThenCompletes(t *testing.T) {
 	}
 	if len(platform.completions) != 1 || platform.completions[0].Status != "completed" || platform.completions[0].TotalTargets != 4 || platform.completions[0].SuccessfulTargets != 4 {
 		t.Fatalf("completion = %+v", platform.completions)
+	}
+}
+
+// A planned scan's version enumeration reaches the platform: through the real
+// command path, the engine and the unit report, a TLS 1.3-only host's refusals
+// are in the message the sensor sends, in the schema's shape, and they survive
+// the decode the platform makes. A host the scan learned no TLS from carries
+// no such key.
+func TestPlanJob_ReportsTheTLSVersionsAHostRefused(t *testing.T) {
+	var scenario tlsendpointtest.Scenario
+	for _, sc := range tlsendpointtest.Scenarios {
+		if sc.Name == "address-only" {
+			scenario = sc
+		}
+	}
+	srv := tlsendpointtest.Start(t, scenario)
+
+	s, platform, fake := planSensor(t, "10.30.1.1", "10.30.1.2")
+	fake.hosts[netip.MustParseAddr("10.30.1.1")] = map[uint16]string{8443: srv.Addr}
+	s.processCommand(planCommand("cmd-tls", "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f49",
+		planTarget("10.30.1.1", "8443"), planTarget("10.30.1.2", "25")))
+	if ack := platform.waitAck(t, "the planned job"); ack.Status != "success" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	hosts := platform.hosts()
+	batch := sensordispatch.UnitBatch{Units: []sensordispatch.UnitResult{hosts["10.30.1.1"], hosts["10.30.1.2"]}}
+	sent, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas, err := protocolschema.Shared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schemas.ValidateJSON("unit-batch", sent); err != nil {
+		t.Fatalf("the unit report breaks its schema: %v", err)
+	}
+
+	var received sensordispatch.UnitBatch
+	if err := json.Unmarshal(sent, &received); err != nil {
+		t.Fatal(err)
+	}
+	if err := received.Validate(); err != nil {
+		t.Fatalf("the platform's check refuses the report: %v", err)
+	}
+	refusals := func(u sensordispatch.UnitResult) (any, bool) {
+		out, err := u.Output()
+		if err != nil {
+			t.Fatalf("output of %s: %v", u.Address, err)
+		}
+		if len(out.TCP) != 1 {
+			t.Fatalf("%s: observations = %+v, want one", u.Address, out.TCP)
+		}
+		if out.TCP[0].Result == nil {
+			return nil, false
+		}
+		v, ok := out.TCP[0].Result.Metadata[shareddisc.MetaTLSVersionsRefused]
+		return v, ok
+	}
+
+	got, ok := refusals(received.Units[0])
+	if !ok {
+		t.Fatalf("%s is not in the report: %s", shareddisc.MetaTLSVersionsRefused, sent)
+	}
+	want := []any{"TLS 1.2", "TLS 1.1", "TLS 1.0"}
+	if list, _ := got.([]any); !slices.Equal(list, want) {
+		t.Errorf("%s = %#v, want %#v", shareddisc.MetaTLSVersionsRefused, got, want)
+	}
+	if got, ok := refusals(received.Units[1]); ok {
+		t.Errorf("a host that is not TLS reported refusals: %v", got)
 	}
 }
 

@@ -516,7 +516,7 @@ func (id *identifier) measureTLSKeyExchangeSupport(ctx context.Context, port int
 }
 
 // enumerateTLSVersions adds to res the other TLS versions a confirmed TLS
-// listener accepts. Every connection goes through the run's gate and the
+// listener accepts and the ones it refuses. Every connection goes through the run's gate and the
 // scanner's dialer, one at a time, and honours ctx; the negotiated version is
 // already proven and stays first.
 func (id *identifier) enumerateTLSVersions(ctx context.Context, port int, res *ProbeResult, sni string) {
@@ -528,7 +528,9 @@ func (id *identifier) enumerateTLSVersions(ctx context.Context, port int, res *P
 		}
 		return &releasingConn{Conn: conn, release: release}, nil
 	}
-	applyTLSVersions(res, enumerateTLSVersions(ctx, dial, sni, id.prober.timeout, negotiatedTLSVersion(res)))
+	accepted, refused := enumerateTLSVersions(ctx, dial, sni, id.prober.timeout, negotiatedTLSVersion(res))
+	applyTLSVersions(res, accepted)
+	applyTLSVersionRefusals(res, refused)
 }
 
 // releasingConn hands a gated connection to code that only knows net.Conn:
