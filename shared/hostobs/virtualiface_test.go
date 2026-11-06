@@ -10,6 +10,9 @@ func TestIsVirtualInterfaceName(t *testing.T) {
 		"weave", "podman0", "lxcbr0", "lxdbr0",
 		// Hypervisors, including Hyper-V's virtual switch adapters.
 		"virbr0", "vmnet8", "vboxnet0", "vEthernet (WSL)", "vEthernet (Default Switch)",
+		// A guest attached directly to a host NIC, and keepalived's VRRP
+		// interface.
+		"macvtap0", "macvlan1", "vrrp.51",
 		// Tunnels.
 		"tun0", "tap0", "wg0", "utun3", "tailscale0", "gif0", "stf0",
 		// macOS.
@@ -34,6 +37,8 @@ func TestIsVirtualInterfaceName(t *testing.T) {
 		// Operator-built bridges that carry a host's real LAN address.
 		"br0", "vmbr0",
 		"bond0", "team0", "ib0",
+		// Names that only resemble the entries above.
+		"vrrp", "enmacvtap",
 	}
 	for _, name := range physical {
 		if IsVirtualInterfaceName(name) {
