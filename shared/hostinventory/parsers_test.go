@@ -617,3 +617,112 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestParseNetstat_TCP(t *testing.T) {
+	got, ok := ParseNetstat([]byte(fixture(t, "darwin", "netstat-tcp.txt")))
+	if !ok || got.Malformed != 0 {
+		t.Fatalf("ok=%v malformed=%d", ok, got.Malformed)
+	}
+	// Ten LISTEN rows are seven services: `*.22`, `*.58589` and `*.5000` each
+	// appear once per address family.
+	if len(got.Listeners) != 7 {
+		t.Fatalf("got %d listeners, want 7: %+v", len(got.Listeners), got.Listeners)
+	}
+	byPort := map[int]Listener{}
+	for _, l := range got.Listeners {
+		byPort[l.Port] = l
+	}
+	// The whole point: root's socket, seen by an account that is not root.
+	if l := byPort[22]; l.Address != "0.0.0.0" || l.Process != "launchd" || l.PID != 1 {
+		t.Errorf("launchd: %+v", l)
+	}
+	if l := byPort[58159]; l.Address != "127.0.0.1" || l.Process != "limactl" || l.PID != 8044 {
+		t.Errorf("loopback listener: %+v", l)
+	}
+	if l := byPort[8443]; l.Address != "198.51.100.10" || l.Process != "Example Helper" || l.PID != 4411 {
+		t.Errorf("a process name with a space: %+v", l)
+	}
+	if l := byPort[443]; l.Address != "2001:db8::10" || l.Process != "nginx" {
+		t.Errorf("IPv6 host.port: %+v", l)
+	}
+
+	// ESTABLISHED rows are connections; TIME_WAIT is neither.
+	if len(got.Connections) != 3 {
+		t.Fatalf("got %d connections, want 3: %+v", len(got.Connections), got.Connections)
+	}
+	c := got.Connections[0]
+	if c.Proto != "tcp" || c.LocalAddress != "198.51.100.10" || c.LocalPort != 49402 || c.RemoteAddress != "203.0.113.40" ||
+		c.RemotePort != 8444 || c.Process != "vista-device-age" || c.PID != 19869 {
+		t.Errorf("connection: %+v", c)
+	}
+	if z := got.Connections[2]; z.LocalAddress != "fe80::18b4:c697:7631:9dd7" || z.RemotePort != 62888 {
+		t.Errorf("the zone must be dropped: %+v", z)
+	}
+}
+
+func TestParseNetstat_UDP(t *testing.T) {
+	got, ok := ParseNetstat([]byte(fixture(t, "darwin", "netstat-udp.txt")))
+	if !ok || got.Malformed != 0 {
+		t.Fatalf("ok=%v malformed=%d", ok, got.Malformed)
+	}
+	bound := coalesceBoundUDP(got.BoundUDP)
+	// `*.*` is a socket with no port yet, so it is bound to nothing; the rest
+	// have no peer, so they stay unknown-role bindings and never listeners.
+	if len(bound) != 4 || len(got.Listeners) != 0 {
+		t.Fatalf("bound=%+v listeners=%+v", bound, got.Listeners)
+	}
+	byPort := map[int]BoundUDPSocket{}
+	for _, s := range bound {
+		byPort[s.Port] = s
+	}
+	if s := byPort[5353]; s.Address != "0.0.0.0" || s.Process != "mDNSResponder" || s.PID != 610 {
+		t.Errorf("mDNS: %+v", s)
+	}
+	if len(got.Connections) != 1 || got.Connections[0].RemoteAddress != "203.0.113.53" || got.Connections[0].Proto != "udp" {
+		t.Errorf("a UDP socket with a peer is a connection: %+v", got.Connections)
+	}
+}
+
+// Before the byte counters and the process name, netstat printed a bare pid
+// column. The columns are found from the header, so the shape is still read.
+func TestParseNetstat_OlderHeaderHasABarePid(t *testing.T) {
+	const out = `Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)     rhiwat shiwat    pid   epid  state    options
+tcp4       0      0  *.22                   *.*                    LISTEN      131072 131072      1      0 0x0080 0x00000006
+udp4       0      0  *.123                  *.*                                786896   9216    311      0 0x0100 0x00000000
+`
+	got, ok := ParseNetstat([]byte(out))
+	if !ok || got.Malformed != 0 || len(got.Listeners) != 1 || len(got.BoundUDP) != 1 {
+		t.Fatalf("ok=%v %+v", ok, got)
+	}
+	if l := got.Listeners[0]; l.Port != 22 || l.PID != 1 || l.Process != "" {
+		t.Errorf("listener: %+v", l)
+	}
+	if s := got.BoundUDP[0]; s.Port != 123 || s.PID != 311 {
+		t.Errorf("bound: %+v", s)
+	}
+}
+
+// Output with no table is a failed query, a table with no rows is a host with
+// no sockets, and a row that cannot be read keeps the table from being complete.
+func TestParseNetstat_WhatCountsAsAnAnswer(t *testing.T) {
+	if _, ok := ParseNetstat([]byte("netstat: sysctl: net.inet.tcp.pcblist_n: Operation not permitted\n")); ok {
+		t.Error("output with no header read as a socket table")
+	}
+	if _, ok := ParseNetstat(nil); ok {
+		t.Error("no output read as a socket table")
+	}
+	const header = "Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)  rxbytes txbytes rhiwat shiwat process:pid state options\n"
+	if got, ok := ParseNetstat([]byte(header)); !ok || got.Malformed != 0 || len(got.Listeners) != 0 {
+		t.Errorf("an empty table: ok=%v %+v", ok, got)
+	}
+	// A cut-short address must not become a listener.
+	cut := header + "tcp6 0 0 fe80::18b4:c697:.58589 *.* LISTEN 0 0 131072 131072 rapportd:932 00100 00000006\n"
+	if got, ok := ParseNetstat([]byte(cut)); !ok || got.Malformed != 1 || len(got.Listeners) != 0 {
+		t.Errorf("a truncated address: ok=%v %+v", ok, got)
+	}
+	short := header + "tcp4 0 0\n"
+	if got, _ := ParseNetstat([]byte(short)); got.Malformed != 1 {
+		t.Errorf("a short row: %+v", got)
+	}
+}
