@@ -2,6 +2,7 @@ package deviceinterrogation
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,7 +101,7 @@ func TestTLSProber_Characterization(t *testing.T) {
 				r := runTLSProber(t, sc, withVersions)
 				got := tlsendpointtest.Dump(*r.asset, tlsendpointtest.Certs(t).Tokens())
 				tlsendpointtest.CheckGolden(t, filepath.Join("testdata", "tls_characterization", name+".json"),
-					got, tlsProberExceptions(t, sc)...)
+					got, tlsProberExceptions(t, sc, withVersions)...)
 			})
 		}
 	}
@@ -187,7 +188,7 @@ func TestTLSProber_OCSPGuardIsWired(t *testing.T) {
 // shared probe, for scenario sc. Nothing else may differ: not the
 // certificates, the key size, the key exchange, the negotiated or enumerated
 // versions, nor any other field.
-func tlsProberExceptions(t testing.TB, sc tlsendpointtest.Scenario) []tlsendpointtest.Exception {
+func tlsProberExceptions(t testing.TB, sc tlsendpointtest.Scenario, withVersions bool) []tlsendpointtest.Exception {
 	asset := func(g map[string]any) map[string]any {
 		m, _ := tlsendpointtest.Node(g, "deviceinterrogation.CryptoAsset")
 		return m
@@ -248,6 +249,32 @@ func tlsProberExceptions(t testing.TB, sc tlsendpointtest.Scenario) []tlsendpoin
 			Why:  "this server asks for a client certificate; the shared probe records that (mTLS configured).",
 			Apply: func(g map[string]any) bool {
 				return tlsendpointtest.SetIfAbsent(meta(g), "server_requests_client_cert", "bool=true")
+			},
+		})
+	}
+
+	if withVersions {
+		// Each scenario's server speaks one version, so the other three forced
+		// handshakes end in a protocol_version alert, recorded newest first.
+		refused := []any{"string=TLS 1.3", "string=TLS 1.1", "string=TLS 1.0"}
+		if sc.Version == tls.VersionTLS13 {
+			refused = []any{"string=TLS 1.2", "string=TLS 1.1", "string=TLS 1.0"}
+		}
+		ex = append(ex, tlsendpointtest.Exception{
+			Name: "refused TLS versions recorded",
+			Why: "the private enumeration kept only the versions the server accepted, so a version it refused " +
+				"and one it never tested read the same. The shared enumeration also records the versions the " +
+				"server refused as tls_versions_refused.",
+			Apply: func(g map[string]any) bool {
+				m := meta(g)
+				if m == nil {
+					return false
+				}
+				if _, ok := m["tls_versions_refused"]; ok {
+					return false
+				}
+				m["tls_versions_refused"] = map[string]any{"[]string": refused}
+				return true
 			},
 		})
 	}
