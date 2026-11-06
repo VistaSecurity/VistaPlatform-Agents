@@ -169,8 +169,10 @@ jq --arg f "$F" '.agents[].artifacts[] | select(.file == $f)
 ```
 
 - `runtime_qualified: true` means the release run executed this artefact on a
-  GitHub-hosted runner of its OS and architecture (today linux/amd64 and
-  linux/arm64: the binary's `-version` and the installer's dependency check).
+  GitHub-hosted runner of its OS and architecture (today linux/amd64,
+  linux/arm64, darwin/amd64 and darwin/arm64: the binary's `-version` and the
+  installer's dependency check; no service is installed and nothing
+  registers).
   `false` means compile-only: built, checked and signed, but not supported.
 - `requires` is what the host must provide: `libpcap` (Linux, macOS) or
   `npcap` (Windows). Npcap is never bundled; install it yourself from

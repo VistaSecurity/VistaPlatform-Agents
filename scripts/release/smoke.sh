@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-run the packaged agents on the machine this runs on, which must be a
-# GitHub-hosted runner of the OS and architecture under test. What passes here
-# is what release metadata may call runtime_qualified; nothing else is.
+# GitHub-hosted runner of the OS and architecture under test: Linux or macOS.
+# What passes here is what release metadata may call runtime_qualified;
+# nothing else is.
 #
 #   scripts/release/smoke.sh ASSETS VERSION OUT.json
 #
@@ -15,14 +16,19 @@
 #   3. run the installer's --check-dependencies from the unpacked directory,
 #      which runs the binary again through the installer's own check and
 #      changes nothing on the host.
-# No capture, no registration, no network. OUT.json lists the files executed.
+# No capture, no registration, no network, no service installed. OUT.json
+# lists the files executed.
+#
+# One script for both systems: the steps and the rules are the same, and
+# Linux and macOS packages are both .tar.gz with the system's installer
+# inside. It runs under the bash macOS ships (3.2), so it uses nothing newer;
+# scripts/release-tools.test.mjs runs it as macOS against stand-ins.
 set -euo pipefail
 assets=${1:?usage: smoke.sh ASSETS VERSION OUT.json}; version=${2:?}; out=${3:?}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 surface="$root/release/agents.json"
 case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "smoke.sh: unsupported OS $(uname -s)" >&2; exit 1 ;; esac
 case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo "smoke.sh: unsupported machine $(uname -m)" >&2; exit 1 ;; esac
-[ "$os" = linux ] || { echo "smoke.sh: packages are tar.gz with Linux installers; this script runs on Linux" >&2; exit 1; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

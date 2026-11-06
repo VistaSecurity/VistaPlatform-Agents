@@ -9,7 +9,8 @@
 #   prepare  (contents: read) the tag is vX.Y.Z[-rc.N], points at the commit
 #            being built, and that commit is on main; no release exists yet.
 #   build    (contents: read) .github/workflows/build-agents.yml: build every
-#            target, check, package, smoke-run linux/amd64 and linux/arm64.
+#            target, check, package, smoke-run linux/amd64, linux/arm64,
+#            darwin/amd64 and darwin/arm64.
 #   publish  (the `release` environment; contents, id-token and attestations:
 #            write) sign every artefact keyless, attest SLSA provenance, write
 #            and sign agents-release.json and the first compatibility record

@@ -67,15 +67,28 @@ test('a nightly release validates, names no platform and records provenance as u
   assert.deepEqual(validateDocument(c, n.root), []);
 });
 
+// The cells of the download-table row that links package FILE.
+function downloadRow(notes, file) {
+  const rows = notes.split('\n').filter((l) => l.startsWith('| ') && l.includes(`[\`${file}\`](`));
+  assert.equal(rows.length, 1, `${file}: ${rows.length} rows`);
+  return rows[0].slice(2, -2).split(' | ');
+}
+
 test('runtime_qualified is true exactly for what the smoke legs executed', () => {
   const q = release().agents.flatMap((a) => a.artifacts.filter((x) => x.runtime_qualified).map((x) => x.file)).sort();
   assert.deepEqual(q, [
-    'install-device-agent.sh', 'install-sensor.sh',
+    'install-device-agent-macos.sh', 'install-device-agent.sh', 'install-sensor-macos.sh', 'install-sensor.sh',
+    'vista-device-agent_5.3.0_darwin_amd64', 'vista-device-agent_5.3.0_darwin_amd64.tar.gz',
+    'vista-device-agent_5.3.0_darwin_arm64', 'vista-device-agent_5.3.0_darwin_arm64.tar.gz',
     'vista-device-agent_5.3.0_linux_amd64', 'vista-device-agent_5.3.0_linux_amd64.tar.gz',
     'vista-device-agent_5.3.0_linux_arm64', 'vista-device-agent_5.3.0_linux_arm64.tar.gz',
+    'vista-sensor_5.3.0_darwin_amd64', 'vista-sensor_5.3.0_darwin_amd64.tar.gz',
+    'vista-sensor_5.3.0_darwin_arm64', 'vista-sensor_5.3.0_darwin_arm64.tar.gz',
     'vista-sensor_5.3.0_linux_amd64', 'vista-sensor_5.3.0_linux_amd64.tar.gz',
     'vista-sensor_5.3.0_linux_arm64', 'vista-sensor_5.3.0_linux_arm64.tar.gz',
   ]);
+  // Windows has no smoke leg: every Windows artefact stays compile-only.
+  assert.ok(release().agents.every((a) => a.artifacts.filter((x) => x.os === 'windows').every((x) => !x.runtime_qualified)));
   assert.ok(release().agents.every((a) => a.artifacts.every((x) => x.native_signing === 'none')));
 });
 
@@ -86,14 +99,41 @@ test('an artefact the smoke legs did not execute is not runtime_qualified; a mis
   const q = (f) => m.agents.flatMap((a) => a.artifacts).find((x) => x.file === f).runtime_qualified;
   assert.equal(q('vista-device-agent_5.3.0_linux_arm64'), false);
   assert.equal(q('vista-device-agent_5.3.0_linux_amd64'), true);
-  const missing = makeRelease({ smokeExecuted: (leg, ex) => (leg.arch === 'arm64' ? null : ex) });
+  const missing = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'linux' && leg.arch === 'arm64' ? null : ex) });
   assert.ok(missing.errors.some((e) => e.includes('smoke result for linux/arm64 is missing')), missing.errors.join('\n'));
+});
+
+// metadata.mjs and notes.mjs know nothing about systems: a darwin artefact is
+// runtime_qualified exactly when a darwin smoke leg executed it.
+test('a darwin artefact is executed only if its darwin smoke leg ran it; a missing darwin leg fails', () => {
+  const partial = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'darwin' && leg.arch === 'amd64' ? ex.filter((f) => !f.startsWith('vista-sensor_')) : ex) });
+  assert.deepEqual(partial.errors, []);
+  const m = JSON.parse(readFileSync(path.join(partial.assets, 'agents-release.json'), 'utf8'));
+  const art = (f) => m.agents.flatMap((a) => a.artifacts).find((x) => x.file === f);
+  assert.equal(art('vista-sensor_5.3.0_darwin_amd64').runtime_qualified, false);
+  assert.equal(art('vista-sensor_5.3.0_darwin_amd64.tar.gz').runtime_qualified, false);
+  assert.equal(art('vista-sensor_5.3.0_darwin_arm64').runtime_qualified, true);
+  assert.equal(art('install-sensor-macos.sh').runtime_qualified, true, 'the arm64 leg ran it');
+  const notes = releaseNotes(m);
+  // The download table: the row of each package says whether it was executed.
+  const intel = downloadRow(notes, 'vista-sensor_5.3.0_darwin_amd64.tar.gz');
+  assert.equal(intel[1], 'macOS Intel');
+  assert.deepEqual(intel.slice(5), ['no: compile-only, not supported', 'libpcap']);
+  assert.deepEqual(downloadRow(notes, 'vista-sensor_5.3.0_darwin_arm64.tar.gz').slice(5), ['yes (runtime-qualified)', 'libpcap']);
+  assert.deepEqual(downloadRow(notes, 'vista-device-agent_5.3.0_windows_amd64.zip').slice(5), ['no: compile-only, not supported', 'nothing']);
+  const missing = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'darwin' && leg.arch === 'arm64' ? null : ex) });
+  assert.ok(missing.errors.some((e) => e.includes('smoke result for darwin/arm64 is missing')), missing.errors.join('\n'));
 });
 
 test('release notes say what the metadata says: executed or compile-only, the exact signer, no native signing', () => {
   const notes = releaseNotes(release());
   const dl = 'https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0';
   assert.ok(notes.includes(`| Sensor | Linux x86-64 | [\`vista-sensor_5.3.0_linux_amd64.tar.gz\`](${dl}/vista-sensor_5.3.0_linux_amd64.tar.gz) | [\`vista-sensor_5.3.0_linux_amd64\`](${dl}/vista-sensor_5.3.0_linux_amd64) | [\`install-sensor.sh\`](${dl}/install-sensor.sh) | yes (runtime-qualified) | libpcap |`), notes);
+  // The macOS legs ran every macOS package: those rows read as executed.
+  for (const f of ['vista-sensor_5.3.0_darwin_amd64.tar.gz', 'vista-sensor_5.3.0_darwin_arm64.tar.gz',
+    'vista-device-agent_5.3.0_darwin_amd64.tar.gz', 'vista-device-agent_5.3.0_darwin_arm64.tar.gz']) {
+    assert.equal(downloadRow(notes, f)[5], 'yes (runtime-qualified)', f);
+  }
   assert.ok(notes.includes(`| Sensor | Windows x86 (32-bit) | [\`vista-sensor_5.3.0_windows_386.zip\`](${dl}/vista-sensor_5.3.0_windows_386.zip) | [\`vista-sensor_5.3.0_windows_386.exe\`](${dl}/vista-sensor_5.3.0_windows_386.exe) | [\`install-sensor.ps1\`](${dl}/install-sensor.ps1) | no: compile-only, not supported | npcap |`), notes);
   assert.ok(notes.includes("--certificate-identity 'https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/v5.3.0'"));
   assert.match(notes, /not Authenticode-signed/);
