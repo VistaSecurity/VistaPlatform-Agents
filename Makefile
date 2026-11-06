@@ -125,5 +125,6 @@ installer-test: ## Test the sensor and device-agent installers
 	node --test ./scripts/test-sensor-installer-dependencies.mjs
 	node --test ./scripts/test-device-agent-installer.mjs
 	node --test ./scripts/test-sensor-installer-registration.mjs
+	node --test ./scripts/install-macos.test.mjs
 
 check: fmt-check tidy-check build vet test cgo-free generate-check oui-registry-test classification-rules-test dcim-types-test sensor-no-ouiregistry-test installer-test ## Every check above

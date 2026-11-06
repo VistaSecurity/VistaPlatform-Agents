@@ -70,7 +70,8 @@ export function fixtureRoot(dir, { license = true, notice = 'NOTICE\nlists githu
   cpSync(path.join(REPO_ROOT, 'release'), path.join(root, 'release'), { recursive: true });
   cpSync(path.join(REPO_ROOT, 'schemas'), path.join(root, 'schemas'), { recursive: true });
   writeFileSync(path.join(root, 'go.mod'), `module ${MODULE}\n\ngo 1.26.10\n`);
-  for (const f of ['install-sensor.sh', 'install-sensor.ps1', 'install-device-agent.sh']) {
+  // Every installer the surface names, so a new one needs no fixture change.
+  for (const f of new Set(loadSurface(root).agents.flatMap((a) => Object.values(a.installers || {})))) {
     writeFileSync(path.join(root, 'scripts', f), `#!/bin/bash\n# fixture installer ${f}\n`);
   }
   if (license) writeFileSync(path.join(root, 'LICENSE'), 'Apache License\nVersion 2.0, January 2004\n');
