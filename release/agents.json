@@ -15,7 +15,7 @@
         { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": ["npcap"] },
         { "os": "windows", "arch": "386", "runner": "ubuntu-24.04", "cgo": false, "requires": ["npcap"] }
       ],
-      "installers": { "linux": "install-sensor.sh", "windows": "install-sensor.ps1" },
+      "installers": { "linux": "install-sensor.sh", "darwin": "install-sensor-macos.sh", "windows": "install-sensor.ps1" },
       "capabilities": ["identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"]
     },
     {
@@ -31,7 +31,7 @@
         { "os": "darwin", "arch": "arm64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
         { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] }
       ],
-      "installers": { "linux": "install-device-agent.sh" },
+      "installers": { "linux": "install-device-agent.sh", "darwin": "install-device-agent-macos.sh" },
       "capabilities": ["device_discovery"]
     }
   ],

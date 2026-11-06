@@ -6,6 +6,7 @@
 // produced validates, and each mutation of it that breaks one rule fails.
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -335,5 +336,23 @@ test('every declared capability is a string constant in the Go source', { skip: 
   const src = text.join('\n');
   for (const a of loadSurface().agents) {
     for (const c of a.capabilities) assert.ok(new RegExp(`=\\s*"${c}"`).test(src), `${a.kind} capability ${c} is not a Go string constant`);
+  }
+});
+
+// The platform finds "the installer for agent K on system S" as the one
+// artefact of agent K with type installer and os S. macOS has its own file per
+// agent: one file, one digest, one entry.
+test('each agent lists one installer per system, macOS included, and its macOS archives carry it', () => {
+  const installers = Object.fromEntries(release().agents.map((a) => [a.kind,
+    Object.fromEntries(a.artifacts.filter((x) => x.type === 'installer').map((x) => [x.os, x.file]))]));
+  assert.equal(installers.sensor.darwin, 'install-sensor-macos.sh');
+  assert.equal(installers['device-agent'].darwin, 'install-device-agent-macos.sh');
+  assert.equal(installers.sensor.linux, 'install-sensor.sh');
+  for (const arch of ['amd64', 'arm64']) {
+    for (const [prefix, file] of [['vista-sensor', 'install-sensor-macos.sh'], ['vista-device-agent', 'install-device-agent-macos.sh']]) {
+      const pkg = path.join(rel.assets, `${prefix}_5.3.0_darwin_${arch}.tar.gz`);
+      const names = execFileSync('tar', ['-tzf', pkg], { encoding: 'utf8' }).split('\n');
+      assert.ok(names.includes(`${prefix}_5.3.0_darwin_${arch}/${file}`), `${pkg} does not carry ${file}`);
+    }
   }
 });

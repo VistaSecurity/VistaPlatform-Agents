@@ -155,3 +155,61 @@ func TestInstallerConfig_SensorEnrolsItselfAndInstallerSeesIt(t *testing.T) {
 		t.Fatalf("installer read registrationKey %q from the registered config — a re-run would discard a working enrolment", key)
 	}
 }
+
+// scripts/install-sensor-macos.sh writes the same config through the same
+// shared helpers; the same two hand-offs must line up there.
+func TestMacOSInstallerConfig_SensorEnrolsItselfAndInstallerSeesIt(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	const macInstaller = "../../scripts/install-sensor-macos.sh"
+	raw, err := os.ReadFile(macInstaller)
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	script := string(raw)
+	yamlQuote := installerSection(t, script, `^yaml_quote\(\) \{`, `^\}$`)
+	heredoc := installerSection(t, script, `cat > "\$CONFIG_FILE" << EOF`, `^EOF$`)
+	readConfigValue := installerSection(t, script, `^read_config_value\(\) \{`, `^\}`)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "sensor-config.yaml")
+	const name = `mac "edge" sensor`
+	runBash(t, yamlQuote+"\nCONFIG_FILE="+cfgPath+"\n"+heredoc,
+		"SENSOR_NAME="+name,
+		"CONTROL_PLANE_URL=https://control.example.test",
+		"REGISTRATION_KEY=REG-0123456789abcdef",
+		`interfaces_yaml="en0", "en1"`,
+		"INSTALL_DIR="+dir,
+	)
+
+	cfg, err := config.LoadFromFile(cfgPath)
+	if err != nil {
+		t.Fatalf("sensor cannot load the macOS installer's config: %v", err)
+	}
+	if isRegistered(cfg) {
+		t.Fatal("the macOS installer's config reads as already registered — the sensor would never enrol")
+	}
+	if cfg.RegistrationKey != "REG-0123456789abcdef" || cfg.Name != name || cfg.ControlPlaneURL != "https://control.example.test" {
+		t.Fatalf("key/name/url = %q/%q/%q", cfg.RegistrationKey, cfg.Name, cfg.ControlPlaneURL)
+	}
+	if strings.Join(cfg.Capture.Interfaces, ",") != "en0,en1" {
+		t.Errorf("Interfaces = %q, want [en0 en1]", cfg.Capture.Interfaces)
+	}
+	if cfg.Storage.DataPath != dir+"/data" {
+		t.Errorf("DataPath = %q, want %q", cfg.Storage.DataPath, dir+"/data")
+	}
+
+	const id = "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59"
+	cfg.SensorID = id
+	s := &Sensor{config: cfg, configPath: cfgPath}
+	if err := s.saveConfigFile(); err != nil {
+		t.Fatalf("saveConfigFile: %v", err)
+	}
+	if got := strings.TrimSpace(runBash(t, readConfigValue+"\nread_config_value sensorId "+cfgPath)); got != id {
+		t.Fatalf("macOS installer read sensorId %q from the registered config, want %q", got, id)
+	}
+	if got := strings.TrimSpace(runBash(t, readConfigValue+"\nread_config_value registrationKey "+cfgPath)); got != "REG-0123456789abcdef" {
+		t.Fatalf("macOS installer read registrationKey %q — a re-run would discard a working enrolment", got)
+	}
+}

@@ -143,3 +143,63 @@ func TestInstallerConfig_AwkwardValuesSurviveYAML(t *testing.T) {
 		t.Fatalf("url/key = %q/%q, want %q/%q", cfg.PlatformURL, cfg.RegistrationKey, url, key)
 	}
 }
+
+// scripts/install-device-agent-macos.sh keeps the config in etc/ and the data
+// path in data/, both owned by the agent's service account; the same two
+// hand-offs must line up there.
+func TestMacOSInstallerConfig_AgentEnrollsItselfAndInstallerSeesIt(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	const macInstaller = "../../scripts/install-device-agent-macos.sh"
+	raw, err := os.ReadFile(macInstaller)
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	script := string(raw)
+	heredoc := installerSection(t, script, `cat > "\$CONFIG_FILE" << EOF`, `^EOF$`)
+	readConfigValue := installerSection(t, script, `^read_config_value\(\) \{`, `^\}`)
+	yamlQuote := installerSection(t, script, `^yaml_quote\(\) \{`, `^\}`)
+
+	installDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(installDir, "etc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(installDir, "etc", "device-agent.yaml")
+	const url = `https://control.example.test/p#frag: x`
+	const key = "REG-0123456789abcdef"
+	runInstallerBash(t, "CONFIG_FILE="+cfgPath+"\n"+yamlQuote+"\n"+heredoc,
+		"CONTROL_PLANE_URL="+url, "REGISTRATION_KEY="+key, "INSTALL_DIR="+installDir)
+
+	cfg, err := config.LoadFromFile(cfgPath)
+	if err != nil {
+		t.Fatalf("agent cannot load the macOS installer's config: %v", err)
+	}
+	if cfg.AgentID != "" {
+		t.Fatalf("the macOS installer's config names an agent (%q) — the agent would never enroll", cfg.AgentID)
+	}
+	if cfg.PlatformURL != url || cfg.RegistrationKey != key {
+		t.Fatalf("url/key = %q/%q, want %q/%q", cfg.PlatformURL, cfg.RegistrationKey, url, key)
+	}
+	if want := filepath.Join(installDir, "data"); cfg.DataPath != want {
+		t.Fatalf("DataPath = %q, want %q", cfg.DataPath, want)
+	}
+	if err := checkEnrollmentWritable(cfg.DataPath, cfgPath); err != nil {
+		t.Fatalf("the agent would refuse to enroll with the macOS installer's layout: %v", err)
+	}
+
+	const id = "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59"
+	cfg.AgentID = id
+	if err := saveConfigFile(cfgPath, cfg); err != nil {
+		t.Fatalf("saveConfigFile: %v", err)
+	}
+	read := func(k string) string {
+		return strings.TrimSpace(runInstallerBash(t, readConfigValue+"\nread_config_value "+k+" "+cfgPath))
+	}
+	if got := read("agent_id"); got != id {
+		t.Fatalf("macOS installer read agent_id %q from the enrolled config, want %q", got, id)
+	}
+	if got := read("registration_key"); got != key {
+		t.Fatalf("macOS installer read registration_key %q — a re-run would discard a working enrollment", got)
+	}
+}
