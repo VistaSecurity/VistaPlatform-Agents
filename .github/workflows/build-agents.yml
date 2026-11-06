@@ -16,7 +16,7 @@
 #            (scripts/release/package.mjs).
 #   smoke    unpacks the Linux and macOS packages on linux/amd64,
 #            linux/arm64, darwin/amd64 (macos-15-intel) and darwin/arm64
-#            (macos-14) runners and runs each agent and its installer's
+#            (macos-15) runners and runs each agent and its installer's
 #            dependency check (scripts/release/smoke.sh). Only what this job
 #            executed may be called runtime_qualified. Windows builds are not
 #            run here.
@@ -67,7 +67,7 @@ jobs:
           - {agent: sensor, os: linux, arch: amd64, runner: ubuntu-24.04}
           - {agent: sensor, os: linux, arch: arm64, runner: ubuntu-24.04-arm}
           - {agent: sensor, os: darwin, arch: amd64, runner: macos-15-intel}
-          - {agent: sensor, os: darwin, arch: arm64, runner: macos-14}
+          - {agent: sensor, os: darwin, arch: arm64, runner: macos-15}
           - {agent: sensor, os: windows, arch: amd64, runner: ubuntu-24.04}
           - {agent: sensor, os: windows, arch: '386', runner: ubuntu-24.04}
           - {agent: device-agent, os: linux, arch: amd64, runner: ubuntu-24.04}
@@ -167,7 +167,7 @@ jobs:
           - {os: linux, arch: amd64, runner: ubuntu-24.04}
           - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
           - {os: darwin, arch: amd64, runner: macos-15-intel}
-          - {os: darwin, arch: arm64, runner: macos-14}
+          - {os: darwin, arch: arm64, runner: macos-15}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

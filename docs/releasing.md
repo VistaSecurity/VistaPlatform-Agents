@@ -62,7 +62,7 @@ cache, or downloads another run's artefacts.
 The smoke legs (`scripts/release/smoke.sh`, the `smoke` job of
 `build-agents.yml`, one leg per entry of `smoke` in `release/agents.json`) run
 on GitHub-hosted linux/amd64, linux/arm64, darwin/amd64 (`macos-15-intel`) and
-darwin/arm64 (`macos-14`) runners. Each unpacks the packages for its machine,
+darwin/arm64 (`macos-15`) runners. Each unpacks the packages for its machine,
 checks they hold the published binary and installer byte for byte, runs each
 binary's `-version` (the sensor loads the system's libpcap to get there) and
 the installer's `--check-dependencies`. That proves the published bytes start
