@@ -39,6 +39,16 @@ later records, which say which platform versions were tested with those bytes.
 How to verify a download: `docs/verify-release.md`. How releases are made and
 what protects them: `docs/releasing.md`.
 
+## Installing
+
+Each agent has one installer per supported system; each release archive
+carries the installer for its system.
+
+| | Linux (systemd) | macOS (launchd) | Windows (service) |
+|---|---|---|---|
+| Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
+| Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | |
+
 ## Pull-request checks
 
 Every pull request runs `.github/workflows/pr.yml` on GitHub-hosted runners

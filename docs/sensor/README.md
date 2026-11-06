@@ -15,6 +15,9 @@ releases), `sudo dnf install libpcap` on RHEL/Fedora, or
 packages and their dependencies supplied locally. macOS includes libpcap;
 Windows requires [Npcap](https://npcap.com/).
 
+On macOS, install the sensor as a launchd daemon with
+`install-sensor-macos.sh`: see [MACOS_SETUP.md](MACOS_SETUP.md).
+
 The Linux systemd installer checks that the actual sensor binary can load before
 prompting for settings, creating users, writing files, or registering the sensor.
 It reports loader failures with libpcap installation instructions and preserves
