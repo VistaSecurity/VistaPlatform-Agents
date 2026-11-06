@@ -69,6 +69,14 @@ security:
 - **Windows Paths**: All paths containing backslashes are automatically quoted and escaped (e.g., `"C:\\Users\\..."`)
 - **Certificate Paths**: Added automatically after successful registration with the control plane
 - **Interface Names**: Windows device paths (e.g., `\Device\NPF_{...}`) are properly quoted
+- **Choosing interfaces on Windows**: an entry in `capture.interfaces` can name an adapter by its
+  name as Windows shows it and as the sensor reports it (`Ethernet 2`, `Wi-Fi`), by its description
+  (`Intel(R) Ethernet Connection I219-V`), or by its Npcap device name (`\Device\NPF_{GUID}`).
+  With `interfaces: []` (what `install-sensor.ps1` writes when `-Interfaces` is not given) the
+  sensor captures on every adapter that is up and has an address; loopback, tunnel and WAN Miniport
+  devices are never picked. If none qualifies, or a named interface matches no capture device, the
+  sensor stops **before** it registers, so the registration key is not used, and says which
+  names it accepts.
 - **Sensor ID**: Generated during registration if not provided
 - **Security Section**: Contains mTLS certificate file paths for secure communication
 

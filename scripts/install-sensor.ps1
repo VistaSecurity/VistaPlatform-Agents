@@ -34,7 +34,10 @@ param(
     # Human-readable sensor name. Defaults to the hostname + date.
     [string]$Name = "",
 
-    # Comma-separated capture interfaces. Empty = let the sensor auto-select.
+    # Comma-separated capture interfaces, each named as Windows shows the
+    # adapter ("Ethernet 2", "Wi-Fi"), by its description, or by its Npcap
+    # device name (\Device\NPF_{GUID}). Empty = the sensor captures on every
+    # adapter that is up and has an address.
     [string]$Interfaces = "",
 
     # Deployment profile. Not surfaced in the console; datacenter_host is the
@@ -277,11 +280,16 @@ $timeoutSeconds = 90
 Write-Info "Waiting up to ${timeoutSeconds}s for the sensor to register..."
 $sensorId = $null
 $rejected = $false
+$cannotCapture = $false
 $deadline = (Get-Date).AddSeconds($timeoutSeconds)
 while ((Get-Date) -lt $deadline) {
     $value = Get-ConfigValue 'sensorId'
     if ($value -match $uuidPattern) { $sensorId = $value; break }
-    if ((Get-NewLogText) -match 'Registration was REJECTED') { $rejected = $true; break }
+    $newLog = Get-NewLogText
+    if ($newLog -match 'Registration was REJECTED') { $rejected = $true; break }
+    # The sensor checks that it can capture before it registers, and stops
+    # with the key unused when it cannot.
+    if ($newLog -match 'Not registering: the registration key is unused') { $cannotCapture = $true; break }
     Start-Sleep -Seconds 2
 }
 
@@ -290,7 +298,7 @@ if (-not $sensorId) {
     Write-Host ""
     # The sensor marks failures with these emoji. Built from code points: this
     # file has no BOM, so Windows PowerShell reads it as ANSI, not UTF-8.
-    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)"
+    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)|Failed to start capture on interface"
     (Get-NewLogText) -split "`r?`n" | Where-Object { $_ -match $failureMarks } |
         Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }
     Write-Host ""
@@ -302,6 +310,14 @@ if (-not $sensorId) {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Write-Err "The control plane REJECTED the registration key (see above): it is invalid, expired, or already used."
         Write-Err "Generate a new key (Discovery -> Sensors & Agents -> Register) and re-run this installer with it."
+        Write-Info "The sensor service has been stopped and disabled."
+    } elseif ($cannotCapture) {
+        # Retrying cannot help until the interfaces change; the key is still
+        # good, so re-running the installer with -Interfaces is the fix.
+        Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        Write-Err "The sensor cannot capture on this host (see above), so it did not register: the registration key was NOT used."
+        Write-Err "Re-run this installer with -Interfaces naming an adapter from the list above (for example -Interfaces `"Ethernet`")."
         Write-Info "The sensor service has been stopped and disabled."
     } else {
         if ($startError) { Write-Err "Starting the service failed: $startError" }
