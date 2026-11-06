@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,14 @@ var (
 	darwinCmdPkgutil = []string{"pkgutil", "--pkgs"}
 	darwinCmdApps    = []string{"find", "/Applications", "-maxdepth", "3", "-name", "Info.plist", "-type", "f"}
 
+	// netstat is the socket source. `-v` adds the owning process, `-l` prints
+	// IPv6 addresses whole (without it they are cut to the column width).
+	darwinCmdNetstatTCP = []string{"netstat", "-anvl", "-p", "tcp"}
+	darwinCmdNetstatUDP = []string{"netstat", "-anvl", "-p", "udp"}
+	darwinCmdID         = []string{"id", "-u"}
+
+	// lsof is the fallback, for a host where netstat does not answer. See
+	// collectDarwinListeners for what it can and cannot see.
 	darwinCmdLsof            = []string{"lsof", "-nP", "-iTCP", "-sTCP:LISTEN"}
 	darwinCmdLsofUDP         = []string{"lsof", "-nP", "-iUDP"}
 	darwinCmdLsofConnections = []string{"lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED"}
@@ -48,8 +57,8 @@ func collectDarwin(ctx context.Context, r Runner, rep *Report, opts Options) {
 	collectDarwinHardware(ctx, r, rep)
 	collectDarwinInterfaces(ctx, r, rep, opts)
 	collectDarwinPackages(ctx, r, rep, opts)
-	collectDarwinListeners(ctx, r, rep)
-	collectDarwinConnections(ctx, r, rep, opts)
+	sockets := collectDarwinListeners(ctx, r, rep)
+	collectDarwinConnections(ctx, r, rep, opts, sockets)
 	collectCertStoresUnix(ctx, r, rep, darwinCertStorePaths, opts)
 }
 
@@ -441,23 +450,261 @@ func ParseInfoPlist(b []byte, path string) (Package, bool) {
 	}, true
 }
 
-func collectDarwinListeners(ctx context.Context, r Runner, rep *Report) {
-	out, ok := runLsof(ctx, r, darwinCmdLsof)
-	if !ok {
-		rep.fail(SectionListeners, errors.New("lsof produced no usable output"))
-	} else {
-		rep.Listeners = ParseLsof([]byte(out))
-		rep.mark(SectionListeners, SectionOK)
+// darwinSockets is what collectDarwinListeners read, so the connection step
+// works from the same snapshot of the socket table. tcp and udp are nil when
+// netstat did not answer for that protocol.
+type darwinSockets struct {
+	tcp, udp *NetstatSockets
+	// root says lsof could see every process on this host. Only established
+	// when netstat failed, the one case where it matters.
+	root bool
+}
+
+// collectDarwinListeners reads the host's listening and bound sockets.
+//
+// netstat first, because what the two tools see differs by account. The agent
+// runs as an unprivileged service account, and macOS's lsof shows a non-root
+// caller only that caller's own processes. An account that owns no sockets gets
+// exit 1 and no output, which reads exactly like a host with no listeners:
+// reporting that as "ok" is how a Mac came to claim it served nothing while it
+// was listening on 22. netstat reads the kernel's socket tables, which macOS
+// shows every account, and names the owning process of each socket.
+//
+// When netstat does not answer, lsof still gives what it can, and the section
+// says partial unless the collector is root: a non-root lsof answer is never
+// marked ok, whatever it lists.
+func collectDarwinListeners(ctx context.Context, r Runner, rep *Report) darwinSockets {
+	var sockets darwinSockets
+
+	tcp, tcpErr := readNetstat(ctx, r, darwinCmdNetstatTCP)
+	udp, udpErr := readNetstat(ctx, r, darwinCmdNetstatUDP)
+	if tcpErr != nil || udpErr != nil {
+		sockets.root = darwinRunsAsRoot(ctx, r)
 	}
 
-	udpOut, udpOK := runLsof(ctx, r, darwinCmdLsofUDP)
-	if !udpOK {
-		rep.fail(SectionBoundUDP, errors.New("lsof UDP query produced no usable output"))
+	if tcpErr == nil {
+		sockets.tcp = &tcp
+		rep.Listeners = tcp.Listeners
+		markNetstatSection(rep, SectionListeners, tcp)
+	} else if out, ok := runLsof(ctx, r, darwinCmdLsof); ok {
+		rep.Listeners = ParseLsof([]byte(out))
+		markLsofFallback(rep, SectionListeners, tcpErr, sockets.root)
+	} else {
+		rep.fail(SectionListeners, fmt.Errorf("%w; lsof produced no usable output", tcpErr))
+	}
+
+	if udpErr == nil {
+		sockets.udp = &udp
+		rep.BoundUDPSockets = coalesceBoundUDP(udp.BoundUDP)
+		markNetstatSection(rep, SectionBoundUDP, udp)
+	} else if out, ok := runLsof(ctx, r, darwinCmdLsofUDP); ok {
+		_, bound := ParseLsofUDP([]byte(out))
+		rep.BoundUDPSockets = coalesceBoundUDP(bound)
+		markLsofFallback(rep, SectionBoundUDP, udpErr, sockets.root)
+	} else {
+		rep.fail(SectionBoundUDP, fmt.Errorf("%w; lsof UDP query produced no usable output", udpErr))
+	}
+	return sockets
+}
+
+// markNetstatSection records the outcome of a netstat read. A row the parser
+// could not read may be a socket, so a table with one is not a complete table.
+func markNetstatSection(rep *Report, section string, s NetstatSockets) {
+	if s.Malformed > 0 {
+		rep.partial(section, fmt.Errorf("%d netstat rows could not be read", s.Malformed))
 		return
 	}
-	_, bound := ParseLsofUDP([]byte(udpOut))
-	rep.BoundUDPSockets = coalesceBoundUDP(bound)
-	rep.mark(SectionBoundUDP, SectionOK)
+	rep.mark(section, SectionOK)
+}
+
+// markLsofFallback records an answer that came from lsof instead of netstat.
+func markLsofFallback(rep *Report, section string, netstatErr error, root bool) {
+	if root {
+		rep.mark(section, SectionOK)
+		rep.recordError(section, fmt.Errorf("%w; used lsof as root", netstatErr))
+		return
+	}
+	rep.partial(section, fmt.Errorf("%w; lsof as a non-root account sees only that account's own sockets", netstatErr))
+}
+
+// darwinRunsAsRoot reports whether the collector's account is root. Anything
+// other than a clear "0" is not root: the cost of being wrong that way is a
+// partial label on a complete list, and the other way a false complete one.
+func darwinRunsAsRoot(ctx context.Context, r Runner) bool {
+	out, err := runText(ctx, r, darwinCmdID)
+	return err == nil && strings.TrimSpace(out) == "0"
+}
+
+// readNetstat runs one netstat query. The error names the failure, never the
+// output: this is a command transcript, and StepError does not carry those.
+func readNetstat(ctx context.Context, r Runner, argv []string) (NetstatSockets, error) {
+	out, _, exit, err := r.Run(ctx, argv)
+	if err != nil {
+		return NetstatSockets{}, fmt.Errorf("netstat could not run: %w", err)
+	}
+	if exit != 0 {
+		return NetstatSockets{}, fmt.Errorf("netstat exited %d", exit)
+	}
+	sockets, ok := ParseNetstat(out)
+	if !ok {
+		return NetstatSockets{}, errors.New("netstat printed no socket table")
+	}
+	return sockets, nil
+}
+
+// NetstatSockets is one parsed `netstat -anvl -p <proto>`.
+type NetstatSockets struct {
+	Listeners   []Listener
+	BoundUDP    []BoundUDPSocket
+	Connections []Connection
+	// Malformed counts socket rows that could not be read. It stays a number
+	// because a row the parser refused may be a real socket, so the caller must
+	// not call the table complete.
+	Malformed int
+}
+
+// ParseNetstat parses macOS `netstat -anvl -p tcp` or `-p udp`. ok is false
+// when the output holds no socket table at all, which is a failed query and
+// not a host with no sockets.
+//
+// A row is
+//
+//	proto recv-q send-q local foreign [state] <counters...> <process:pid> ...
+//
+// where state is printed for TCP only, so the columns after it are found from
+// the header, by their position after `(state)`. An address is host.port, the
+// port after the LAST dot since an IPv6 host has none and an IPv4 host has
+// three. The owning process column is `process:pid` on current macOS, and a
+// bare `pid` (no name) on older releases. A process name can hold spaces, so
+// `process:pid` may span several fields and ends at the first one that closes
+// with :<digits>.
+func ParseNetstat(b []byte) (NetstatSockets, bool) {
+	var out NetstatSockets
+	pidColumn := -1
+	named := false
+	header := false
+	seen := make(map[string]bool)
+
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(strings.TrimRight(line, "\r"))
+		if len(f) == 0 {
+			continue
+		}
+		if f[0] == "Proto" {
+			for i, col := range f {
+				if col != "(state)" {
+					continue
+				}
+				header = true
+				for j, after := range f[i+1:] {
+					if after == "process:pid" || after == "pid" {
+						pidColumn, named = j, after == "process:pid"
+						break
+					}
+				}
+				break
+			}
+			continue
+		}
+		proto := strings.TrimRight(f[0], "46")
+		if proto != "tcp" && proto != "udp" {
+			continue
+		}
+		if len(f) < 5 || (proto == "tcp" && len(f) < 6) {
+			out.Malformed++
+			continue
+		}
+		rest := f[5:]
+		state := ""
+		if proto == "tcp" {
+			state, rest = rest[0], rest[1:]
+		}
+		process, pid := netstatOwner(rest, pidColumn, named)
+
+		local, localPort, localOK := splitNetstatAddress(f[3])
+		remote, remotePort, remoteOK := splitNetstatAddress(f[4])
+		if !localOK || !remoteOK {
+			out.Malformed++
+			continue
+		}
+		switch {
+		case state == "LISTEN":
+			if localPort == 0 {
+				out.Malformed++
+				continue
+			}
+			// One socket per address family and one row per descriptor on the
+			// same address are one service, as in ParseLsof.
+			key := fmt.Sprintf("%s|%d|%d", local, localPort, pid)
+			if !seen[key] {
+				seen[key] = true
+				out.Listeners = append(out.Listeners, Listener{Proto: "tcp", Address: local, Port: localPort, Process: process, PID: pid})
+			}
+		case state == "ESTABLISHED" || (proto == "udp" && remotePort != 0):
+			out.Connections = append(out.Connections, Connection{Proto: proto, LocalAddress: local, LocalPort: localPort,
+				RemoteAddress: remote, RemotePort: remotePort, Process: process, PID: pid})
+		case proto == "udp" && localPort != 0:
+			out.BoundUDP = append(out.BoundUDP, BoundUDPSocket{Address: local, Port: localPort, Process: process, PID: pid})
+		}
+	}
+	return out, header
+}
+
+// netstatOwner reads the owning process from the columns after state. A row
+// whose owner cannot be read keeps the socket and names nobody: the socket is
+// the measurement and the owner an attribute of it.
+func netstatOwner(rest []string, column int, named bool) (string, int) {
+	if column < 0 || column >= len(rest) {
+		return "", 0
+	}
+	if !named {
+		pid, _ := strconv.Atoi(rest[column])
+		return "", pid
+	}
+	for i := column; i < len(rest); i++ {
+		sep := strings.LastIndex(rest[i], ":")
+		if sep < 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(rest[i][sep+1:])
+		if err != nil {
+			continue
+		}
+		name := strings.Join(append(append([]string{}, rest[column:i]...), rest[i][:sep]), " ")
+		return strings.TrimSpace(name), pid
+	}
+	return "", 0
+}
+
+// splitNetstatAddress splits netstat's host.port. A `*` host is the wildcard
+// and normalises as the other collectors do; a `*` port is no port, reported
+// as 0. Anything that is not an address is refused: an address cut short at the
+// column width must not become a host's identity.
+func splitNetstatAddress(s string) (string, int, bool) {
+	i := strings.LastIndex(s, ".")
+	if i < 0 {
+		return "", 0, false
+	}
+	host, rawPort := s[:i], s[i+1:]
+	port := 0
+	if rawPort != "*" {
+		p, err := strconv.Atoi(rawPort)
+		if err != nil || p < 1 || p > 65535 {
+			return "", 0, false
+		}
+		port = p
+	}
+	if host == "*" {
+		return "0.0.0.0", port, true
+	}
+	// Drop an IPv6 zone: %en0 on one host is not the same interface on another.
+	if z := strings.Index(host, "%"); z >= 0 {
+		host = host[:z]
+	}
+	if _, err := netip.ParseAddr(host); err != nil {
+		return "", 0, false
+	}
+	return host, port, true
 }
 
 // ParseLsof parses `lsof -nP -iTCP -sTCP:LISTEN`.
@@ -496,7 +743,7 @@ func ParseLsof(b []byte) []Listener {
 	return out
 }
 
-func collectDarwinConnections(ctx context.Context, r Runner, rep *Report, opts Options) {
+func collectDarwinConnections(ctx context.Context, r Runner, rep *Report, opts Options, sockets darwinSockets) {
 	if !opts.CollectConnections {
 		return
 	}
@@ -505,18 +752,26 @@ func collectDarwinConnections(ctx context.Context, r Runner, rep *Report, opts O
 		return
 	}
 	var connections []Connection
-	tcpOut, tcpOK := runLsof(ctx, r, darwinCmdLsofConnections)
-	udpOut, udpOK := runLsof(ctx, r, darwinCmdLsofUDP)
-	if !tcpOK || !udpOK {
-		rep.fail(SectionConnections, errors.New("lsof connection snapshot incomplete"))
-		return
-	}
-	if tcpOK {
-		connections = append(connections, ParseLsofConnections([]byte(tcpOut), "tcp")...)
-	}
-	if udpOK {
+	switch {
+	case sockets.tcp != nil && sockets.udp != nil:
+		if sockets.udp.Malformed > 0 {
+			rep.fail(SectionConnections, errors.New("netstat connection snapshot incomplete"))
+			return
+		}
+		connections = append(append(connections, sockets.tcp.Connections...), sockets.udp.Connections...)
+	case sockets.root:
+		tcpOut, tcpOK := runLsof(ctx, r, darwinCmdLsofConnections)
+		udpOut, udpOK := runLsof(ctx, r, darwinCmdLsofUDP)
+		if !tcpOK || !udpOK {
+			rep.fail(SectionConnections, errors.New("lsof connection snapshot incomplete"))
+			return
+		}
+		connections = ParseLsofConnections([]byte(tcpOut), "tcp")
 		udp, _ := ParseLsofUDP([]byte(udpOut))
 		connections = append(connections, udp...)
+	default:
+		rep.fail(SectionConnections, errors.New("netstat did not answer, and lsof as a non-root account cannot see the host's connections"))
+		return
 	}
 	rep.Connections = coalesceConnections(excludeAcceptedConnections(connections, rep.Listeners), opts.maxConnections())
 	rep.mark(SectionConnections, SectionOK)
