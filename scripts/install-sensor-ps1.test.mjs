@@ -113,3 +113,13 @@ test('the argument checks come before anything on the host changes', () => {
     assert.ok(code.indexOf(sideEffect) > lastCheck, `${sideEffect} runs before the argument checks`);
   }
 });
+
+test('the config and the private key are readable by Administrators and SYSTEM only', () => {
+  const acl = code.indexOf('/inheritance:r');
+  assert.ok(acl > 0, 'the install directory keeps the inherited Program Files ACL (Users can read)');
+  assert.match(code, /"\*S-1-5-18:\(OI\)\(CI\)F" "\*S-1-5-32-544:\(OI\)\(CI\)F"/, 'not SYSTEM and Administrators by SID');
+  for (const write of ['WriteAllText', 'Copy-Item']) {
+    assert.ok(code.indexOf(write) > acl, `${write} runs before the directory is protected`);
+  }
+  assert.match(code, /\/reset \/T/, 'files an earlier install left keep their old ACL');
+});

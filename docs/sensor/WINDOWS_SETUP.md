@@ -46,6 +46,28 @@ The Windows sensor requires a packet capture library to monitor network traffic.
 
    Should show "RUNNING" status.
 
+## Installing as a service (install-sensor.ps1)
+
+From an elevated PowerShell, in the directory holding `install-sensor.ps1` and the sensor binary
+(`crypto-sensor.exe` from the release package, or the downloaded `vista-sensor_<version>_windows_<arch>.exe`):
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install-sensor.ps1 -Url https://vista.example.com -IP <this host's address> -KeyStdin
+```
+
+- `-KeyStdin` prompts for the registration key without echoing it, or reads the first line of
+  standard input when it is redirected. `VISTA_REGISTRATION_KEY` in the environment also works;
+  `-Key REG-...` is visible to other users while the installer runs.
+- `-CaFingerprint <SHA-256>`: for a control plane whose certificate is signed by a private CA this
+  host does not trust; the sensor pins that CA only if it has this fingerprint.
+- `-Interfaces`: see [CONFIGURATION_AND_LOGS.md](CONFIGURATION_AND_LOGS.md) for the names it takes.
+
+It installs the service `VistaSensor` in `%ProgramFiles%\VistaSensor`, restricted to Administrators
+and SYSTEM (the configuration holds the key, the certs directory the sensor's private key), and waits
+for the sensor to register itself. Re-running it with the same key upgrades the binary and keeps the
+sensor's identity.
+
 ## 🔧 Installation Steps
 
 ### Step 1: Install Packet Capture Library

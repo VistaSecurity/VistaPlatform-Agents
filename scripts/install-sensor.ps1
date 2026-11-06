@@ -230,6 +230,26 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $DataDir | Out-Null
 
+# --- Administrators and SYSTEM only ----------------------------------------
+# The configuration holds the registration key until the sensor redeems it,
+# and the certs directories hold the sensor's private key. Program Files lets
+# every user read what is under it, and the sensor rewrites its config, so the
+# protection is on the directory: inherited by everything created in it, then
+# reset onto anything an earlier install left. SIDs, not names, so it works on
+# a localised Windows: S-1-5-18 is SYSTEM, S-1-5-32-544 Administrators.
+& icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not restrict $InstallDir to Administrators and SYSTEM (icacls exit $LASTEXITCODE). Nothing was written."
+    exit 1
+}
+if (Get-ChildItem -LiteralPath $InstallDir -Force) {
+    & icacls.exe (Join-Path $InstallDir "*") /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Could not reset the permissions under $InstallDir (icacls exit $LASTEXITCODE). Nothing was written."
+        exit 1
+    }
+}
+
 # Earlier versions of this installer registered on the sensor's behalf and wrote
 # a control-plane-generated private key to certs\. That identity was never usable
 # by the sensor; do not leave its key on disk. A fresh enrolment also must not
