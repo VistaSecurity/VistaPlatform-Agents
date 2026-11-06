@@ -680,6 +680,67 @@ func TestDecodeLLDP(t *testing.T) {
 		}
 	})
 
+	t.Run("a MAC written as text in the chassis ID is the device MAC", func(t *testing.T) {
+		// One device, two records, otherwise: ARP keys the gateway on its base
+		// MAC, and falling back to the Ethernet source would key the LLDP
+		// sighting on the MAC of the port that sent the frame.
+		got, err := DecodeLLDP(Frame{
+			Payload:   mustHex(t, lldpTextChassisMACHex),
+			SrcMAC:    "d8:b3:70:00:00:02",
+			Interface: "eth0",
+			At:        fixedTime,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		check(t, got, want{
+			mac:       "d8:b3:70:00:00:01",
+			hostnames: []string{"gateway-1"},
+			attrs: map[string]any{
+				// The chassis string stays as evidence, and the sending
+				// port's own address stays as the port ID.
+				"lldp_chassis_id":   "d8:b3:70:00:00:01",
+				"lldp_port_id":      "d8:b3:70:00:00:02",
+				"lldp_capabilities": []string{"bridge", "router"},
+				"capture_interface": "eth0",
+			},
+		})
+	})
+
+	t.Run("chassis ID spellings: only an unmistakable MAC replaces the source", func(t *testing.T) {
+		const src = "d8:b3:70:00:00:02"
+		for _, tc := range []struct {
+			name, chassis, wantMAC string
+		}{
+			{"colon", "D8:B3:70:00:00:01", "d8:b3:70:00:00:01"},
+			{"hyphen", "d8-b3-70-00-00-01", "d8:b3:70:00:00:01"},
+			{"dotted", "d8b3.7000.0001", "d8:b3:70:00:00:01"},
+			{"surrounding space", " d8:b3:70:00:00:01 ", "d8:b3:70:00:00:01"},
+			// Everything below is an operator's string, not an address: the
+			// frame's source stays the identity, as before.
+			{"name", "gw-core-01", src},
+			{"bare hex, as likely a serial", "d8b370000001", src},
+			{"mixed separators", "d8:b3-70:00:00:01", src},
+			{"misplaced separators", "d8b:37:00:00:00:1", src},
+			{"non-hex digit", "d8:b3:70:00:00:0g", src},
+			{"multicast", "01:00:5e:00:00:01", src},
+			{"all zero", "00:00:00:00:00:00", src},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := DecodeLLDP(Frame{Payload: lldpLocalChassisFrame(tc.chassis), SrcMAC: src, At: fixedTime})
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got.MAC != tc.wantMAC {
+					t.Errorf("MAC = %q, want %q", got.MAC, tc.wantMAC)
+				}
+				if want := strings.TrimSpace(tc.chassis); got.Attributes["lldp_chassis_id"] != want {
+					t.Errorf("lldp_chassis_id = %v, want %q kept as evidence", got.Attributes["lldp_chassis_id"], want)
+				}
+			})
+		}
+	})
+
 	t.Run("a TLV stream with no chassis ID is not an LLDPDU", func(t *testing.T) {
 		// TTL TLV alone (type 3, length 2).
 		_, err := DecodeLLDP(Frame{Payload: mustHex(t, "0602007800")})
@@ -803,4 +864,19 @@ func TestDecodeCDP(t *testing.T) {
 			t.Errorf("redaction left no visible marker: %q", sw)
 		}
 	})
+}
+
+// lldpLocalChassisFrame builds a minimal LLDPDU whose chassis ID is the given
+// string under subtype 7 (locally assigned): chassis ID, port ID (interface
+// name "port1"), TTL, End.
+func lldpLocalChassisFrame(chassis string) []byte {
+	tlv := func(typ int, val []byte) []byte {
+		h := uint16(typ)<<9 | uint16(len(val))
+		return append([]byte{byte(h >> 8), byte(h)}, val...)
+	}
+	var b []byte
+	b = append(b, tlv(lldpTLVChassisID, append([]byte{7}, chassis...))...)
+	b = append(b, tlv(lldpTLVPortID, append([]byte{lldpPortSubIfName}, "port1"...))...)
+	b = append(b, tlv(lldpTLVTTL, []byte{0x00, 0x78})...)
+	return append(b, 0x00, 0x00)
 }

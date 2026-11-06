@@ -58,8 +58,11 @@ go build -trimpath -ldflags "$ldflags" -o "$out" "$pkg"
 
 if [ "$target" != native ]; then
   case "$agent:$goos" in
+    sensor:linux) cp scripts/install-sensor.sh "$(dirname "$out")/" ;;
+    sensor:darwin) cp scripts/install-sensor-macos.sh "$(dirname "$out")/" ;;
     sensor:windows) cp scripts/install-sensor.ps1 "$(dirname "$out")/" ;;
-    sensor:*) cp scripts/install-sensor.sh "$(dirname "$out")/" ;;
     device-agent:linux) cp scripts/install-device-agent.sh "$(dirname "$out")/" ;;
+    device-agent:darwin) cp scripts/install-device-agent-macos.sh "$(dirname "$out")/" ;;
+    device-agent:windows) cp scripts/install-device-agent.ps1 "$(dirname "$out")/" ;;
   esac
 fi

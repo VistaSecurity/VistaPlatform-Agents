@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/testmode"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig/desiredstate"
+	"github.com/vistasecurity/vistaplatform-agents/shared/agentservice"
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
@@ -279,6 +280,15 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 		s.setRegistered(true)
 
 	case alreadyRequested || cfg.RegistrationKey != "":
+		// A registration key is single-use. A sensor that cannot capture must
+		// stop before it spends one: registered and then exiting, it leaves the
+		// platform a sensor that never heartbeats and the operator a spent key.
+		if err := s.capturePreflight(); err != nil {
+			log.Printf("❌ Cannot capture: %v", err)
+			log.Printf("❌ Not registering: the registration key is unused and stays valid. Fix the capture configuration and start the sensor again.")
+			exitProcess(exitCannotCapture)
+			return
+		}
 		log.Println("📝 Attempting to register with control plane...")
 		err := s.register()
 		if err == nil {
@@ -319,6 +329,16 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 			log.Printf("⚠️  Warning: No sensor ID available. Discoveries cannot be submitted without registration.")
 		}
 	}
+}
+
+// capturePreflight checks that packet capture can start (the interfaces
+// resolve and a device opens) without starting it. Without a packet capture
+// (tests that drive registration alone) there is nothing to check.
+func (s *Sensor) capturePreflight() error {
+	if s.packetCapture == nil {
+		return nil
+	}
+	return s.packetCapture.Preflight()
 }
 
 // startupStateLine is the line the sensor prints once it is up. It reports what
@@ -465,15 +485,16 @@ type sensorFlags struct {
 	caFingerprint *string
 }
 
-// sensorOutcome is why runSensor's loop ended.
-type sensorOutcome int
+// sensorOutcome is why runSensor's loop ended: the Windows service supervisor
+// (shared/agentservice) turns it into the service's exit code.
+type sensorOutcome = agentservice.Outcome
 
 const (
 	// sensorStopped: a signal or a service stop request; cleanup has run.
-	sensorStopped sensorOutcome = iota
+	sensorStopped = agentservice.Stopped
 	// sensorRestartRequested: the control plane asked for a restart; cleanup
 	// has run and the supervisor is expected to start the sensor again.
-	sensorRestartRequested
+	sensorRestartRequested = agentservice.RestartRequested
 )
 
 // sensorHost is what runSensor needs from whatever supervises the process: a

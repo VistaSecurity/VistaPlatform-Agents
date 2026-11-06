@@ -1,9 +1,8 @@
-package main
+package agentlogs
 
 import (
 	"bytes"
 	"errors"
-	"io"
 	"testing"
 )
 
@@ -13,7 +12,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space
 
 func TestTolerantMultiWriterWritesPastAFailingSink(t *testing.T) {
 	var ring, stderr bytes.Buffer
-	w := &tolerantMultiWriter{writers: []io.Writer{&ring, failingWriter{}, &stderr}}
+	w := NewTolerantWriter(&ring, failingWriter{}, &stderr)
 
 	_, err := w.Write([]byte("hello\n"))
 	if err == nil {

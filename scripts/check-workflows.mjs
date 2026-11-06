@@ -18,7 +18,9 @@
 //                   else (a runner group, an expression from inputs or vars,
 //                   the word self-hosted anywhere outside a comment) fails.
 //                   Self-hosted runners execute pull-request code on machines
-//                   that hold credentials; public CI never uses them.
+//                   that hold credentials; public CI never uses them. The
+//                   tests also hold HOSTED_LABELS to exactly the labels this
+//                   repository's workflows use.
 //   pin             every `uses:` names a local path, a docker image by
 //                   sha256 digest, or owner/repo[/path]@<40-hex commit SHA>
 //                   with the version in a trailing comment. A tag or branch
@@ -86,13 +88,17 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// GitHub-hosted runner labels this repository may ask for. A label outside
-// the list fails even if GitHub hosts it: adding one is a reviewed change.
+// The GitHub-hosted runner labels this repository uses: exactly these, in this
+// one place. A label outside the list fails even if GitHub hosts it, and
+// scripts/check-workflows.test.mjs fails when the list holds a label no
+// workflow uses, so the list is always the set in use and changing a runner is one reviewed edit
+// here plus the workflow. Pinned labels only, never *-latest: a label that
+// moves changes the build machine without a review. Labels GitHub supports:
+// https://github.com/actions/runner-images#available-images (macos-14 was
+// retired on 2026-11-02; GitHub then refused jobs that asked for it).
 export const HOSTED_LABELS = new Set([
-  'ubuntu-latest', 'ubuntu-24.04', 'ubuntu-22.04',
-  'ubuntu-24.04-arm', 'ubuntu-22.04-arm',
-  'macos-latest', 'macos-15', 'macos-15-intel', 'macos-14', 'macos-13',
-  'windows-latest', 'windows-2025', 'windows-2022', 'windows-11-arm',
+  'ubuntu-24.04', 'ubuntu-24.04-arm',
+  'macos-15', 'macos-15-intel',
 ]);
 
 export const FORBIDDEN_TRIGGERS = ['pull_request_target', 'workflow_run'];
@@ -583,10 +589,10 @@ function permissionValues(perms) {
 
 const READ_ONLY = new Set(['read', 'none', 'read-all']);
 
-function checkRunsOn(job, jobId, add) {
+function checkRunsOn(job, jobId, add, used = new Set()) {
   const ro = job['runs-on'];
   const where = `job ${jobId}`;
-  const labelOk = (l) => typeof l === 'string' && HOSTED_LABELS.has(l);
+  const labelOk = (l) => { if (typeof l === 'string') used.add(l); return typeof l === 'string' && HOSTED_LABELS.has(l); };
   if (typeof ro === 'string') {
     const m = /^\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}$/.exec(ro);
     if (m) {
@@ -733,6 +739,7 @@ function checkTrusted(doc, jobs, triggers, code, add) {
 // throws YamlSubsetError if the file cannot be read as the supported subset.
 export function checkWorkflowText(text, { composite = false } = {}) {
   const violations = [];
+  const labels = new Set();
   const add = (rule, message) => violations.push({ rule, message });
   const doc = parseYaml(text);
   if (!isMap(doc)) throw new YamlSubsetError('the file is not a YAML mapping');
@@ -751,7 +758,7 @@ export function checkWorkflowText(text, { composite = false } = {}) {
     steps.forEach((s, i) => checkStep(s, `step ${i + 1}`, add));
     // ... and from the structure, so a uses: the line scan missed still counts.
     for (const s of steps) if (isMap(s) && typeof s.uses === 'string' && !raw.some((u) => u.ref === s.uses)) checkPin(s.uses, '', 'composite step', add);
-    return { violations };
+    return { violations, labels };
   }
 
   const triggers = triggersOf(doc);
@@ -790,7 +797,7 @@ export function checkWorkflowText(text, { composite = false } = {}) {
       if (!raw.some((u) => u.ref === job.uses)) checkPin(job.uses, '', `job ${jobId}`, add);
       continue; // a reusable-workflow call has no runner of its own
     }
-    checkRunsOn(job, jobId, add);
+    checkRunsOn(job, jobId, add, labels);
     const steps = Array.isArray(job.steps) ? job.steps : [];
     steps.forEach((s, i) => {
       checkStep(s, `job ${jobId} step ${i + 1}`, add);
@@ -801,7 +808,7 @@ export function checkWorkflowText(text, { composite = false } = {}) {
     Object.values(jobs || {}).some((j) => isMap(j) && writeScopes(j.permissions).length > 0);
   if (trusted) checkTrusted(doc, jobs, triggers, code, add);
   else if (triggers.includes('workflow_call')) checkSourceAndSecrets(jobs, code, 'a reusable workflow (its callers sign what it builds)', add);
-  return { violations };
+  return { violations, labels };
 }
 
 function listFiles(dir, match) {
@@ -823,17 +830,21 @@ export function checkRepository(root) {
   const actions = listFiles(path.join(root, '.github', 'actions'), (n) => n === 'action.yml' || n === 'action.yaml');
   const violations = [];
   const errors = [];
+  const used = new Set();
   if (workflows.length === 0) errors.push({ file: path.join(root, '.github', 'workflows'), message: 'no workflow files found (wrong root?)' });
   for (const [file, composite] of [...workflows.map((f) => [f, false]), ...actions.map((f) => [f, true])]) {
     const rel = path.relative(root, file);
     try {
-      const { violations: v } = checkWorkflowText(readFileSync(file, 'utf8'), { composite });
+      const { violations: v, labels } = checkWorkflowText(readFileSync(file, 'utf8'), { composite });
       for (const x of v) violations.push({ file: rel, ...x });
+      for (const l of labels || []) used.add(l);
     } catch (e) {
       errors.push({ file: rel, message: e.message });
     }
   }
-  return { files: workflows.length + actions.length, violations, errors };
+  // labels: every runner label the files ask for, so a test can hold
+  // HOSTED_LABELS to exactly the set in use.
+  return { files: workflows.length + actions.length, violations, errors, labels: used };
 }
 
 function main() {

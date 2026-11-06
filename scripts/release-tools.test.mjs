@@ -157,7 +157,7 @@ const machine = { x64: 'amd64', arm64: 'arm64' }[hostArch()];
 // A stand-in executable: carries the stamped version (as a real binary's data
 // does) and prints a -version report, here with whatever version report()
 // says.
-const fakeExe = (report) => (agent, t, version) => (t.os === 'linux'
+const fakeExe = (report) => (agent, t, version) => (t.os !== 'windows'
   ? `#!/bin/sh\n# stamped ${version}\necho "Vista Platform agent v${report(version)}"\necho "Platform: ${t.os}/${t.arch}"\n`
   : `fake, stamped ${version}\n`);
 
@@ -191,6 +191,47 @@ test('smoke: a package whose binary differs from the published one fails', { ski
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /differs from/);
 });
+
+// The macOS legs run the same script under the bash macOS ships. Here they
+// run against stand-ins for uname (the script reads the system from it, never
+// from an argument), under bash 3.2 too when BASH32 names one.
+const SMOKE_BASHES = ['bash', ...(process.env.BASH32 ? [process.env.BASH32] : [])];
+function asMac(machineName) {
+  const bin = tempDir('fake-mac-');
+  writeFileSync(path.join(bin, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo Darwin ;; -m) echo ${machineName} ;; *) echo Darwin ;; esac\n`, { mode: 0o755 });
+  return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+}
+for (const sh of SMOKE_BASHES) {
+  for (const [machineName, macArch] of [['arm64', 'arm64'], ['x86_64', 'amd64']]) {
+    test(`smoke: on macOS ${macArch} the packages, binaries and macOS installers are executed (${sh})`, { skip: platform() === 'win32' && 'needs a POSIX shell' }, () => {
+      const r = makeRelease({ exeContent: fakeExe((v) => v) });
+      assert.deepEqual(r.errors, []);
+      const out = path.join(r.dir, `smoke-${macArch}.json`);
+      const res = spawnSync(sh, [path.join(here, 'release', 'smoke.sh'), r.assets, '5.3.0', out], { encoding: 'utf8', env: asMac(machineName) });
+      assert.equal(res.status, 0, res.stdout + res.stderr);
+      const j = JSON.parse(readFileSync(out, 'utf8'));
+      assert.equal(j.os, 'darwin');
+      assert.equal(j.arch, macArch);
+      assert.deepEqual(j.executed, [
+        'install-device-agent-macos.sh', 'install-sensor-macos.sh',
+        `vista-device-agent_5.3.0_darwin_${macArch}`, `vista-device-agent_5.3.0_darwin_${macArch}.tar.gz`,
+        `vista-sensor_5.3.0_darwin_${macArch}`, `vista-sensor_5.3.0_darwin_${macArch}.tar.gz`,
+      ]);
+    });
+  }
+
+  test(`smoke: on macOS a binary that reports Linux, or a package without its installer, fails (${sh})`, { skip: platform() === 'win32' && 'needs a POSIX shell' }, () => {
+    const wrong = makeRelease({ exeContent: (a, t, v) => (t.os === 'windows' ? `fake, stamped ${v}\n` : `#!/bin/sh\n# stamped ${v}\necho "Vista Platform agent v${v}"\necho "Platform: linux/${t.arch}"\n`) });
+    let res = spawnSync(sh, [path.join(here, 'release', 'smoke.sh'), wrong.assets, '5.3.0', path.join(wrong.dir, 's.json')], { encoding: 'utf8', env: asMac('arm64') });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /does not report darwin\/arm64/);
+    const r = makeRelease({ exeContent: fakeExe((v) => v) });
+    writeFileSync(path.join(r.assets, 'install-sensor-macos.sh'), '#!/bin/bash\n# another installer\n');
+    res = spawnSync(sh, [path.join(here, 'release', 'smoke.sh'), r.assets, '5.3.0', path.join(r.dir, 's.json')], { encoding: 'utf8', env: asMac('arm64') });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /differs from the published install-sensor-macos\.sh/);
+  });
+}
 
 // --- nightly retention (dry run) -------------------------------------------
 

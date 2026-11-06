@@ -44,7 +44,7 @@ cache, or downloads another run's artefacts.
 3. `release.yml` refuses a tag that is not `vX.Y.Z[-rc.N]`, that does not point
    at the commit it built, or whose commit is not on `main`; it refuses to run
    if any release (draft or published) exists for the tag. It then builds,
-   smoke-runs, signs every artefact, attests provenance, writes
+   smoke-runs (below), signs every artefact, attests provenance, writes
    `agents-release.json` and the first compatibility record (`c1`, every claim
    `pending`), writes and signs `SHA256SUMS`, and runs
    `scripts/verify-release.sh` three times: on the files it is about to upload,
@@ -52,9 +52,38 @@ cache, or downloads another run's artefacts.
    release.
 4. A stable `vX.Y.Z` needs `LICENSE`, `NOTICE` and build provenance; a
    candidate needs `LICENSE` and `NOTICE`. The workflow fails otherwise.
+5. The release notes are written by `scripts/release/notes.mjs` from
+   `agents-release.json`, never by hand. They open with a download table, one
+   row per agent and system (sensor first, then device agent), linking the
+   archive (the primary download), the loose binary and the installer for that
+   system directly; then what was executed in the release run, what the host
+   must provide, native signing and how to verify.
+
+The smoke legs (`scripts/release/smoke.sh`, the `smoke` job of
+`build-agents.yml`, one leg per entry of `smoke` in `release/agents.json`) run
+on GitHub-hosted linux/amd64, linux/arm64, darwin/amd64 (`macos-15-intel`) and
+darwin/arm64 (`macos-15`) runners. Each unpacks the packages for its machine,
+checks they hold the published binary and installer byte for byte, runs each
+binary's `-version` (the sensor loads the system's libpcap to get there) and
+the installer's `--check-dependencies`. That proves the published bytes start
+and link on that system; it does not install a service, capture, or register
+(the installers are tested for that in `scripts/`, and on real hosts before a
+platform release). What a leg executed is `runtime_qualified` in
+`agents-release.json` and "yes" in the release notes; a leg whose result is
+missing fails the release. Windows builds have no smoke leg and stay
+compile-only.
 
 ## Immutability and failed runs
 
+- A run that does not do its job ends **red**. `nightly.yml` and
+  `release.yml` end with a `gate` job that runs whatever happened before it,
+  holds no permissions and fails when a job failed or was cancelled, or when
+  the run was meant to publish (always for a tag; for a nightly, when
+  `prepare` found a new commit) and `publish` did not succeed. A cancelled job
+  (for example on a runner label GitHub no longer serves) used to leave the
+  run "cancelled" with nothing published and nothing marked as failed. A
+  nightly with nothing new stays green. The gate makes the run fail, so
+  GitHub's own notification settings apply; there is no other alerting.
 - A release is created as a **draft**, filled, verified, and only then
   published. A run that fails part-way leaves an unpublished draft, visible
   only to people with write access: that draft is the quarantine. Nothing

@@ -14,6 +14,13 @@ import (
 // re-trying the same doomed start every RestartSec.
 const exitNeedsOperator = 78
 
+// exitCannotCapture is the exit status of a sensor that stops before
+// registering because it cannot capture. It is the status a failed capture
+// start always had (log.Fatalf), so service managers restart it as before: a
+// capture driver that is not up yet at boot is retried, and the registration
+// key is not spent until capture works.
+const exitCannotCapture = 1
+
 // exitProcess is os.Exit, replaceable so tests can observe the status.
 var exitProcess = os.Exit
 

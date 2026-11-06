@@ -8,11 +8,25 @@
     restarts on failure, starts it, and waits for the sensor to register itself
     with the control plane.
 
-    Ships alongside crypto-sensor.exe in the sensor release package - run it from
-    the directory that contains crypto-sensor.exe.
+    Run it from the directory that holds the sensor: crypto-sensor.exe from
+    the release package, or the release file
+    vista-sensor_<version>_windows_<arch>.exe as downloaded.
 
 .EXAMPLE
-    .\install-sensor.ps1 -Url https://app.vistasecurity.io -Key REG-xxxx -IP 10.0.0.10 -Name sensor-dc01
+    .\install-sensor.ps1 -Url https://app.vistasecurity.io -KeyStdin -IP 10.0.0.10 -Name sensor-dc01
+
+    Prompts for the registration key, so it does not appear on the command
+    line or in the process list.
+
+.EXAMPLE
+    $env:VISTA_REGISTRATION_KEY = "REG-..."; .\install-sensor.ps1 -Url https://vista.example.com -IP 10.0.0.10
+
+.EXAMPLE
+    .\install-sensor.ps1 -Url https://vista.example.com -Key REG-xxxx -IP 10.0.0.10 -CaFingerprint 3f9a...
+
+    For a control plane whose certificate is signed by a private CA this host
+    does not trust: the sensor pins the control plane's CA only if it has this
+    SHA-256 fingerprint.
 
 .NOTES
     Must be run from an elevated (Administrator) PowerShell session.
@@ -23,9 +37,18 @@ param(
     # Control plane URL the sensor registers and reports to.
     [string]$Url = "https://app.vistasecurity.io",
 
-    # Registration key minted in the console (REG-...). Required.
-    [Parameter(Mandatory = $true)]
-    [string]$Key,
+    # Registration key minted in the console (REG-...). Required, from here,
+    # -KeyStdin or VISTA_REGISTRATION_KEY. A key on the command line is visible
+    # to other users in the process list; prefer the other two.
+    [string]$Key = "",
+
+    # Read the registration key from standard input (the first line) when it
+    # is redirected, otherwise prompt for it without echoing it.
+    [switch]$KeyStdin,
+
+    # Expected SHA-256 fingerprint of the control plane's CA certificate, for a
+    # control plane whose certificate this host does not already trust.
+    [string]$CaFingerprint = "",
 
     # IP address the operator entered when registering. Required (parity with --ip).
     [Parameter(Mandatory = $true)]
@@ -34,7 +57,10 @@ param(
     # Human-readable sensor name. Defaults to the hostname + date.
     [string]$Name = "",
 
-    # Comma-separated capture interfaces. Empty = let the sensor auto-select.
+    # Comma-separated capture interfaces, each named as Windows shows the
+    # adapter ("Ethernet 2", "Wi-Fi"), by its description, or by its Npcap
+    # device name (\Device\NPF_{GUID}). Empty = the sensor captures on every
+    # adapter that is up and has an address.
     [string]$Interfaces = "",
 
     # Deployment profile. Not surfaced in the console; datacenter_host is the
@@ -54,26 +80,76 @@ function Write-Warn  { param($m) Write-Host "[WARN]  $m" -ForegroundColor Yellow
 function Write-Err   { param($m) Write-Host "[ERROR] $m" -ForegroundColor Red }
 
 # --- Preconditions ---------------------------------------------------------
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+
+#region sensor-binary
+# The binary's name in the release package (and once installed), and the
+# release's own name for the loose download.
+$InstalledBinaryName = "crypto-sensor.exe"
+$ReleaseBinaryPattern = "vista-sensor_*_windows_*.exe"
+
+# The sensor binary beside this script: the name the release package uses, or
+# exactly one file with the release's own name, as downloaded.
+function Find-SensorBinary([string]$dir) {
+    $installed = Join-Path $dir $InstalledBinaryName
+    if (Test-Path -LiteralPath $installed -PathType Leaf) { return $installed }
+    $released = @(Get-ChildItem -LiteralPath $dir -Filter $ReleaseBinaryPattern -File -ErrorAction SilentlyContinue)
+    if ($released.Count -eq 1) { return $released[0].FullName }
+    if ($released.Count -gt 1) {
+        throw "Found $($released.Count) files named $ReleaseBinaryPattern in $dir ($(($released | ForEach-Object { $_.Name }) -join ', ')). Keep the one for this host (amd64 or 386), or rename it to $InstalledBinaryName."
+    }
+    throw "No sensor binary in $dir. Put $InstalledBinaryName (from the release package) or the downloaded $ReleaseBinaryPattern next to this script."
+}
+#endregion sensor-binary
+
+try {
+    $BinarySource = Find-SensorBinary $PSScriptRoot
+} catch {
+    Write-Err $_.Exception.Message
     exit 1
 }
 
-$BinarySource = Join-Path $PSScriptRoot "crypto-sensor.exe"
-if (-not (Test-Path $BinarySource)) {
-    Write-Err "crypto-sensor.exe not found next to this script ($PSScriptRoot)."
-    Write-Err "Run install-sensor.ps1 from the extracted sensor package directory."
+# The key, from -Key, -KeyStdin or the environment, and the CA fingerprint,
+# checked before anything on the host changes.
+if ($KeyStdin) {
+    if ([Console]::IsInputRedirected) {
+        $Key = [Console]::In.ReadLine()
+    } else {
+        $secure = Read-Host -AsSecureString "Registration key"
+        $Key = [System.Net.NetworkCredential]::new("", $secure).Password
+    }
+}
+if ([string]::IsNullOrEmpty($Key) -and $env:VISTA_REGISTRATION_KEY) { $Key = $env:VISTA_REGISTRATION_KEY }
+if ($null -ne $Key) { $Key = $Key.Trim() }
+if ([string]::IsNullOrWhiteSpace($Key)) {
+    Write-Err "A registration key is required: -Key, -KeyStdin, or VISTA_REGISTRATION_KEY in the environment."
     exit 1
+}
+if ($CaFingerprint) {
+    # The sensor's own normalisation: case, an optional sha256: prefix and
+    # separators do not matter.
+    $normalized = ($CaFingerprint.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
+    if ($normalized -notmatch '^[0-9a-f]{64}$') {
+        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (colons allowed)."
+        exit 1
+    }
+    $CaFingerprint = $normalized
 }
 
 # The version the platform shows is the one stamped into this binary - the
 # sensor reports it itself at registration and on every heartbeat.
+# Display only: an unreadable version leaves "unknown" and changes nothing.
 $SensorVersion = "unknown"
 try {
     $versionLine = (& $BinarySource --version 2>$null | Select-Object -First 1)
     if ($versionLine -match ' v(\S+)$') { $SensorVersion = $Matches[1] }
 } catch { }
+
+# After the argument checks, so a mistake is reported without elevation.
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+    exit 1
+}
 
 # Packet capture needs Npcap: the sensor loads its wpcap.dll at runtime and
 # cannot capture without it. Check before touching the service or config, so a
@@ -104,6 +180,7 @@ Write-Info "Sensor name   : $Name"
 Write-Info "IP address    : $IP"
 Write-Info "Profile       : $Profile"
 Write-Info "Install dir   : $InstallDir"
+if ($CaFingerprint) { Write-Info "CA fingerprint: $CaFingerprint" }
 Write-Host ""
 if ($Profile -ne "datacenter_host") {
     Write-Warn "-Profile $Profile is not applied yet: the sensor registers itself and reports the datacenter_host profile."
@@ -145,11 +222,33 @@ if ($keepEnrolment) {
 }
 
 # Stop a previous install so it cannot rewrite the config while we replace it.
+# Best effort: a service that will not stop keeps its binary locked, and the
+# Copy-Item below then fails loudly.
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $DataDir | Out-Null
+
+# --- Administrators and SYSTEM only ----------------------------------------
+# The configuration holds the registration key until the sensor redeems it,
+# and the certs directories hold the sensor's private key. Program Files lets
+# every user read what is under it, and the sensor rewrites its config, so the
+# protection is on the directory: inherited by everything created in it, then
+# reset onto anything an earlier install left. SIDs, not names, so it works on
+# a localised Windows: S-1-5-18 is SYSTEM, S-1-5-32-544 Administrators.
+& icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not restrict $InstallDir to Administrators and SYSTEM (icacls exit $LASTEXITCODE). Nothing was written."
+    exit 1
+}
+if (Get-ChildItem -LiteralPath $InstallDir -Force) {
+    & icacls.exe (Join-Path $InstallDir "*") /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Could not reset the permissions under $InstallDir (icacls exit $LASTEXITCODE). Nothing was written."
+        exit 1
+    }
+}
 
 # Earlier versions of this installer registered on the sensor's behalf and wrote
 # a control-plane-generated private key to certs\. That identity was never usable
@@ -162,7 +261,7 @@ if (-not $keepEnrolment) {
 }
 
 Write-Info "Installing sensor binary..."
-Copy-Item -Force $BinarySource (Join-Path $InstallDir "crypto-sensor.exe")
+Copy-Item -Force -LiteralPath $BinarySource -Destination (Join-Path $InstallDir $InstalledBinaryName)
 
 # --- Write the canonical sensor config ------------------------------------
 # The installer does NOT register the sensor. The sensor registers itself on
@@ -208,30 +307,85 @@ storage:
     [System.IO.File]::WriteAllText($ConfigPath, $configContent, (New-Object System.Text.UTF8Encoding $false))
 }
 
+#region service-config
+# Points the service at $PathName and makes it start on boot, then reads both
+# back and throws unless they took. Windows PowerShell 5.1 mangles the quotes
+# embedded in an argument to a native program, so the
+# `sc.exe config <name> binPath= "<path with quotes>"` this replaced printed its
+# usage text and changed nothing, unnoticed: a re-run never re-enabled a
+# service the installer had disabled, and a new command line never reached an
+# existing service. Win32_Service.Change takes the path as data, not as a
+# command line. $Get and $Change stand in for Win32_Service in tests
+# (scripts/install-*-ps1 tests); the read-back is what makes a no-op fail.
+function Set-ServiceStartup {
+    param(
+        [string]$Name,
+        [string]$PathName,
+        [scriptblock]$Get = { param($n) Get-CimInstance -ClassName Win32_Service -Filter "Name='$n'" },
+        [scriptblock]$Change = {
+            param($svc, $path)
+            (Invoke-CimMethod -InputObject $svc -MethodName Change -Arguments @{ PathName = $path; StartMode = 'Automatic' }).ReturnValue
+        }
+    )
+    $svc = & $Get $Name
+    if (-not $svc) { throw "Service $Name does not exist." }
+    $rc = & $Change $svc $PathName
+    if ($rc -ne 0) { throw "Could not reconfigure service ${Name}: Win32_Service.Change returned $rc." }
+    $after = & $Get $Name
+    if ("$($after.PathName)" -ne $PathName -or "$($after.StartMode)" -ne 'Auto') {
+        throw "Service $Name was not reconfigured: it runs '$($after.PathName)' and starts '$($after.StartMode)'; the installer set '$PathName' and Auto."
+    }
+}
+#endregion service-config
+
 # --- Install + start the Windows service ----------------------------------
 # Auto-start (survives reboot / maintenance) + restart-on-failure = the Windows
 # equivalent of systemd `WantedBy=multi-user.target` + `Restart=always`.
 Write-Info "Installing Windows service '$ServiceName'..."
 $binPath = "`"$InstallDir\crypto-sensor.exe`" --verbose -config `"$ConfigPath`""
+if ($CaFingerprint) {
+    # Pins the control plane's CA on first start, verified against this
+    # fingerprint; ignored once a CA is in the config.
+    $binPath += " -ca-fingerprint $CaFingerprint"
+}
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Warn "Service already exists - reconfiguring."
-    # sc.exe is the reliable way to rewrite binPath on an existing service.
-    sc.exe config $ServiceName binPath= "$binPath" start= auto | Out-Null
 } else {
+    # A cmdlet, not a native command: it takes the path as data and throws
+    # (ErrorActionPreference Stop) if it cannot create the service.
     New-Service -Name $ServiceName -DisplayName $ServiceDisplay `
         -BinaryPathName $binPath -StartupType Automatic `
         -Description "Vista Platform passive crypto-discovery sensor" | Out-Null
 }
+# Both paths: an existing service may be Disabled (this installer disables it
+# on a rejected key or a sensor that cannot capture) or run an older command
+# line; a new one is read back too.
+try {
+    Set-ServiceStartup $ServiceName $binPath
+} catch {
+    Write-Err "Could not configure the service: $($_.Exception.Message)"
+    exit 1
+}
 
 # Restart on crash: reset failure count daily, restart after 10s on each of the
 # first three failures (the SCM repeats the last action for any later one).
+# Neither argument list has a quote for Windows PowerShell 5.1 to mangle, but
+# each exit status is checked: without these the sensor stays down.
 sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/10000/restart/10000 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not set the service's restart-on-failure actions (sc.exe failure exit $LASTEXITCODE)."
+    exit 1
+}
 # Also restart when the sensor stops itself with a failure exit code: that is
 # how it honours a restart command from the control plane. Without this flag
 # the SCM only acts on a crash, and the sensor would stay stopped.
 sc.exe failureflag $ServiceName 1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not make the service restart after a failure exit (sc.exe failureflag exit $LASTEXITCODE)."
+    exit 1
+}
 
 # The address the operator entered when creating the registration key (-IP).
 # Pinning it makes registration report the address the platform expects even on
@@ -277,11 +431,16 @@ $timeoutSeconds = 90
 Write-Info "Waiting up to ${timeoutSeconds}s for the sensor to register..."
 $sensorId = $null
 $rejected = $false
+$cannotCapture = $false
 $deadline = (Get-Date).AddSeconds($timeoutSeconds)
 while ((Get-Date) -lt $deadline) {
     $value = Get-ConfigValue 'sensorId'
     if ($value -match $uuidPattern) { $sensorId = $value; break }
-    if ((Get-NewLogText) -match 'Registration was REJECTED') { $rejected = $true; break }
+    $newLog = Get-NewLogText
+    if ($newLog -match 'Registration was REJECTED') { $rejected = $true; break }
+    # The sensor checks that it can capture before it registers, and stops
+    # with the key unused when it cannot.
+    if ($newLog -match 'Not registering: the registration key is unused') { $cannotCapture = $true; break }
     Start-Sleep -Seconds 2
 }
 
@@ -290,7 +449,7 @@ if (-not $sensorId) {
     Write-Host ""
     # The sensor marks failures with these emoji. Built from code points: this
     # file has no BOM, so Windows PowerShell reads it as ANSI, not UTF-8.
-    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)"
+    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)|Failed to start capture on interface"
     (Get-NewLogText) -split "`r?`n" | Where-Object { $_ -match $failureMarks } |
         Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }
     Write-Host ""
@@ -298,10 +457,20 @@ if (-not $sensorId) {
         # A rejected key never succeeds; stop the service rather than leave the
         # SCM restarting it every 10 seconds.
         # Disable first so a restart the SCM has already queued cannot start it.
+        # Best effort: the install has already failed and says so; a re-run
+        # re-enables it (Set-ServiceStartup).
         Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Write-Err "The control plane REJECTED the registration key (see above): it is invalid, expired, or already used."
         Write-Err "Generate a new key (Discovery -> Sensors & Agents -> Register) and re-run this installer with it."
+        Write-Info "The sensor service has been stopped and disabled."
+    } elseif ($cannotCapture) {
+        # Retrying cannot help until the interfaces change; the key is still
+        # good, so re-running the installer with -Interfaces is the fix.
+        Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        Write-Err "The sensor cannot capture on this host (see above), so it did not register: the registration key was NOT used."
+        Write-Err "Re-run this installer with -Interfaces naming an adapter from the list above (for example -Interfaces `"Ethernet`")."
         Write-Info "The sensor service has been stopped and disabled."
     } else {
         if ($startError) { Write-Err "Starting the service failed: $startError" }

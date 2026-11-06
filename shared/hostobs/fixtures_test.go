@@ -83,6 +83,12 @@ const (
 	// management address TLV.
 	lldpHex = "020704001a2f1122330416054769676162697445746865726e6574312f302f323406020078080e55706c696e6b20746f20636f72650a186163636573732d73772d332e636f72702e6578616d706c650c23436973636f20494f5320536f6674776172652c2043333735304520536f6674776172650e0400140014100c0501c0a80a020200000018000000"
 
+	// LLDP from a gateway that advertises its base MAC as TEXT: chassis ID
+	// subtype 7 (locally assigned) holding "d8:b3:70:00:00:01", port ID subtype
+	// 3 (MAC) holding the sending port's own address d8:b3:70:00:00:02, TTL,
+	// system name "gateway-1", capabilities with bridge+router enabled.
+	lldpTextChassisMACHex = "02120764383a62333a37303a30303a30303a3031040703d8b370000002060200780a09676174657761792d310e04001400140000"
+
 	// LLDP with the system description filled to the protocol maximum. The TLV
 	// length field is 9 bits, so 511 octets is the largest banner LLDP can
 	// carry and therefore the worst case the truncation bound must survive.
