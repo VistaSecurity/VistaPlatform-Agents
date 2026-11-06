@@ -8,11 +8,25 @@
     restarts on failure, starts it, and waits for the sensor to register itself
     with the control plane.
 
-    Ships alongside crypto-sensor.exe in the sensor release package - run it from
-    the directory that contains crypto-sensor.exe.
+    Run it from the directory that holds the sensor: crypto-sensor.exe from
+    the release package, or the release file
+    vista-sensor_<version>_windows_<arch>.exe as downloaded.
 
 .EXAMPLE
-    .\install-sensor.ps1 -Url https://app.vistasecurity.io -Key REG-xxxx -IP 10.0.0.10 -Name sensor-dc01
+    .\install-sensor.ps1 -Url https://app.vistasecurity.io -KeyStdin -IP 10.0.0.10 -Name sensor-dc01
+
+    Prompts for the registration key, so it does not appear on the command
+    line or in the process list.
+
+.EXAMPLE
+    $env:VISTA_REGISTRATION_KEY = "REG-..."; .\install-sensor.ps1 -Url https://vista.example.com -IP 10.0.0.10
+
+.EXAMPLE
+    .\install-sensor.ps1 -Url https://vista.example.com -Key REG-xxxx -IP 10.0.0.10 -CaFingerprint 3f9a...
+
+    For a control plane whose certificate is signed by a private CA this host
+    does not trust: the sensor pins the control plane's CA only if it has this
+    SHA-256 fingerprint.
 
 .NOTES
     Must be run from an elevated (Administrator) PowerShell session.
@@ -23,9 +37,18 @@ param(
     # Control plane URL the sensor registers and reports to.
     [string]$Url = "https://app.vistasecurity.io",
 
-    # Registration key minted in the console (REG-...). Required.
-    [Parameter(Mandatory = $true)]
-    [string]$Key,
+    # Registration key minted in the console (REG-...). Required, from here,
+    # -KeyStdin or VISTA_REGISTRATION_KEY. A key on the command line is visible
+    # to other users in the process list; prefer the other two.
+    [string]$Key = "",
+
+    # Read the registration key from standard input (the first line) when it
+    # is redirected, otherwise prompt for it without echoing it.
+    [switch]$KeyStdin,
+
+    # Expected SHA-256 fingerprint of the control plane's CA certificate, for a
+    # control plane whose certificate this host does not already trust.
+    [string]$CaFingerprint = "",
 
     # IP address the operator entered when registering. Required (parity with --ip).
     [Parameter(Mandatory = $true)]
@@ -57,17 +80,59 @@ function Write-Warn  { param($m) Write-Host "[WARN]  $m" -ForegroundColor Yellow
 function Write-Err   { param($m) Write-Host "[ERROR] $m" -ForegroundColor Red }
 
 # --- Preconditions ---------------------------------------------------------
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+
+#region sensor-binary
+# The binary's name in the release package (and once installed), and the
+# release's own name for the loose download.
+$InstalledBinaryName = "crypto-sensor.exe"
+$ReleaseBinaryPattern = "vista-sensor_*_windows_*.exe"
+
+# The sensor binary beside this script: the name the release package uses, or
+# exactly one file with the release's own name, as downloaded.
+function Find-SensorBinary([string]$dir) {
+    $installed = Join-Path $dir $InstalledBinaryName
+    if (Test-Path -LiteralPath $installed -PathType Leaf) { return $installed }
+    $released = @(Get-ChildItem -LiteralPath $dir -Filter $ReleaseBinaryPattern -File -ErrorAction SilentlyContinue)
+    if ($released.Count -eq 1) { return $released[0].FullName }
+    if ($released.Count -gt 1) {
+        throw "Found $($released.Count) files named $ReleaseBinaryPattern in $dir ($(($released | ForEach-Object { $_.Name }) -join ', ')). Keep the one for this host (amd64 or 386), or rename it to $InstalledBinaryName."
+    }
+    throw "No sensor binary in $dir. Put $InstalledBinaryName (from the release package) or the downloaded $ReleaseBinaryPattern next to this script."
+}
+#endregion sensor-binary
+
+try {
+    $BinarySource = Find-SensorBinary $PSScriptRoot
+} catch {
+    Write-Err $_.Exception.Message
     exit 1
 }
 
-$BinarySource = Join-Path $PSScriptRoot "crypto-sensor.exe"
-if (-not (Test-Path $BinarySource)) {
-    Write-Err "crypto-sensor.exe not found next to this script ($PSScriptRoot)."
-    Write-Err "Run install-sensor.ps1 from the extracted sensor package directory."
+# The key, from -Key, -KeyStdin or the environment, and the CA fingerprint,
+# checked before anything on the host changes.
+if ($KeyStdin) {
+    if ([Console]::IsInputRedirected) {
+        $Key = [Console]::In.ReadLine()
+    } else {
+        $secure = Read-Host -AsSecureString "Registration key"
+        $Key = [System.Net.NetworkCredential]::new("", $secure).Password
+    }
+}
+if ([string]::IsNullOrEmpty($Key) -and $env:VISTA_REGISTRATION_KEY) { $Key = $env:VISTA_REGISTRATION_KEY }
+if ($null -ne $Key) { $Key = $Key.Trim() }
+if ([string]::IsNullOrWhiteSpace($Key)) {
+    Write-Err "A registration key is required: -Key, -KeyStdin, or VISTA_REGISTRATION_KEY in the environment."
     exit 1
+}
+if ($CaFingerprint) {
+    # The sensor's own normalisation: case, an optional sha256: prefix and
+    # separators do not matter.
+    $normalized = ($CaFingerprint.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
+    if ($normalized -notmatch '^[0-9a-f]{64}$') {
+        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (colons allowed)."
+        exit 1
+    }
+    $CaFingerprint = $normalized
 }
 
 # The version the platform shows is the one stamped into this binary - the
@@ -78,6 +143,13 @@ try {
     $versionLine = (& $BinarySource --version 2>$null | Select-Object -First 1)
     if ($versionLine -match ' v(\S+)$') { $SensorVersion = $Matches[1] }
 } catch { }
+
+# After the argument checks, so a mistake is reported without elevation.
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+    exit 1
+}
 
 # Packet capture needs Npcap: the sensor loads its wpcap.dll at runtime and
 # cannot capture without it. Check before touching the service or config, so a
@@ -108,6 +180,7 @@ Write-Info "Sensor name   : $Name"
 Write-Info "IP address    : $IP"
 Write-Info "Profile       : $Profile"
 Write-Info "Install dir   : $InstallDir"
+if ($CaFingerprint) { Write-Info "CA fingerprint: $CaFingerprint" }
 Write-Host ""
 if ($Profile -ne "datacenter_host") {
     Write-Warn "-Profile $Profile is not applied yet: the sensor registers itself and reports the datacenter_host profile."
@@ -168,7 +241,7 @@ if (-not $keepEnrolment) {
 }
 
 Write-Info "Installing sensor binary..."
-Copy-Item -Force $BinarySource (Join-Path $InstallDir "crypto-sensor.exe")
+Copy-Item -Force -LiteralPath $BinarySource -Destination (Join-Path $InstallDir $InstalledBinaryName)
 
 # --- Write the canonical sensor config ------------------------------------
 # The installer does NOT register the sensor. The sensor registers itself on
@@ -250,6 +323,11 @@ function Set-ServiceStartup {
 # equivalent of systemd `WantedBy=multi-user.target` + `Restart=always`.
 Write-Info "Installing Windows service '$ServiceName'..."
 $binPath = "`"$InstallDir\crypto-sensor.exe`" --verbose -config `"$ConfigPath`""
+if ($CaFingerprint) {
+    # Pins the control plane's CA on first start, verified against this
+    # fingerprint; ignored once a CA is in the config.
+    $binPath += " -ca-fingerprint $CaFingerprint"
+}
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
