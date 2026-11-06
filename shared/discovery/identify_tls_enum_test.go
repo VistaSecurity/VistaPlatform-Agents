@@ -16,11 +16,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -157,6 +159,127 @@ func TestIdentify_TLS13OnlyListenerReportsOnlyTLS13(t *testing.T) {
 	// were each tried, and refused.
 	if n := dialsTo(rec, 8443); n != 5 {
 		t.Errorf("%d dials to the TLS port, want 5 (1 identify + 1 kex support + 3 refused enumeration)", n)
+	}
+	// Those refusals are recorded, newest first, and cost no further handshake.
+	refused, _ := o.Result.Metadata[MetaTLSVersionsRefused].([]string)
+	if want := []string{"TLS 1.2", "TLS 1.1", "TLS 1.0"}; !slices.Equal(refused, want) {
+		t.Errorf("%s = %v, want %v", MetaTLSVersionsRefused, refused, want)
+	}
+}
+
+// A server that accepts everything refused nothing: the key is absent, not an
+// empty list.
+func TestIdentify_NothingRefusedLeavesTheKeyAbsent(t *testing.T) {
+	srv := startVersionServer(t, tls.VersionTLS10, tls.VersionTLS13, tls.NoClientCert)
+	o, _ := identifyVia(t, 8443, srv.addr, false, IdentifyOptions{})
+	if o.Result == nil || len(o.Result.TLSVersions) != 4 {
+		t.Fatalf("every version should be accepted: %+v", o.Result)
+	}
+	if v, ok := o.Result.Metadata[MetaTLSVersionsRefused]; ok {
+		t.Errorf("%s = %v on a server that refused nothing", MetaTLSVersionsRefused, v)
+	}
+}
+
+// The other entry point: a caller that already knows the endpoint.
+func TestProbeTLSEndpoint_RecordsRefusalsOnlyWhenItEnumerates(t *testing.T) {
+	srv := startVersionServer(t, tls.VersionTLS12, tls.VersionTLS12, tls.NoClientCert)
+	host, portStr, err := net.SplitHostPort(srv.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enumerate := range []bool{true, false} {
+		res, err := NewProber(3*time.Second).ProbeTLSEndpoint(t.Context(), host, port, TLSEndpointOptions{EnumerateVersions: enumerate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refused, ok := res.Metadata[MetaTLSVersionsRefused].([]string)
+		if want := []string{"TLS 1.3", "TLS 1.1", "TLS 1.0"}; enumerate && !slices.Equal(refused, want) {
+			t.Errorf("with enumeration: %s = %v, want %v", MetaTLSVersionsRefused, refused, want)
+		}
+		if !enumerate && ok {
+			t.Errorf("without enumeration: %s = %v; nothing was asked", MetaTLSVersionsRefused, refused)
+		}
+	}
+}
+
+// tlsRecord frames a handshake or alert message as one TLS record.
+func tlsRecord(contentType byte, body ...byte) []byte {
+	return append([]byte{contentType, 0x03, 0x03, byte(len(body) >> 8), byte(len(body))}, body...)
+}
+
+// readClientHello consumes what the client sent first, so the answer that
+// follows cannot be reset away by unread data.
+func readClientHello(c net.Conn) {
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = c.Read(make([]byte, 4096))
+}
+
+// enumerateAgainst runs the enumeration against a server that gives every
+// forced version the same answer.
+func enumerateAgainst(t *testing.T, answer func(net.Conn)) (accepted, refused []string) {
+	t.Helper()
+	host, port := speakServer(t, answer)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
+	return enumerateTLSVersions(t.Context(), dial, "", 500*time.Millisecond, 0)
+}
+
+// Only a failure on the version itself is a refusal. A version the handshake
+// could not test is in neither list, because a reader acts on a refusal.
+func TestEnumerateTLSVersions_OnlyAVersionFailureIsARefusal(t *testing.T) {
+	const handshakeFailure, internalError = 40, 80
+	alert := func(code byte) func(net.Conn) {
+		return func(c net.Conn) {
+			readClientHello(c)
+			_, _ = c.Write(tlsRecord(21, 2, code))
+		}
+	}
+	// A server hello selecting SSL 3.0, which no forced version offered.
+	hello := append([]byte{0x03, 0x00}, make([]byte, 32)...)
+	hello = append(hello, 0, 0xc0, 0x2f, 0)
+	sslv3 := append([]byte{2, 0, 0, byte(len(hello))}, hello...)
+
+	all := []string{"TLS 1.3", "TLS 1.2", "TLS 1.1", "TLS 1.0"}
+	for _, tc := range []struct {
+		name    string
+		answer  func(net.Conn)
+		refused []string
+	}{
+		{"protocol_version alert", alert(byte(alertProtocolVersion)), all},
+		{"server hello of a version not offered", func(c net.Conn) {
+			readClientHello(c)
+			_, _ = c.Write(tlsRecord(22, sslv3...))
+		}, all},
+		{"cipher refusal", alert(handshakeFailure), nil},
+		{"another alert", alert(internalError), nil},
+		{"connection closed", func(c net.Conn) { readClientHello(c) }, nil},
+		{"silence until the timeout", func(c net.Conn) { readClientHello(c); time.Sleep(time.Second) }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted, refused := enumerateAgainst(t, tc.answer)
+			if len(accepted) != 0 {
+				t.Errorf("accepted = %v, want none", accepted)
+			}
+			if !slices.Equal(refused, tc.refused) {
+				t.Errorf("refused = %v, want %v", refused, tc.refused)
+			}
+		})
+	}
+}
+
+// No connection at all tests nothing.
+func TestEnumerateTLSVersions_FailedDialIsNotARefusal(t *testing.T) {
+	dial := func(context.Context) (net.Conn, error) { return nil, errors.New("no route") }
+	accepted, refused := enumerateTLSVersions(t.Context(), dial, "", time.Second, 0)
+	if len(accepted) != 0 || len(refused) != 0 {
+		t.Fatalf("accepted %v refused %v, want neither", accepted, refused)
 	}
 }
 

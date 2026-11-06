@@ -174,7 +174,8 @@ func (p *Prober) Probe(hostname, ip, protocol string, port int) (*ProbeResult, e
 func (p *Prober) EnumerateTLSVersions(hostname, ip string, port int) []string {
 	address := net.JoinHostPort(ip, strconv.Itoa(port))
 	dial := func(context.Context) (net.Conn, error) { return net.DialTimeout("tcp", address, p.timeout) }
-	return enumerateTLSVersions(context.Background(), dial, hostname, p.timeout, 0)
+	accepted, _ := enumerateTLSVersions(context.Background(), dial, hostname, p.timeout, 0)
+	return accepted
 }
 
 // CanonicalProtocolName normalizes a protocol value into the registry key:
