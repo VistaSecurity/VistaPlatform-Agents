@@ -151,6 +151,37 @@ function Find-AgentBinary([string]$dir) {
 }
 #endregion agent-config
 
+#region service-config
+# Points the service at $PathName and makes it start on boot, then reads both
+# back and throws unless they took. Windows PowerShell 5.1 mangles the quotes
+# embedded in an argument to a native program, so the
+# `sc.exe config <name> binPath= "<path with quotes>"` this replaced printed its
+# usage text and changed nothing, unnoticed: a re-run never re-enabled a
+# service the installer had disabled, and a new command line never reached an
+# existing service. Win32_Service.Change takes the path as data, not as a
+# command line. $Get and $Change stand in for Win32_Service in tests
+# (scripts/install-*-ps1 tests); the read-back is what makes a no-op fail.
+function Set-ServiceStartup {
+    param(
+        [string]$Name,
+        [string]$PathName,
+        [scriptblock]$Get = { param($n) Get-CimInstance -ClassName Win32_Service -Filter "Name='$n'" },
+        [scriptblock]$Change = {
+            param($svc, $path)
+            (Invoke-CimMethod -InputObject $svc -MethodName Change -Arguments @{ PathName = $path; StartMode = 'Automatic' }).ReturnValue
+        }
+    )
+    $svc = & $Get $Name
+    if (-not $svc) { throw "Service $Name does not exist." }
+    $rc = & $Change $svc $PathName
+    if ($rc -ne 0) { throw "Could not reconfigure service ${Name}: Win32_Service.Change returned $rc." }
+    $after = & $Get $Name
+    if ("$($after.PathName)" -ne $PathName -or "$($after.StartMode)" -ne 'Auto') {
+        throw "Service $Name was not reconfigured: it runs '$($after.PathName)' and starts '$($after.StartMode)'; the installer set '$PathName' and Auto."
+    }
+}
+#endregion service-config
+
 # --- The binary runs on this host ------------------------------------------
 # Running it proves it is a build for this architecture. -version exits before
 # configuration or enrollment.
@@ -239,6 +270,8 @@ if ($keepEnrollment) {
 
 # Stop a previous install: its binary cannot be replaced while it runs, and it
 # must not rewrite the config while we replace it.
+# Best effort: a service that will not stop keeps its binary locked, and the
+# Copy-Item below then fails loudly.
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
 }
@@ -298,22 +331,41 @@ if ($CaFingerprint) {
 }
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Warn "Service already exists - reconfiguring."
-    # sc.exe is the reliable way to rewrite binPath on an existing service.
-    sc.exe config $ServiceName binPath= "$binPath" start= auto | Out-Null
-} else {
-    New-Service -Name $ServiceName -DisplayName $ServiceDisplay `
-        -BinaryPathName $binPath -StartupType Automatic `
-        -Description "Vista Platform device interrogation agent" | Out-Null
+try {
+    if ($existing) {
+        Write-Warn "Service already exists - reconfiguring."
+    } else {
+        # A cmdlet, not a native command: it takes the path as data and
+        # throws (ErrorActionPreference Stop) if it cannot create the service.
+        New-Service -Name $ServiceName -DisplayName $ServiceDisplay `
+            -BinaryPathName $binPath -StartupType Automatic `
+            -Description "Vista Platform device interrogation agent" | Out-Null
+    }
+    # Both paths: an existing service may be Disabled (a rejected key does
+    # that) or run an older command line; a new one is read back too.
+    Set-ServiceStartup $ServiceName $binPath
+} catch {
+    Write-Err "Could not install the service: $($_.Exception.Message)"
+    exit 1
 }
 
 # Restart on failure: reset the failure count daily, restart after 10s on each
 # of the first three failures (the SCM repeats the last action for any later
 # one). The failure flag makes the SCM act on the agent's own failure exit
 # code too, which is how it honours a restart requested from the console.
+# Neither argument list has a quote for Windows PowerShell 5.1 to mangle, but
+# each exit status is still checked: without these the agent stays down after
+# a crash or a console restart.
 sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/10000/restart/10000 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not set the service's restart-on-failure actions (sc.exe failure exit $LASTEXITCODE)."
+    exit 1
+}
 sc.exe failureflag $ServiceName 1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not make the service restart after a failure exit (sc.exe failureflag exit $LASTEXITCODE)."
+    exit 1
+}
 
 # Log lines this start wrote: everything past the log's current end. The
 # agent keeps the file open, so share it for writing and for its rotation.
@@ -369,7 +421,8 @@ if (-not $agentId) {
     if ($rejected) {
         # A rejected key never succeeds; stop the service rather than leave the
         # SCM restarting it every 10 seconds. Disable first so a restart the
-        # SCM has already queued cannot start it.
+        # SCM has already queued cannot start it. Best effort: the install has
+        # already failed and says so; a re-run re-enables it (Set-ServiceStartup).
         Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Write-Err "The agent could not enroll (see above). If the key was rejected it is invalid, expired, or already used."

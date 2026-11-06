@@ -60,6 +60,7 @@ if [ "$target" != native ]; then
   case "$agent:$goos" in
     sensor:windows) cp scripts/install-sensor.ps1 "$(dirname "$out")/" ;;
     sensor:*) cp scripts/install-sensor.sh "$(dirname "$out")/" ;;
+    device-agent:windows) cp scripts/install-device-agent.ps1 "$(dirname "$out")/" ;;
     device-agent:linux) cp scripts/install-device-agent.sh "$(dirname "$out")/" ;;
   esac
 fi
