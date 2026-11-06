@@ -1,26 +1,19 @@
 # Vista Platform agents
 
-> **Private staging repository.** Nothing here is released, supported or
-> public yet. This repository is being prepared to become the public home of
-> the Vista Platform passive sensor and device interrogation agent. The work
-> is tracked in the private epic VistaSecurity/VistaPlatform#2765; this README
-> is replaced before the repository is made public.
+The public home of the two customer-deployed agents of Vista Platform: the
+passive network sensor and the device interrogation agent. Source, builds,
+signed releases, installers and compatibility records are published here.
+Bugs and requests go to this repository's issues (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
-## What will live here
+## What lives here
 
-- `cmd/sensor`, `cmd/device-agent`: the two customer-deployed executables,
-  built and released separately, used by Vista Platform in managed mode and
-  later on their own.
-- `shared/`: the code both agents use, maintained here and nowhere else.
+- `cmd/sensor`, `cmd/device-agent`: the two executables, built and released
+  separately, used by Vista Platform in managed mode.
+- `internal/`, `shared/`: the code they are built from, maintained here.
+- `scripts/`: the installers, the build script and the release tooling.
 - Nightly and tagged builds, installers and compatibility metadata, published
   as this repository's releases. Every artefact carries a Sigstore signature.
-  Build provenance is unavailable until the repository is public; a release
-  built before then records that in its metadata.
-
-The source arrives with the extraction work order (WO-04). Until the
-extraction lands, the Go jobs of the pull-request gate fail because there is no
-`go.mod` to build: that is intended, so the gate cannot go green on an empty
-tree.
 
 ## Releases
 
@@ -30,11 +23,11 @@ head of `main` every night, under `nightly-YYYYMMDD-<commit>`. Both build every
 target on GitHub-hosted runners, run the Linux builds on linux/amd64 and
 linux/arm64, and publish each binary, package and installer with a Sigstore
 signature, an SBOM, `SHA256SUMS`, the release metadata `agents-release.json`
-and a compatibility record. Signatures are present on every release. SLSA
-build provenance is unavailable until the repository is public: a release built
-while it is private says so in `agents-release.json` (`provenance.status:
-"unavailable"`, with the reason) and has no `provenance.intoto.jsonl`, and a
-stable release is not published without provenance. `compatibility.yml` signs
+and a compatibility record. Signatures are present on every release. Where
+GitHub can attest, a release carries SLSA build provenance
+(`provenance.intoto.jsonl`); a release built while the repository was private
+says in `agents-release.json` that provenance is unavailable
+(`provenance.status: "unavailable"`, with the reason), and a stable release is not published without provenance. `compatibility.yml` signs
 later records, which say which platform versions were tested with those bytes.
 How to verify a download: `docs/verify-release.md`. How releases are made and
 what protects them: `docs/releasing.md`.
@@ -48,6 +41,29 @@ carries the installer for its system.
 |---|---|---|---|
 | Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
 | Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
+
+## Which file do I need
+
+Each release lists about 70 files; a person installing an agent needs one. The
+release notes open with a table linking it for every agent and system. In
+short, download the archive for your agent and system:
+
+| Agent | System | Download |
+|---|---|---|
+| Sensor | Linux x86-64 / ARM64 | `vista-sensor_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
+| Sensor | macOS Intel / Apple silicon | `vista-sensor_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
+| Sensor | Windows x64 / x86 | `vista-sensor_<version>_windows_amd64.zip` / `..._windows_386.zip` |
+| Device agent | Linux x86-64 / ARM64 | `vista-device-agent_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
+| Device agent | macOS Intel / Apple silicon | `vista-device-agent_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
+| Device agent | Windows x64 | `vista-device-agent_<version>_windows_amd64.zip` |
+
+Each archive holds the binary, the installer for its system where there is
+one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`; run the installer from the
+unpacked directory. The loose binaries (`vista-<agent>_<version>_<os>_<arch>`)
+and installers are published too, for those who want them. Everything else
+(`*.sigstore.json`, `*.cdx.json`, `SHA256SUMS`, `agents-release.json`,
+`compatibility-*.json`, `provenance.intoto.jsonl`) is for verification and
+tooling: see [`docs/verify-release.md`](docs/verify-release.md).
 
 ## Pull-request checks
 
