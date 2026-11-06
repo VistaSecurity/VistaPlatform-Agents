@@ -1,9 +1,10 @@
 # Nightly build of the Vista Platform agents (MASTER_PLAN 6.2, D19).
 #
-# Runs daily from the head of the protected default branch, or by hand on
-# main (gh workflow run nightly.yml --ref main). Never on a pull request,
-# never on another branch. A commit that already has a published nightly is
-# not built again.
+# Runs on every merge to the protected default branch, so a platform release
+# candidate can test the agents as they stand; daily, in case a run was lost;
+# or by hand on main (gh workflow run nightly.yml --ref main). Never on a pull
+# request, never on another branch. A commit that already has a published
+# nightly is not built again.
 #
 # The release is a PRERELEASE under the immutable tag
 # nightly-<YYYYMMDD>-<first 12 hex of the commit> (D19), with the version
@@ -24,6 +25,8 @@
 name: Nightly
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:

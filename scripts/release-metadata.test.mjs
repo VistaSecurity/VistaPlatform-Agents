@@ -334,7 +334,8 @@ test('the three trusted workflows sign in their own environments, from the refs 
   const c = wf('compatibility.yml');
   assert.deepEqual(Object.keys(r.on).sort(), ['push', 'workflow_dispatch']);
   assert.deepEqual(r.on.push, { tags: ['v*.*.*'] });
-  assert.deepEqual(Object.keys(n.on).sort(), ['schedule', 'workflow_dispatch']);
+  assert.deepEqual(Object.keys(n.on).sort(), ['push', 'schedule', 'workflow_dispatch']);
+  assert.deepEqual(n.on.push, { branches: ['main'] });
   assert.deepEqual(Object.keys(c.on), ['push']);
   assert.deepEqual(c.on.push.branches, ['main']);
   for (const [doc, env] of [[r, 'release'], [n, 'nightly'], [c, 'compatibility']]) {

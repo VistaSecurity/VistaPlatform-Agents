@@ -4,7 +4,7 @@
 // full history (actions/checkout fetch-depth: 0).
 //
 //   node scripts/release/resolve.mjs release   # tag push or dispatch on a tag
-//   node scripts/release/resolve.mjs nightly   # schedule or dispatch on main
+//   node scripts/release/resolve.mjs nightly   # push to main, schedule or dispatch on main
 //
 // Reads GITHUB_EVENT_NAME, GITHUB_REF, GITHUB_SHA, INPUT_TAG (dispatch input)
 // and, for a nightly, NIGHTLY_DATE (YYYYMMDD; default today in UTC). Writes
@@ -48,7 +48,7 @@ export function resolve(kind, env, gitFn = git) {
     try { tagged = gitFn('rev-parse', '--verify', `refs/tags/${tag}^{commit}`); } catch { throw new Error(`tag ${tag} does not exist in this checkout`); }
     if (tagged !== sha) throw new Error(`tag ${tag} points at ${tagged}, this run built ${sha}`);
   } else if (kind === 'nightly') {
-    if (event !== 'schedule' && event !== 'workflow_dispatch') throw new Error(`nightly.yml does not run on ${event}`);
+    if (!['push', 'schedule', 'workflow_dispatch'].includes(event)) throw new Error(`nightly.yml does not run on ${event}`);
     if (ref !== 'refs/heads/main') throw new Error(`a nightly builds main only, not ${ref}`);
     const date = env.NIGHTLY_DATE || new Date().toISOString().slice(0, 10).replace(/-/g, '');
     tag = nightlyIdentifiers(date, sha).tag;
