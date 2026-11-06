@@ -77,11 +77,17 @@ const refusals = {
   'a pull request': ['release', { ...tagPush, GITHUB_EVENT_NAME: 'pull_request' }, fakeGit()],
   'a nightly from another branch': ['nightly', { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/feature', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit()],
   'a nightly of a commit not on main': ['nightly', { GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit({ onMain: [] })],
-  'a nightly on a push': ['nightly', { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit()],
+  'a nightly on a push to another branch': ['nightly', { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/feature', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit()],
+  'a nightly on a pull request': ['nightly', { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit()],
 };
 for (const [name, [kind, env, git]] of Object.entries(refusals)) {
   test(`resolve refuses ${name}`, () => assert.throws(() => resolve(kind, env, git)));
 }
+
+test('resolve: a merge to main builds a nightly', () => {
+  const r = resolve('nightly', { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit());
+  assert.equal(r.tag, 'nightly-20261119-1a2b3c4d5e6f');
+});
 
 test('resolve: a scheduled nightly of main', () => {
   const r = resolve('nightly', { GITHUB_EVENT_NAME: 'schedule', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: SHA, NIGHTLY_DATE: '20261119' }, fakeGit());
