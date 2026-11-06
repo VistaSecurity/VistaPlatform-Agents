@@ -42,6 +42,29 @@ carries the installer for its system.
 | Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
 | Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
 
+## Which file do I need
+
+Each release lists about 70 files; a person installing an agent needs one. The
+release notes open with a table linking it for every agent and system. In
+short, download the archive for your agent and system:
+
+| Agent | System | Download |
+|---|---|---|
+| Sensor | Linux x86-64 / ARM64 | `vista-sensor_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
+| Sensor | macOS Intel / Apple silicon | `vista-sensor_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
+| Sensor | Windows x64 / x86 | `vista-sensor_<version>_windows_amd64.zip` / `..._windows_386.zip` |
+| Device agent | Linux x86-64 / ARM64 | `vista-device-agent_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
+| Device agent | macOS Intel / Apple silicon | `vista-device-agent_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
+| Device agent | Windows x64 | `vista-device-agent_<version>_windows_amd64.zip` |
+
+Each archive holds the binary, the installer for its system where there is
+one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`; run the installer from the
+unpacked directory. The loose binaries (`vista-<agent>_<version>_<os>_<arch>`)
+and installers are published too, for those who want them. Everything else
+(`*.sigstore.json`, `*.cdx.json`, `SHA256SUMS`, `agents-release.json`,
+`compatibility-*.json`, `provenance.intoto.jsonl`) is for verification and
+tooling: see [`docs/verify-release.md`](docs/verify-release.md).
+
 ## Pull-request checks
 
 Every pull request runs `.github/workflows/pr.yml` on GitHub-hosted runners

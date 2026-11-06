@@ -52,6 +52,12 @@ cache, or downloads another run's artefacts.
    release.
 4. A stable `vX.Y.Z` needs `LICENSE`, `NOTICE` and build provenance; a
    candidate needs `LICENSE` and `NOTICE`. The workflow fails otherwise.
+5. The release notes are written by `scripts/release/notes.mjs` from
+   `agents-release.json`, never by hand. They open with a download table, one
+   row per agent and system (sensor first, then device agent), linking the
+   archive (the primary download), the loose binary and the installer for that
+   system directly; then what was executed in the release run, what the host
+   must provide, native signing and how to verify.
 
 ## Immutability and failed runs
 
