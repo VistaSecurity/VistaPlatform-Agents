@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // The GitHub Release body, written from agents-release.json so the page says
-// exactly what the metadata says: channel, which targets were executed in
-// this run and which are compile-only, what the host must provide, native
-// signing status, and how to verify.
+// exactly what the metadata says. First what to download: one row per agent
+// and system, the archive as a direct link, then which targets were executed
+// in this run and which are compile-only, what the host must provide. Then the
+// channel, native signing status, and how to verify.
+//
+// A release page lists every asset in one flat list (about 70 files) that
+// cannot be grouped or reordered; this table is how a person finds the one
+// file to install.
 //
 //   node scripts/release/notes.mjs agents-release.json > NOTES.md
 
@@ -12,10 +17,48 @@ import { fileURLToPath } from 'node:url';
 
 import { identityRegexps, slugFromRepoUrl } from './lib.mjs';
 
+const AGENT_ORDER = ['sensor', 'device-agent'];
+const AGENT_NAMES = { sensor: 'Sensor', 'device-agent': 'Device agent' };
+const OS_NAMES = { linux: 'Linux', darwin: 'macOS', windows: 'Windows' };
+const OS_ORDER = ['linux', 'darwin', 'windows'];
+const ARCH_ORDER = ['amd64', 'arm64', '386'];
+const ARCH_NAMES = {
+  linux: { amd64: 'x86-64', arm64: 'ARM64' },
+  darwin: { amd64: 'Intel', arm64: 'Apple silicon' },
+  windows: { amd64: 'x64', '386': 'x86 (32-bit)', arm64: 'ARM64' },
+};
+
+const link = (a) => `[\`${a.file}\`](${a.url})`;
+
+// One row per agent and system: the package (binary, installer, licence
+// files) first, then the loose binary and installer for those who want them.
+export function downloadTable(meta) {
+  const rank = (list, x) => (list.includes(x) ? list.indexOf(x) : list.length);
+  const agents = [...meta.agents].sort((a, b) => rank(AGENT_ORDER, a.kind) - rank(AGENT_ORDER, b.kind));
+  const lines = ['| Agent | System | Download | Loose binary | Installer | Executed in this release run | Host must provide |', '|---|---|---|---|---|---|---|'];
+  for (const a of agents) {
+    const pkgs = a.artifacts.filter((x) => x.type === 'package')
+      .sort((x, y) => rank(OS_ORDER, x.os) - rank(OS_ORDER, y.os) || rank(ARCH_ORDER, x.arch) - rank(ARCH_ORDER, y.arch));
+    for (const p of pkgs) {
+      const bin = a.artifacts.find((x) => x.type === 'binary' && x.os === p.os && x.arch === p.arch);
+      const inst = a.artifacts.find((x) => x.type === 'installer' && x.os === p.os);
+      const system = `${OS_NAMES[p.os] || p.os} ${(ARCH_NAMES[p.os] || {})[p.arch] || p.arch}`;
+      const executed = (bin || p).runtime_qualified ? 'yes (runtime-qualified)' : 'no: compile-only, not supported';
+      lines.push(`| ${AGENT_NAMES[a.kind] || a.kind} | ${system} | ${link(p)} | ${bin ? link(bin) : ''} | ${inst ? link(inst) : 'none'} | ${executed} | ${(bin || p).requires.join(', ') || 'nothing'} |`);
+    }
+  }
+  return lines;
+}
+
 export function releaseNotes(meta) {
   const r = meta.release;
   const slug = slugFromRepoUrl(r.source_repo);
-  const lines = [];
+  const lines = ['## Download', ''];
+  lines.push(...downloadTable(meta));
+  lines.push('', 'Download the archive for your agent and system: it holds the binary, the installer for that system where there is one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`. ' +
+    'The installers accept the loose binary under its release name too. ' +
+    'The other files of this release are for verification and tooling: `*.sigstore.json` signature bundles, `*.cdx.json` SBOMs, `SHA256SUMS`, `agents-release.json` (the release metadata) and the compatibility records.');
+  lines.push('', '## About this release', '');
   if (r.channel === 'nightly') {
     lines.push(`**Nightly build ${r.tag}** of \`${r.source_sha}\`. A prerelease: not supported, not offered by any platform release, and pruned after the retention period unless a compatibility record names it.`);
   } else if (r.channel === 'prerelease') {
@@ -26,13 +69,7 @@ export function releaseNotes(meta) {
   lines.push('', 'Platform compatibility: this release ships with compatibility record ' +
     `\`${meta.initial_record.record_id}\`, in which every platform claim is **pending**. ` +
     'A platform release offers these agents only after a later, separately signed record says **tested** for its exact version and edition.');
-  lines.push('', '| Agent | OS | Arch | File | Executed in this release run | Host must provide |', '|---|---|---|---|---|---|');
-  for (const a of meta.agents) {
-    for (const x of a.artifacts.filter((y) => y.type === 'binary')) {
-      lines.push(`| ${a.kind} | ${x.os} | ${x.arch} | \`${x.file}\` | ${x.runtime_qualified ? 'yes (runtime-qualified)' : 'no: compile-only, not supported'} | ${x.requires.join(', ') || 'nothing'} |`);
-    }
-  }
-  lines.push('', 'Each binary also ships as a package (`.tar.gz`, or `.zip` for Windows) with its installer where there is one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`, and has a CycloneDX SBOM (`<binary>.cdx.json`).');
+  lines.push('', 'Each binary has a CycloneDX SBOM (`<binary>.cdx.json`). "Executed" means this release\'s workflow ran that build on a GitHub-hosted runner of its system; a compile-only build is published but not supported.');
   lines.push('', '**Native code signing:** Windows binaries are not Authenticode-signed and macOS binaries are not notarized. The Sigstore signatures below prove origin; they do not satisfy Windows SmartScreen or macOS Gatekeeper.');
   lines.push('', '**Packet capture:** the sensor uses the host\'s libpcap on Linux and macOS. On Windows it needs Npcap, which you install yourself from https://npcap.com under its own licence (the free licence covers up to five systems); it is never bundled.');
   const re = identityRegexps(slug);

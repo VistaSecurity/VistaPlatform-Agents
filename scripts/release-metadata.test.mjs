@@ -92,8 +92,9 @@ test('an artefact the smoke legs did not execute is not runtime_qualified; a mis
 
 test('release notes say what the metadata says: executed or compile-only, the exact signer, no native signing', () => {
   const notes = releaseNotes(release());
-  assert.match(notes, /\| sensor \| linux \| amd64 \| `vista-sensor_5\.3\.0_linux_amd64` \| yes \(runtime-qualified\) \| libpcap \|/);
-  assert.match(notes, /\| sensor \| windows \| 386 \| `vista-sensor_5\.3\.0_windows_386\.exe` \| no: compile-only, not supported \| npcap \|/);
+  const dl = 'https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v5.3.0';
+  assert.ok(notes.includes(`| Sensor | Linux x86-64 | [\`vista-sensor_5.3.0_linux_amd64.tar.gz\`](${dl}/vista-sensor_5.3.0_linux_amd64.tar.gz) | [\`vista-sensor_5.3.0_linux_amd64\`](${dl}/vista-sensor_5.3.0_linux_amd64) | [\`install-sensor.sh\`](${dl}/install-sensor.sh) | yes (runtime-qualified) | libpcap |`), notes);
+  assert.ok(notes.includes(`| Sensor | Windows x86 (32-bit) | [\`vista-sensor_5.3.0_windows_386.zip\`](${dl}/vista-sensor_5.3.0_windows_386.zip) | [\`vista-sensor_5.3.0_windows_386.exe\`](${dl}/vista-sensor_5.3.0_windows_386.exe) | [\`install-sensor.ps1\`](${dl}/install-sensor.ps1) | no: compile-only, not supported | npcap |`), notes);
   assert.ok(notes.includes("--certificate-identity 'https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/v5.3.0'"));
   assert.match(notes, /not Authenticode-signed/);
   assert.match(notes, /Build provenance \(SLSA v1\)/);
@@ -353,6 +354,44 @@ test('each agent lists one installer per system, macOS included, and its macOS a
       const pkg = path.join(rel.assets, `${prefix}_5.3.0_darwin_${arch}.tar.gz`);
       const names = execFileSync('tar', ['-tzf', pkg], { encoding: 'utf8' }).split('\n');
       assert.ok(names.includes(`${prefix}_5.3.0_darwin_${arch}/${file}`), `${pkg} does not carry ${file}`);
+    }
+  }
+});
+
+// The release page lists ~70 assets in one flat list; the notes are how a
+// person finds the one to install.
+test('release notes open with a download table: one row per agent and system, the archive linked first', () => {
+  const meta = release();
+  const notes = releaseNotes(meta);
+  const lines = notes.split('\n');
+  assert.equal(lines[0], '## Download', 'the download table is not at the top');
+  const rows = lines.filter((l) => /^\| (Sensor|Device agent) \|/.test(l));
+  const packages = meta.agents.flatMap((a) => a.artifacts.filter((x) => x.type === 'package'));
+  assert.equal(rows.length, packages.length, 'not one row per package');
+  for (const p of packages) {
+    const row = rows.filter((r) => r.includes(`[\`${p.file}\`](${p.url})`));
+    assert.equal(row.length, 1, `${p.file} is not linked in exactly one row`);
+    const cells = row[0].split(' | ');
+    assert.ok(cells[2].startsWith(`[\`${p.file}\`]`), `${p.file}: the archive is not the primary download`);
+  }
+  const firstDevice = rows.findIndex((r) => r.startsWith('| Device agent'));
+  assert.ok(firstDevice > 0 && rows.slice(0, firstDevice).every((r) => r.startsWith('| Sensor')), 'sensor rows do not come first');
+  assert.ok(rows.every((r) => !/\]\((?!https:\/\/github\.com\/VistaSecurity\/VistaPlatform-Agents\/releases\/download\/v5\.3\.0\/)/.test(r)), 'a link that is not a direct download of this release');
+  assert.match(notes, /signature bundles, `\*\.cdx\.json` SBOMs, `SHA256SUMS`, `agents-release\.json`/, 'the other files are not explained');
+  assert.ok(notes.indexOf('## Download') < notes.indexOf('**Vista Platform agents 5.3.0**'));
+});
+
+test('every package carries the installer its agent has for that system', () => {
+  for (const a of release().agents) {
+    const installers = Object.fromEntries(a.artifacts.filter((x) => x.type === 'installer').map((x) => [x.os, x.file]));
+    for (const p of a.artifacts.filter((x) => x.type === 'package')) {
+      const file = path.join(rel.assets, p.file);
+      const names = p.file.endsWith('.zip')
+        ? execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' }).split('\n')
+        : execFileSync('tar', ['-tzf', file], { encoding: 'utf8' }).split('\n');
+      const root = p.file.replace(/\.(tar\.gz|zip)$/, '');
+      if (installers[p.os]) assert.ok(names.includes(`${root}/${installers[p.os]}`), `${p.file} does not carry ${installers[p.os]}`);
+      assert.ok(names.includes(`${root}/LICENSE`), `${p.file} has no LICENSE`);
     }
   }
 });
