@@ -16,7 +16,7 @@ before and after publishing.
 | `vista-device-agent_<version>_<os>_<arch>[.exe]` | the device interrogation agent binary |
 | `<binary>.tar.gz` (`.zip` for Windows) | the binary with its installer (where there is one), `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`, under one top-level directory |
 | `<binary>.cdx.json` | CycloneDX 1.6 SBOM of the binary, generated from the module list compiled into it |
-| `install-sensor.sh`, `install-sensor-macos.sh`, `install-sensor.ps1`, `install-device-agent.sh`, `install-device-agent-macos.sh` | the installers (Linux, macOS, Windows) |
+| `install-sensor.sh`, `install-sensor-macos.sh`, `install-sensor.ps1`, `install-device-agent.sh`, `install-device-agent-macos.sh`, `install-device-agent.ps1` | the installers (Linux, macOS, Windows) |
 | `THIRD_PARTY_LICENSES` | the licence text of every third-party component linked into the binaries |
 | `agents-release.json` | the release metadata (schema `schemas/release/v1/release.schema.json`): every file above with its digest, size, signature bundle, provenance, which targets were executed in the release run, and what the host must provide |
 | `compatibility-agents-<version>-c<n>.json` | compatibility records (schema `schemas/compatibility/v1/record.schema.json`): which platform versions were tested with these exact bytes. The first (`c1`) ships with the release and says `pending` for every claim |

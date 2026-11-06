@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/testmode"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig/desiredstate"
+	"github.com/vistasecurity/vistaplatform-agents/shared/agentservice"
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
@@ -465,15 +466,16 @@ type sensorFlags struct {
 	caFingerprint *string
 }
 
-// sensorOutcome is why runSensor's loop ended.
-type sensorOutcome int
+// sensorOutcome is why runSensor's loop ended: the Windows service supervisor
+// (shared/agentservice) turns it into the service's exit code.
+type sensorOutcome = agentservice.Outcome
 
 const (
 	// sensorStopped: a signal or a service stop request; cleanup has run.
-	sensorStopped sensorOutcome = iota
+	sensorStopped = agentservice.Stopped
 	// sensorRestartRequested: the control plane asked for a restart; cleanup
 	// has run and the supervisor is expected to start the sensor again.
-	sensorRestartRequested
+	sensorRestartRequested = agentservice.RestartRequested
 )
 
 // sensorHost is what runSensor needs from whatever supervises the process: a

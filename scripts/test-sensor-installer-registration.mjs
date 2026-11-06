@@ -83,10 +83,10 @@ test('install-sensor.ps1 reads the log when the sensor fails to start', () => {
 test('install-sensor.ps1 lets the SCM restart a sensor that exits for a restart command', () => {
   const [, ps1] = installers[1];
   // The sensor honours the control plane's restart command by stopping with a
-  // failure exit code (serviceExitRestart). The SCM runs failure actions for
+  // failure exit code (agentservice.ExitRestart). The SCM runs failure actions for
   // that only with the non-crash failure flag set.
   assert.match(ps1, /sc\.exe failureflag \$ServiceName 1/);
-  assert.match(read('../cmd/sensor/service.go'), /serviceExitRestart uint32 = [1-9]/, 'restart no longer exits non-zero');
+  assert.match(read('../shared/agentservice/supervise.go'), /ExitRestart uint32 = [1-9]/, 'restart no longer exits non-zero');
 });
 
 test('install-sensor.ps1 is pure ASCII', () => {
