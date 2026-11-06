@@ -132,3 +132,98 @@ func ikeGroupIDs(setting string) []int {
 func (c *fortinetClient) addFortinetTunnels(result *InterrogateResult, phase1, phase2 []map[string]interface{}) {
 	result.addTunnels(fortinetTunnels(phase1, phase2), ifnames.VendorFortinet, "/api/v2/cmdb/vpn.ipsec/phase1-interface")
 }
+
+// A remote-access VPN is an endpoint of the device. The SSL-VPN portal's
+// `source-interface` names the interfaces it listens on; the address is read
+// from the interface table this same run collected, the listener's interface's
+// own address, a measurement, never a guess. When the interface is not in the
+// table, or holds no address, the asset stays address-less.
+
+// fortinetInterfaceAddress is the first address (host part) of the named
+// interface in the run's network observation, "" when there is none.
+func fortinetInterfaceAddress(n *NetworkObservation, name string) string {
+	name = strings.TrimSpace(name)
+	if n == nil || name == "" {
+		return ""
+	}
+	canon, _ := ifnames.Canonical(ifnames.VendorFortinet, name)
+	for _, ifc := range n.Interfaces {
+		if !strings.EqualFold(ifc.Name, canon) && !strings.EqualFold(ifc.Name, name) {
+			continue
+		}
+		for _, a := range ifc.Addresses {
+			if host := strings.TrimSpace(strings.SplitN(a.Address, "/", 2)[0]); host != "" {
+				return host
+			}
+		}
+	}
+	return ""
+}
+
+// fortinetSourceInterfaces reads `source-interface`, a list of {name} objects
+// (or, on some releases, a space-separated string).
+func fortinetSourceInterfaces(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []interface{}:
+		for _, item := range t {
+			if m, ok := item.(map[string]interface{}); ok {
+				if name, ok := m["name"].(string); ok && strings.TrimSpace(name) != "" {
+					out = append(out, strings.TrimSpace(name))
+				}
+			}
+		}
+	case string:
+		out = strings.Fields(t)
+	}
+	return out
+}
+
+// fortinetSSLVPNListeners places an SSL-VPN portal on each interface it
+// listens on that holds an address: one asset per listener, carrying the
+// same posture. A portal whose settings name an address keeps it; one whose
+// interfaces hold no address is returned address-less.
+//
+// A portal that is not running is no service at all, and returns nothing:
+// `status disable`, or no `source-interface` (FortiOS's SSL-VPN is off until
+// it listens somewhere, and every FortiGate answers `vpn.ssl/settings` whether
+// or not it is used). Emitting the settings anyway would give every FortiGate
+// an "SSL VPN" configuration, and old firmware's TLS floor a weak-protocol
+// finding, for a portal nobody can reach.
+func fortinetSSLVPNListeners(base CryptoAsset, settings map[string]interface{}, n *NetworkObservation) []CryptoAsset {
+	if status, _ := settings["status"].(string); strings.EqualFold(strings.TrimSpace(status), "disable") {
+		return nil
+	}
+	sources := fortinetSourceInterfaces(settings["source-interface"])
+	if len(sources) == 0 && strings.TrimSpace(base.IPAddress) == "" {
+		return nil
+	}
+	if base.Metadata == nil {
+		base.Metadata = map[string]interface{}{}
+	}
+	base.Metadata["vpn_service"] = "remote_access"
+	if strings.TrimSpace(base.IPAddress) != "" {
+		return []CryptoAsset{base}
+	}
+	var out []CryptoAsset
+	seen := map[string]bool{}
+	for _, name := range sources {
+		addr := fortinetInterfaceAddress(n, name)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		a := base
+		a.Metadata = make(map[string]interface{}, len(base.Metadata)+1)
+		for k, v := range base.Metadata {
+			a.Metadata[k] = v
+		}
+		a.Metadata["listen_interface"] = name
+		a.IPAddress = addr
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return []CryptoAsset{base}
+	}
+	return out
+}

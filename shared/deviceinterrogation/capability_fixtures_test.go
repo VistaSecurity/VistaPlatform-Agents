@@ -651,15 +651,13 @@ func fortinetConformanceRuns(t *testing.T) []conformanceRun {
 	refused := refuseHandler(fortinetConformanceHandler(t),
 		func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/monitor/router/ipv4") },
 		http.StatusForbidden, `{"http_status":403,"status":"error"}`)
-	// The clean run warns too, and that is a real defect rather than fixture
-	// noise: FortiOS answers the singleton `vpn.ssl/settings` table with an
-	// OBJECT in `results`, and the collector decodes a list (M-02, W3.3).
-	const sslVPNBroken = "/api/v2/cmdb/vpn.ssl/settings"
+	// The clean run is clean: FortiOS answers the singleton `vpn.ssl/settings`
+	// with an OBJECT in `results`, which the collector reads as one row (it
+	// used to warn on every real device, M-02 C-04).
 	return []conformanceRun{
-		expectWarnings(httpConformanceRun(t, "fortigate", "fortigate", fortinetConformanceHandler(t), httpKey, creds, false),
-			sslVPNBroken),
+		httpConformanceRun(t, "fortigate", "fortigate", fortinetConformanceHandler(t), httpKey, creds, false),
 		expectWarnings(httpConformanceRun(t, "fortigate, routes refused", "fortigate", refused, httpKey, creds, false),
-			sslVPNBroken, "/api/v2/monitor/router/ipv4"),
+			"/api/v2/monitor/router/ipv4"),
 	}
 }
 
