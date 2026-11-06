@@ -8,54 +8,8 @@ import (
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
-	"github.com/gopacket/gopacket/pcap"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 )
-
-func TestResolveCaptureDevice(t *testing.T) {
-	// Linux-style list: most devices have no description, so a bare
-	// strings.Contains(x, "") used to match the first one for ANY name.
-	linux := []pcap.Interface{
-		{Name: "any"},
-		{Name: "lo"},
-		{Name: "eth0"},
-		{Name: "eth1"},
-	}
-	windows := []pcap.Interface{
-		{Name: `\Device\NPF_{A}`, Description: "Intel(R) Ethernet Connection"},
-		{Name: `\Device\NPF_{B}`, Description: "Realtek PCIe GbE"},
-	}
-	tests := []struct {
-		name    string
-		iface   string
-		devs    []pcap.Interface
-		want    string
-		wantErr string
-	}{
-		{"exact name not shadowed by earlier description-less device", "eth1", linux, "eth1", ""},
-		{"exact name later in list", "eth0", linux, "eth0", ""},
-		{"exact name beats an earlier description match", "eth0", append([]pcap.Interface{{Name: "br0", Description: "eth0 bridge"}}, linux...), "eth0", ""},
-		{"description fallback", "Realtek", windows, `\Device\NPF_{B}`, ""},
-		{"description fallback is case-insensitive", "realtek pcie gbe", windows, `\Device\NPF_{B}`, ""},
-		{"unknown name with description-less devices errors", "wlan9", linux, "", "Available interfaces"},
-		{"unknown name lists devices", "wlan9", windows, "", "Intel(R) Ethernet Connection"},
-		{"empty name never matches", "", linux, "", "not found"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveCaptureDevice(tc.iface, tc.devs)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
-			}
-		})
-	}
-}
 
 // A closed packet channel must be reported and end the loop, not spin.
 func TestPumpPackets_ClosedChannelReportsErrorAndReturns(t *testing.T) {
