@@ -543,3 +543,36 @@ for (const [name, file] of INSTALLERS) {
   });
 }
 
+
+// One shape for "which binary" across the Unix installers: the archive name
+// first, else exactly one release-named file for this machine, and the same
+// two messages when that fails.
+test('the macOS and Linux installers find the binary the same way and say so in the same words', () => {
+  const lookup = (text, fn) => {
+    const m = new RegExp(`^${fn}\\(\\) \\{[\\s\\S]*?^\\}`, 'm').exec(text);
+    assert.ok(m, `${fn} not found`);
+    return m[0];
+  };
+  const shapes = (body) => [
+    /Several .*_<version>_(linux|darwin)_\$\{arch\} files are in the current directory; keep only the one to install\./.test(body),
+    /binary not found in the current directory\./.test(body),
+    /Download and verify the (Linux|macOS) build for this (host|Mac)'s architecture \(\$arch\), and place it here either as \.\/\$\S+ \(its name in the \.tar\.gz archive\) or under its release name \$\{\w+\}_<version>_(linux|darwin)_\$\{arch\}\./.test(body),
+  ];
+  for (const f of [SENSOR, DEVICE]) assert.deepEqual(shapes(lookup(source(f), 'find_agent_binary')), [true, true, true], f);
+  for (const f of ['install-sensor.sh', 'install-device-agent.sh']) assert.deepEqual(shapes(lookup(source(here(f)), 'resolve_binary')), [true, true, true], f);
+});
+
+// scripts/build.sh promises the target's installer beside the binary in dist/:
+// it must be the installer release/agents.json names for that agent and system.
+test('build.sh copies the installer release/agents.json names for each agent and system', () => {
+  const build = source(here('build.sh'));
+  const surface = JSON.parse(source(fileURLToPath(new URL('../release/agents.json', import.meta.url))));
+  for (const agent of surface.agents) {
+    for (const [os, file] of Object.entries(agent.installers || {})) {
+      const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const line = new RegExp(`^\\s*${esc(agent.kind)}:${esc(os)}\\) cp scripts/${esc(file)} `, 'm');
+      assert.match(build, line, `build.sh does not copy ${file} for ${agent.kind} on ${os}`);
+    }
+  }
+  assert.doesNotMatch(build, /sensor:\*\)/, 'a catch-all gives every other system the Linux installer');
+});

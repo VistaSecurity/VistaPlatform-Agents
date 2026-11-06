@@ -135,11 +135,11 @@ find_agent_binary() {
         return 0
     fi
     if [[ $count -gt 1 ]]; then
-        print_error "Several ${RELEASE_PREFIX}_<version>_darwin_${arch} files are in this directory; keep only the one to install." >&2
+        print_error "Several ${RELEASE_PREFIX}_<version>_darwin_${arch} files are in the current directory; keep only the one to install." >&2
         return 1
     fi
-    print_error "$AGENT_TITLE binary not found in $(pwd)." >&2
-    print_error "Put the downloaded file here, either as ./$ARCHIVE_NAME (its name in the .tar.gz archive) or under its release name ${RELEASE_PREFIX}_<version>_darwin_${arch}." >&2
+    print_error "$AGENT_TITLE binary not found in the current directory." >&2
+    print_error "Download and verify the macOS build for this Mac's architecture ($arch), and place it here either as ./$ARCHIVE_NAME (its name in the .tar.gz archive) or under its release name ${RELEASE_PREFIX}_<version>_darwin_${arch}." >&2
     return 1
 }
 
