@@ -1,6 +1,7 @@
 package deviceinterrogation
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -79,13 +80,43 @@ func newFortinetClient(baseURL, username, password string, insecureSkipVerify bo
 
 // fortinetAPIResponse represents a FortiOS REST API response envelope.
 type fortinetAPIResponse struct {
-	Status       string                   `json:"status"`
-	Serial       string                   `json:"serial"`
-	Version      string                   `json:"version"`
-	Build        int                      `json:"build"`
-	Results      []map[string]interface{} `json:"results"`
-	Error        int                      `json:"error"`
-	ErrorMessage string                   `json:"error_message"`
+	Status       string          `json:"status"`
+	Serial       string          `json:"serial"`
+	Version      string          `json:"version"`
+	Build        int             `json:"build"`
+	Results      fortinetResults `json:"results"`
+	Error        int             `json:"error"`
+	ErrorMessage string          `json:"error_message"`
+}
+
+// fortinetResults is the envelope's `results`. FortiOS answers a TABLE
+// endpoint (`cmdb/vpn.ipsec/phase1-interface`) with an array and a SINGLETON
+// endpoint (`cmdb/vpn.ssl/settings`, `cmdb/system/global`) with one object.
+// Decoding only the array form failed every singleton read with a parse
+// error, so an object is read as a table of one. null or absent is no rows;
+// any other shape is still an error.
+type fortinetResults []map[string]interface{}
+
+func (r *fortinetResults) UnmarshalJSON(b []byte) error {
+	trimmed := bytes.TrimSpace(b)
+	switch {
+	case len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")):
+		*r = nil
+		return nil
+	case trimmed[0] == '{':
+		var one map[string]interface{}
+		if err := json.Unmarshal(trimmed, &one); err != nil {
+			return err
+		}
+		*r = fortinetResults{one}
+		return nil
+	}
+	var many []map[string]interface{}
+	if err := json.Unmarshal(trimmed, &many); err != nil {
+		return err
+	}
+	*r = many
+	return nil
 }
 
 func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, error) {
@@ -110,7 +141,7 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 		result.warn("/api/v2/cmdb/vpn.ssl/settings", err, "SSL VPN settings not collected")
 	} else {
 		for _, vpn := range sslVPNs {
-			result.Assets = append(result.Assets, c.convertSSLVPNToAsset(vpn))
+			result.Assets = append(result.Assets, fortinetSSLVPNListeners(c.convertSSLVPNToAsset(vpn), vpn, result.Network)...)
 		}
 	}
 
@@ -196,7 +227,7 @@ func (c *fortinetClient) getResults(ctx context.Context, path string) ([]map[str
 	if resp.Results == nil {
 		return []map[string]interface{}{}, nil
 	}
-	return resp.Results, nil
+	return []map[string]interface{}(resp.Results), nil
 }
 
 // getCertificates retrieves the local certificate store and enriches each
@@ -290,6 +321,11 @@ var fortinetSSLVPNFields = []string{
 	"cipher", "tls_version", "min_tls_version",
 	"server_cert", "status", "ssl_max_proto_ver", "ssl_min_proto_ver",
 	"algorithm",
+	// The interfaces the portal listens on: names only.
+	"source-interface",
+	// FortiOS's own spellings of the TLS floor/ceiling and the certificate
+	// object the portal presents (a name, never the key).
+	"ssl-min-proto-ver", "ssl-max-proto-ver", "servercert",
 }
 
 var fortinetIPSecTunnelFields = []string{
@@ -374,17 +410,42 @@ func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) Crypto
 		asset.ProtocolVersion = strPtr(tlsVersion)
 	} else if minVersion, ok := vpn["min_tls_version"].(string); ok {
 		asset.ProtocolVersion = strPtr(minVersion)
+	} else if v := fortinetTLSVersion(vpn["ssl-min-proto-ver"]); v != "" {
+		// FortiOS states the lowest version the portal accepts ("tls1-2"):
+		// the weakest it will negotiate is what the posture is.
+		asset.ProtocolVersion = strPtr(v)
 	}
 	if asset.CipherSuite != nil && !cipherIsString {
 		if hashAlg := fortinetHashAlg(*asset.CipherSuite); hashAlg != "" {
 			asset.HashAlgorithm = strPtr(hashAlg)
 		}
 	}
-	if certName, ok := vpn["server_cert"].(string); ok && certName != "" {
+	certName, _ := vpn["server_cert"].(string)
+	if certName == "" {
+		certName, _ = vpn["servercert"].(string)
+	}
+	if certName = strings.TrimSpace(certName); certName != "" {
 		asset.Metadata["certificate_name"] = certName
 		asset.Metadata["certificate_source"] = "ssl_vpn_config"
 	}
 	return asset
+}
+
+// fortinetTLSVersion reads a FortiOS protocol-version token (`tls1-0` …
+// `tls1-3`) as the version name the catalogue knows, "" for anything else.
+func fortinetTLSVersion(v interface{}) string {
+	s, _ := v.(string)
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "tls1-0":
+		return "TLS 1.0"
+	case "tls1-1":
+		return "TLS 1.1"
+	case "tls1-2":
+		return "TLS 1.2"
+	case "tls1-3":
+		return "TLS 1.3"
+	}
+	return ""
 }
 
 func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) CryptoAsset {

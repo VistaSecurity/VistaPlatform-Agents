@@ -197,9 +197,9 @@ func fortinetManifest() CollectorManifest {
 			CapLBDependencies:    NotApplicable(naNotLB),
 			CapVPNCrypto:         Supplies("IPsec phase 1 only; phase 2 is K-06, W4.4"),
 			CapVPNTunnelEdges:    Gap("K-09", "W4.4"),
-			CapDeviceServedTLS: Gap("M-02", "W3.3", "broken outright (C-04): FortiOS returns `vpn.ssl/settings` results as an OBJECT and the collector decodes a list, "+
-				"so every real device yields a collection warning and no asset; the fields it would read (`cipher`/`tls_version`/`server_cert`) are not FortiOS's either — it answers "+
-				"`ssl-min-proto-ver`/`servercert`/`algorithm`, so nothing about the TLS is measured; "+
+			CapDeviceServedTLS: Gap("M-02", "W3.3", "partial: the SSL-VPN portal's `vpn.ssl/settings` (a singleton, `results` an object) is read: "+
+				"its listener address from `source-interface`, the TLS floor from `ssl-min-proto-ver` and the `servercert` name; but the portal is not handshaken, "+
+				"so no negotiated suite is measured (`algorithm` is a strength tier, not a suite list); "+
 				"`admin-server-cert` and SSL inspection profiles are K-07, W4.5"),
 			CapCertificateInventory: Gap("P-13", "W2.4", "the local certificate store goes only to DeviceInfo"),
 			CapCollectionWarnings:   Supplies(),
