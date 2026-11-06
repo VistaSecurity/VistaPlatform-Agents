@@ -75,6 +75,15 @@ compile-only.
 
 ## Immutability and failed runs
 
+- A run that does not do its job ends **red**. `nightly.yml` and
+  `release.yml` end with a `gate` job that runs whatever happened before it,
+  holds no permissions and fails when a job failed or was cancelled, or when
+  the run was meant to publish (always for a tag; for a nightly, when
+  `prepare` found a new commit) and `publish` did not succeed. A cancelled job
+  (for example on a runner label GitHub no longer serves) used to leave the
+  run "cancelled" with nothing published and nothing marked as failed. A
+  nightly with nothing new stays green. The gate makes the run fail, so
+  GitHub's own notification settings apply; there is no other alerting.
 - A release is created as a **draft**, filled, verified, and only then
   published. A run that fails part-way leaves an unpublished draft, visible
   only to people with write access: that draft is the quarantine. Nothing
