@@ -29,6 +29,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/devices"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig/desiredstate"
+	"github.com/vistasecurity/vistaplatform-agents/shared/agentservice"
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
@@ -125,15 +126,76 @@ func main() {
 		os.Exit(0)
 	}
 
+	flags := agentFlags{
+		configFile:    *configFile,
+		verbose:       *verbose,
+		register:      *register,
+		interactive:   *interactive,
+		caFingerprint: *caFingerprint,
+	}
+	// Under the Windows Service Control Manager the agent runs as a service
+	// (service_windows.go); everywhere else this returns false at once.
+	if runAsWindowsService(flags) {
+		return
+	}
+	if runDeviceAgent(flags, agentHost{logToStderr: true}) == agentservice.RestartRequested {
+		exitForRestart()
+	}
+}
+
+// agentFlags are the command-line flags runDeviceAgent needs.
+type agentFlags struct {
+	configFile    string
+	verbose       bool
+	register      bool
+	interactive   bool
+	caFingerprint string
+}
+
+// agentHost is what runDeviceAgent needs from whatever supervises the process:
+// a console (or systemd, which also signals and captures stderr), or the
+// Windows Service Control Manager. The zero value of every field is the
+// console's behaviour except logToStderr.
+type agentHost struct {
+	// logToStderr tees the log to stderr. Under a Windows service stderr is
+	// not a usable handle.
+	logToStderr bool
+	// logToFile tees the log into <data_path>/logs/device-agent.log
+	// (size-rotated) once the configuration names the data path. A service
+	// has no other log an operator can read on the host.
+	logToFile bool
+	// event reports a lifecycle message to the host's own log (the Windows
+	// Event Log). Optional.
+	event func(isError bool, msg string)
+	// started is called once the agent's loops are running. Optional.
+	started func()
+	// stop delivers graceful-shutdown requests besides SIGINT/SIGTERM; each
+	// value says who asked. nil blocks forever.
+	stop <-chan string
+	// restartInProcess: a restart requested from the console ends runAgent
+	// with RestartRequested, after a graceful stop, for the supervisor to
+	// act on. Otherwise the coordinator exits the process at once
+	// (exitForRestart) and systemd's Restart=always starts it again.
+	restartInProcess bool
+}
+
+// runDeviceAgent loads the configuration, enrolls if needed, and runs the
+// agent until it is asked to stop or restart. Fatal startup errors exit the
+// process.
+func runDeviceAgent(flags agentFlags, host agentHost) agentservice.Outcome {
 	// Initialize logging
-	if *verbose {
+	if flags.verbose {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	} else {
 		log.SetFlags(log.LstdFlags)
 	}
 	// Keep the recent lines in memory as well as on stderr, so the console's
 	// Logs tab can ask for them (shared/agentlogs).
-	log.SetOutput(io.MultiWriter(os.Stderr, agentLogRing))
+	if host.logToStderr {
+		log.SetOutput(io.MultiWriter(os.Stderr, agentLogRing))
+	} else {
+		log.SetOutput(agentLogRing)
+	}
 
 	log.Printf("🚀 Starting Vista Platform Device Agent v%s", Version)
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -141,7 +203,7 @@ func main() {
 	// Resolve the configuration file up front: an existing configuration is
 	// what turns the interactive installer off, so the decision needs to know
 	// about it before anything else happens.
-	configPath := *configFile
+	configPath := flags.configFile
 	if configPath == "" {
 		configPath = findDefaultConfigFile()
 	}
@@ -154,20 +216,19 @@ func main() {
 	// device, so the cheap check calls `agent < /dev/null` — how service
 	// managers commonly start it — an interactive terminal and hangs on the
 	// first prompt.
-	if shouldRunInteractive(*interactive, isFlagSet("interactive"), configPath, *register, term.IsTerminal(int(os.Stdin.Fd()))) {
-		cfg, setupPath, apiClient, err := runInteractiveSetup(*caFingerprint)
+	if shouldRunInteractive(flags.interactive, isFlagSet("interactive"), configPath, flags.register, term.IsTerminal(int(os.Stdin.Fd()))) {
+		cfg, setupPath, apiClient, err := runInteractiveSetup(flags.caFingerprint)
 		if err != nil {
 			log.Fatalf("❌ Interactive setup failed: %v", err)
 		}
 		if cfg == nil {
 			// Operator cancelled at a prompt; nothing to run.
-			return
+			return agentservice.Stopped
 		}
 		fmt.Println()
 		fmt.Println("✅ Setup complete — starting the device agent. Press Ctrl+C to stop.")
 		fmt.Println()
-		runAgent(cfg, setupPath, apiClient)
-		return
+		return runAgent(cfg, setupPath, apiClient, host)
 	}
 
 	// Load configuration. A config file that exists but cannot be parsed is
@@ -180,7 +241,7 @@ func main() {
 	if err != nil {
 		log.Printf("❌ %v", err)
 		exitProcess(exitNeedsOperator)
-		return
+		return agentservice.Stopped
 	}
 
 	// Verbose logging is on by default; a `verbose:` key in the config file (or
@@ -192,6 +253,24 @@ func main() {
 		} else {
 			log.SetFlags(log.LstdFlags)
 			log.Println("Verbose logging disabled by configuration")
+		}
+	}
+
+	// Now that the data path is known, give a service a log that outlives the
+	// process. The ring already holds every line so far, so the file starts
+	// with them.
+	if host.logToFile {
+		path, err := teeLogToFile(cfg.DataPath, host.logToStderr)
+		if err != nil {
+			log.Printf("⚠️  Could not open a log file: %v — logs are kept in memory only (the console's Logs tab)", err)
+			if host.event != nil {
+				host.event(true, fmt.Sprintf("Could not open a log file under %s: %v. Logs are kept in memory only.", cfg.DataPath, err))
+			}
+		} else {
+			log.Printf("📝 Logging to %s", path)
+			if host.event != nil {
+				host.event(false, "Logging to "+path)
+			}
 		}
 	}
 
@@ -208,8 +287,8 @@ func main() {
 	// and pin it before the client is built. Without the flag nothing is
 	// pinned and verification falls back to the system trust store — the right
 	// behaviour for a platform holding a publicly-trusted certificate.
-	if *caFingerprint != "" && cfg.Security.ServerCACert == "" {
-		anchor, err := certificates.ResolveTrustAnchor(cfg.PlatformURL, *caFingerprint, nil, os.Stdout, false)
+	if flags.caFingerprint != "" && cfg.Security.ServerCACert == "" {
+		anchor, err := certificates.ResolveTrustAnchor(cfg.PlatformURL, flags.caFingerprint, nil, os.Stdout, false)
 		if err != nil {
 			log.Fatalf("❌ Could not establish trust with the platform: %v", err)
 		}
@@ -222,10 +301,10 @@ func main() {
 	apiClient.SetAgentVersion(Version)
 
 	// Register with platform if requested
-	if *register {
+	if flags.register {
 		// Where the agent ID is kept. Without -config it used to be kept
 		// nowhere, so the next start registered again with a spent key.
-		savePath := *configFile
+		savePath := flags.configFile
 		if savePath == "" {
 			savePath = filepath.Join(cfg.DataPath, "agent-config.yaml")
 		}
@@ -234,13 +313,13 @@ func main() {
 		if err := checkEnrollmentWritable(cfg.DataPath, savePath); err != nil {
 			log.Printf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
 			exitProcess(exitNeedsOperator)
-			return
+			return agentservice.Stopped
 		}
 		log.Println("📝 Registering agent with platform...")
 		if err := apiClient.Register(Version); err != nil {
 			logRegistrationFailure(err)
 			exitProcess(registrationFailureExitCode(err))
-			return
+			return agentservice.Stopped
 		}
 		log.Println("✅ Agent registered successfully")
 
@@ -255,7 +334,7 @@ func main() {
 		}
 		log.Printf("💾 Configuration saved to: %s", savePath)
 
-		return
+		return agentservice.Stopped
 	}
 
 	// Sensor-style bootstrap: registration key present but no enrolled agent yet
@@ -266,7 +345,7 @@ func main() {
 		if err := checkEnrollmentWritable(cfg.DataPath, configPath); err != nil {
 			log.Printf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
 			exitProcess(exitNeedsOperator)
-			return
+			return agentservice.Stopped
 		}
 		log.Println("📝 Registration key set without agent_id — registering with control plane...")
 		if err := apiClient.Register(Version); err != nil {
@@ -276,7 +355,7 @@ func main() {
 			// as such, and the installers stop the service on it.
 			logRegistrationFailure(err)
 			exitProcess(registrationFailureExitCode(err))
-			return
+			return agentservice.Stopped
 		}
 		log.Println("✅ Agent enrolled successfully")
 		if err := saveCertificates(cfg); err != nil {
@@ -289,30 +368,54 @@ func main() {
 		log.Printf("💾 Configuration saved to: %s", configPath)
 	}
 
-	runAgent(cfg, configPath, apiClient)
+	return runAgent(cfg, configPath, apiClient, host)
 }
 
-// runAgent wires up the agent and runs it until the process is signalled. It is
-// the single run path: both the config-file start and the interactive installer
-// end here, so a freshly-configured agent behaves exactly like a restarted one.
-// apiClient may be nil, in which case one is built from cfg.
-func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClient) {
+// runAgent wires up the agent and runs it until the process is signalled, the
+// host asks it to stop, or (with host.restartInProcess) the console asks for a
+// restart. It is the single run path: both the config-file start and the
+// interactive installer end here, so a freshly-configured agent behaves exactly
+// like a restarted one. apiClient may be nil, in which case one is built from
+// cfg.
+func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClient, host agentHost) agentservice.Outcome {
 	agent := newDeviceAgent(cfg, configPath, apiClient)
+
+	restart := make(chan struct{}, 1)
+	if host.restartInProcess {
+		agent.apiClient.SetRestartHandler(newRestartCoordinator(time.Now(), func() {
+			select {
+			case restart <- struct{}{}:
+			default:
+			}
+		}).onRequest)
+	}
 
 	// Start agent
 	if err := agent.Start(); err != nil {
 		log.Fatalf("❌ Failed to start agent: %v", err)
 	}
+	if host.started != nil {
+		host.started()
+	}
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	outcome := agentservice.Stopped
+	select {
+	case <-quit:
+		log.Println("🛑 Shutting down device agent...")
+	case reason := <-host.stop:
+		log.Printf("🛑 %s, shutting down device agent...", reason)
+	case <-restart:
+		log.Println("🔁 Stopping the device agent for the restart requested from the console...")
+		outcome = agentservice.RestartRequested
+	}
 	signal.Stop(quit)
 
-	log.Println("🛑 Shutting down device agent...")
 	agent.Stop()
 	log.Println("✅ Device agent stopped")
+	return outcome
 }
 
 // newDeviceAgent builds a fully wired agent, ready to Start.

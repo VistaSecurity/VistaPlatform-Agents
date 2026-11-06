@@ -250,15 +250,29 @@ func (pc *PacketCapture) GetCache() *cache.ConnectionCache {
 	return pc.cache
 }
 
-// Start begins packet capture on all configured interfaces
+// Start begins packet capture on all configured interfaces, or on the ones
+// resolveTargets picks when none is configured.
 func (pc *PacketCapture) Start() error {
 	log.Printf("Starting packet capture on interfaces: %v", pc.interfaces)
 
-	for _, iface := range pc.interfaces {
-		if err := pc.startInterfaceCapture(iface); err != nil {
-			log.Printf("Failed to start capture on interface %s: %v", iface, err)
-			pc.noteFailedInterface(iface)
+	targets, unresolved, err := pc.resolveTargets()
+	for _, f := range unresolved {
+		log.Printf("Failed to start capture on interface %s: %v", f.Configured, f.Err)
+		pc.noteFailedInterface(f.Configured)
+	}
+	if err != nil {
+		return err
+	}
+	var openErrs []string
+	for _, t := range targets {
+		if err := pc.startInterfaceCapture(t.Device); err != nil {
+			log.Printf("Failed to start capture on interface %s: %v", t.Configured, err)
+			openErrs = append(openErrs, err.Error())
+			pc.noteFailedInterface(t.Configured)
 			continue
+		}
+		if t.Configured != t.Device {
+			log.Printf("Capturing on %s (capture device %s)", t.Configured, t.Device)
 		}
 	}
 	if failed := pc.FailedInterfaces(); len(failed) > 0 && len(pc.handles) > 0 {
@@ -267,22 +281,8 @@ func (pc *PacketCapture) Start() error {
 	}
 
 	if len(pc.handles) == 0 {
-		return fmt.Errorf("no interfaces available for capture\n\n" +
-			"🚨 NO NETWORK INTERFACES AVAILABLE\n" +
-			"==================================\n" +
-			"This usually means:\n\n" +
-			"1. Packet capture library not installed (Windows):\n" +
-			"   - Install Npcap: https://npcap.com/\n" +
-			"   - Or WinPcap: https://www.winpcap.org/\n" +
-			"   - Restart computer after installation\n\n" +
-			"2. Not running as Administrator (Windows):\n" +
-			"   - Right-click Command Prompt → 'Run as administrator'\n\n" +
-			"3. No network interfaces configured:\n" +
-			"   - Check network adapter settings\n" +
-			"   - Ensure network interfaces are active\n\n" +
-			"4. Permission issues (Linux/macOS):\n" +
-			"   - Run with sudo: sudo ./crypto-sensor\n\n" +
-			"See WINDOWS_SETUP.md for detailed Windows setup instructions")
+		return fmt.Errorf("no interfaces available for capture: no capture device could be opened: %s%s",
+			strings.Join(openErrs, "; "), openPermissionHint())
 	}
 
 	if pc.hostObs != nil {
@@ -611,40 +611,9 @@ func buildBPFFilter(cfg *config.Config) string {
 	return strings.Join(filterParts, " or ")
 }
 
-// startInterfaceCapture starts packet capture on a specific interface
+// startInterfaceCapture opens one capture device, already resolved by
+// resolveTargets, and starts capturing on it.
 func (pc *PacketCapture) startInterfaceCapture(iface string) error {
-	// Check if interface exists
-	interfaces, err := pcap.FindAllDevs()
-	if err != nil {
-		// Provide helpful error message for common Windows issue
-		if strings.Contains(err.Error(), "wpcap.dll") {
-			return fmt.Errorf("failed to find network interfaces: %v\n\n"+
-				"🚨 WINDOWS PACKET CAPTURE LIBRARY MISSING\n"+
-				"==========================================\n"+
-				"The sensor requires a packet capture library to monitor network traffic.\n"+
-				"Please install one of the following:\n\n"+
-				"1. Npcap (Recommended):\n"+
-				"   - Download from: https://npcap.com/\n"+
-				"   - Install with 'WinPcap API-compatible Mode' enabled\n"+
-				"   - Restart your computer after installation\n\n"+
-				"2. WinPcap (Legacy):\n"+
-				"   - Download from: https://www.winpcap.org/\n"+
-				"   - Install and restart your computer\n\n"+
-				"3. Run as Administrator:\n"+
-				"   - Right-click Command Prompt → 'Run as administrator'\n"+
-				"   - Navigate to sensor directory and run again\n\n"+
-				"See WINDOWS_SETUP.md for detailed instructions", err)
-		}
-		return fmt.Errorf("failed to find network interfaces: %v", err)
-	}
-
-	deviceName, err := resolveCaptureDevice(iface, interfaces)
-	if err != nil {
-		return err
-	}
-
-	iface = deviceName
-
 	// Open interface for capture
 	handle, err := pcap.OpenLive(iface, snapLenFromConfig(pc.config.Capture.BufferSize), true, pcap.BlockForever)
 	if err != nil {
@@ -711,41 +680,6 @@ func (pc *PacketCapture) pumpPackets(packets <-chan gopacket.Packet, iface strin
 			}
 		}
 	}
-}
-
-// resolveCaptureDevice maps a configured interface name to a pcap device name.
-// An exact device Name wins across ALL devices before any description match is
-// tried: Linux devices mostly have an empty Description, and
-// strings.Contains(x, "") is true, so a single pass let the first
-// description-less device shadow an exact match further down the list. The
-// description fallback (Windows friendly names) ignores empty descriptions.
-func resolveCaptureDevice(iface string, devs []pcap.Interface) (string, error) {
-	for _, dev := range devs {
-		if dev.Name == iface {
-			return dev.Name, nil
-		}
-	}
-	want := strings.ToLower(iface)
-	if want != "" {
-		for _, dev := range devs {
-			desc := strings.ToLower(dev.Description)
-			if desc == "" {
-				continue
-			}
-			if strings.Contains(desc, want) || strings.Contains(want, desc) {
-				return dev.Name, nil
-			}
-		}
-	}
-	available := make([]string, 0, len(devs))
-	for _, dev := range devs {
-		if dev.Description != "" {
-			available = append(available, fmt.Sprintf("%s (%s)", dev.Name, dev.Description))
-		} else {
-			available = append(available, dev.Name)
-		}
-	}
-	return "", fmt.Errorf("interface %s not found. Available interfaces: %v", iface, available)
 }
 
 // runWorker is a fixed worker goroutine that processes packets from the bounded pool.
