@@ -698,9 +698,11 @@ func TestDecodeLLDP(t *testing.T) {
 			hostnames: []string{"gateway-1"},
 			attrs: map[string]any{
 				// The chassis string stays as evidence, and the sending
-				// port's own address stays as the port ID.
+				// port's own address stays as the port ID and as the frame's
+				// source.
 				"lldp_chassis_id":   "d8:b3:70:00:00:01",
 				"lldp_port_id":      "d8:b3:70:00:00:02",
+				AttrLLDPSourceMAC:   "d8:b3:70:00:00:02",
 				"lldp_capabilities": []string{"bridge", "router"},
 				"capture_interface": "eth0",
 			},
@@ -737,7 +739,44 @@ func TestDecodeLLDP(t *testing.T) {
 				if want := strings.TrimSpace(tc.chassis); got.Attributes["lldp_chassis_id"] != want {
 					t.Errorf("lldp_chassis_id = %v, want %q kept as evidence", got.Attributes["lldp_chassis_id"], want)
 				}
+				// The source is kept exactly when it was displaced.
+				source, kept := got.Attributes[AttrLLDPSourceMAC]
+				if tc.wantMAC != src && source != src {
+					t.Errorf("%s = %v, want the displaced source %s", AttrLLDPSourceMAC, source, src)
+				}
+				if tc.wantMAC == src && kept {
+					t.Errorf("%s = %v, but the source is the subject's MAC", AttrLLDPSourceMAC, source)
+				}
 			})
+		}
+	})
+
+	t.Run("a source that adds nothing is not recorded", func(t *testing.T) {
+		const chassis = "d8:b3:70:00:00:01"
+		for _, src := range []string{chassis, "D8-B3-70-00-00-01", "", "not a mac", "ff:ff:ff:ff:ff:ff", "01:80:c2:00:00:0e"} {
+			got, err := DecodeLLDP(Frame{Payload: lldpLocalChassisFrame(chassis), SrcMAC: src, At: fixedTime})
+			if err != nil {
+				t.Fatalf("source %q: %v", src, err)
+			}
+			if got.MAC != chassis {
+				t.Errorf("source %q: MAC = %q", src, got.MAC)
+			}
+			if v, ok := got.Attributes[AttrLLDPSourceMAC]; ok {
+				t.Errorf("source %q: %s = %v", src, AttrLLDPSourceMAC, v)
+			}
+		}
+	})
+
+	t.Run("the MAC subtype never reads the source", func(t *testing.T) {
+		got, err := DecodeLLDP(Frame{Payload: mustHex(t, lldpHex), SrcMAC: "00:1a:2f:11:22:44", At: fixedTime})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.MAC != "00:1a:2f:11:22:33" {
+			t.Errorf("MAC = %q, want the chassis MAC", got.MAC)
+		}
+		if v, ok := got.Attributes[AttrLLDPSourceMAC]; ok {
+			t.Errorf("%s = %v under the MAC subtype", AttrLLDPSourceMAC, v)
 		}
 	})
 

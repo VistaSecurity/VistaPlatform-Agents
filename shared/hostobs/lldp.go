@@ -75,6 +75,7 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 	obs := f.newObservation(SourceLLDP)
 
 	sawChassis := false
+	chassisFromText := false
 	off := 0
 	for n := 0; n < lldpMaxTLVs; n++ {
 		if off+2 > len(b) {
@@ -141,10 +142,12 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 				// usually "locally assigned". Taking the Ethernet source below
 				// instead would key the device on the MAC of whichever port
 				// sent the frame, while ARP from the same device keys it on
-				// the base MAC: one device, two records. The port's own
-				// identity stays in lldp_port_id.
+				// the base MAC: one device, two records. The sending port stays
+				// in AttrLLDPSourceMAC, below, and in lldp_port_id when the port
+				// ID is its MAC.
 				if mac := lldpMACFromText(s); mac != "" {
 					obs.MAC = mac
+					chassisFromText = true
 				}
 			}
 
@@ -247,6 +250,15 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 	// from the advertiser's port.
 	if obs.MAC == "" {
 		obs.MAC = NormalizeMAC(f.SrcMAC)
+	} else if chassisFromText {
+		// The text displaced the source as the subject's MAC, and the source is
+		// still the advertiser's own: the port its ARP and DHCP frames on this
+		// segment carry. A multi-port device's frames can only meet on one
+		// record if both addresses reach the platform. Under the MAC subtype
+		// this decoder never read the source, and it still does not.
+		if src := NormalizeMAC(f.SrcMAC); src != "" && src != obs.MAC {
+			obs.setAttr(AttrLLDPSourceMAC, src)
+		}
 	}
 
 	obs.Finalize()
@@ -255,6 +267,11 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 	}
 	return obs, nil
 }
+
+// AttrLLDPSourceMAC is the attribute holding an LLDP frame's Ethernet source
+// MAC when the chassis ID, written as text, took the subject's MAC field. It is
+// the advertiser's own sending port, never a neighbour's address.
+const AttrLLDPSourceMAC = "lldp_source_mac"
 
 // lldpMACFromText returns s as a normalised MAC address when it is written in
 // one of the three common MAC spellings — six two-digit groups separated by
