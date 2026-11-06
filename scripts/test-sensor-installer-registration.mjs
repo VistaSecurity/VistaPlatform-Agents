@@ -123,3 +123,13 @@ test('install-sensor.sh: the key can come from the environment or stdin', () => 
   assert.match(shText, /REGISTRATION_KEY="\$\{VISTA_REGISTRATION_KEY:-\}"/);
   assert.match(shText, /--key-stdin\)/);
 });
+
+test('install-sensor.sh: --ca-fingerprint reaches the sensor through the unit', () => {
+  assert.match(shText, /--ca-fingerprint\)\n\s+CA_FINGERPRINT="\$2"/);
+  assert.match(shText, /EXEC_START\+=" -ca-fingerprint \$CA_FINGERPRINT"/);
+  assert.match(shText, /^ExecStart=\$EXEC_START$/m);
+});
+
+test('install-sensor.sh: on another system it names the installer for that system', () => {
+  assert.match(shText, /On macOS use install-sensor-macos\.sh; on Windows use install-sensor\.ps1\./);
+});

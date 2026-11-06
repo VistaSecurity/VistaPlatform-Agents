@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Crypto Inventory Sensor Installer
-# Usage: ./install-sensor.sh [options]
+# Vista Platform Sensor installer (Linux, systemd).
+# Usage: sudo bash install-sensor.sh --key KEY --ip ADDRESS [options]
 
 set -e
 
@@ -16,6 +16,7 @@ INSTALL_DIR="/opt/crypto-sensor"
 SERVICE_USER="crypto-sensor"
 VERBOSE=false
 EXPECTED_IP=""
+CA_FINGERPRINT=""
 INTERACTIVE=false
 CHECK_DEPENDENCIES=false
 
@@ -64,8 +65,8 @@ print_header() {
 # Show usage
 show_usage() {
     cat << EOF
-Crypto Inventory Sensor Installer
-=================================
+Vista Platform Sensor Installer
+===============================
 
 Usage: $0 [options]
 
@@ -81,10 +82,15 @@ Options:
                                the sensor registers as datacenter_host)
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --ip IP_ADDRESS            Expected IP address for validation (required)
+    --ca-fingerprint SHA256    Expected SHA-256 fingerprint of the platform's CA, for a
+                               platform whose certificate this host does not already trust
     --interactive              Run in interactive mode (ask for all settings)
-    --check-dependencies       Check ./crypto-sensor can load, then exit (no root needed)
+    --check-dependencies       Check the sensor binary can load, then exit (no root needed)
     --verbose                  Enable verbose output
     -h, --help                 Show this help
+
+Run it from the directory holding the downloaded sensor: the contents of the
+.tar.gz archive (./crypto-sensor), or the loose vista-sensor_<version>_linux_<arch>.
 
 Examples:
     # Interactive installation (recommended)
@@ -150,6 +156,10 @@ while [[ $# -gt 0 ]]; do
             EXPECTED_IP="$2"
             shift 2
             ;;
+        --ca-fingerprint)
+            CA_FINGERPRINT="$2"
+            shift 2
+            ;;
         --interactive)
             INTERACTIVE=true
             shift
@@ -174,18 +184,48 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Finds the binary to install and sets BINARY: ./$1 (its name in the release
+# archive), else the one loose release file for this host,
+# ./$2_<version>_linux_<arch>. Fails, naming both, otherwise.
+resolve_binary() {
+    local installed=$1 prefix=$2 arch f count=0
+    BINARY=""
+    if [[ -f "./$installed" ]]; then
+        BINARY="./$installed"
+        return 0
+    fi
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) arch=$(uname -m) ;;
+    esac
+    for f in ./"${prefix}"_*_linux_"${arch}"; do
+        [[ -f "$f" ]] || continue
+        BINARY=$f
+        count=$((count + 1))
+    done
+    if [[ $count -eq 1 ]]; then
+        return 0
+    fi
+    if [[ $count -gt 1 ]]; then
+        BINARY=""
+        print_error "Several ${prefix}_<version>_linux_${arch} files are in the current directory; keep only the one to install."
+        return 1
+    fi
+    print_error "$3 binary not found in the current directory."
+    print_error "Download and verify the Linux build for this host's architecture ($arch), and place it here either as ./$installed (its name in the .tar.gz archive) or under its release name ${prefix}_<version>_linux_${arch}."
+    return 1
+}
+
 # Run the actual binary: a library filename or installed package alone does not
 # prove that its architecture, SONAME and transitive dependencies are compatible.
 # --version exits before configuration, registration or packet capture.
 check_sensor_dependencies() {
-    local binary="./crypto-sensor" loader_output
-    if [[ ! -f "$binary" ]]; then
-        print_error "Sensor binary not found: $binary"
-        print_error "Download and verify the Linux sensor for this host's architecture, rename it crypto-sensor, and place it in the current directory."
-        return 1
-    fi
+    local binary loader_output
+    resolve_binary crypto-sensor vista-sensor Sensor || return 1
+    binary=$BINARY
     if [[ ! -x "$binary" ]]; then
-        print_error "Sensor binary is not executable. Run: chmod +x ./crypto-sensor"
+        print_error "Sensor binary is not executable. Run: chmod +x $binary"
         return 1
     fi
     if loader_output=$(LC_ALL=C "$binary" --version 2>&1); then
@@ -211,7 +251,7 @@ check_sensor_dependencies() {
 
 # This installer installs a systemd service and uses Linux networking tools.
 if [[ $(uname -s) != Linux ]]; then
-    print_error "This installer requires Linux with systemd. On Windows use install-sensor.ps1; on macOS use the macOS sensor binary (libpcap is supplied by the OS)."
+    print_error "This installer requires Linux with systemd. On macOS use install-sensor-macos.sh; on Windows use install-sensor.ps1."
     exit 1
 fi
 
@@ -380,9 +420,14 @@ fi
 
 # The version the platform will show is the one stamped into this binary — the
 # sensor reports it itself at registration and on every heartbeat.
-SENSOR_VERSION=$(./crypto-sensor --version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
+if [[ -n "$CA_FINGERPRINT" && ! "$CA_FINGERPRINT" =~ ^[0-9A-Fa-f:]+$ ]]; then
+    print_error "--ca-fingerprint must be the SHA-256 fingerprint in hexadecimal (colons allowed)"
+    exit 1
+fi
 
-print_header "🚀 Crypto Inventory Sensor Installer"
+SENSOR_VERSION=$("$BINARY" --version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
+
+print_header "🚀 Vista Platform Sensor Installer"
 echo "=================================================="
 
 # Step 1: Detect environment
@@ -492,15 +537,9 @@ systemctl stop crypto-sensor.service 2>/dev/null || true
 
 # Step 4: Install sensor binary
 print_status "Installing sensor binary..."
-if [[ -f "./crypto-sensor" ]]; then
-    cp ./crypto-sensor "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/crypto-sensor"
-    print_status "Sensor binary installed"
-else
-    print_error "Sensor binary not found. Please build it first:"
-    echo "  cd sensor && go build -o crypto-sensor ./cmd"
-    exit 1
-fi
+cp "$BINARY" "$INSTALL_DIR/crypto-sensor"
+chmod +x "$INSTALL_DIR/crypto-sensor"
+print_status "Sensor binary installed"
 
 # Step 5: Create configuration file
 #
@@ -568,6 +607,12 @@ fi
 
 # Step 6: Create systemd service
 print_status "Creating systemd service..."
+EXEC_START="$INSTALL_DIR/crypto-sensor --verbose -config $CONFIG_FILE"
+if [[ -n "$CA_FINGERPRINT" ]]; then
+    # Pins the platform's CA on first start, verified against this
+    # fingerprint; ignored once a CA is in the config.
+    EXEC_START+=" -ca-fingerprint $CA_FINGERPRINT"
+fi
 cat > "/etc/systemd/system/crypto-sensor.service" << EOF
 [Unit]
 Description=Crypto Inventory Network Sensor
@@ -587,7 +632,7 @@ WorkingDirectory=$INSTALL_DIR
 Environment=SENSOR_IP_ADDRESS=$EXPECTED_IP
 # Registers on first start with the key in the config, then runs from the
 # certificate it was issued.
-ExecStart=$INSTALL_DIR/crypto-sensor --verbose -config $CONFIG_FILE
+ExecStart=$EXEC_START
 Restart=always
 RestartSec=10
 # Exit status 78 (EX_CONFIG) means a person has to act: the registration key was

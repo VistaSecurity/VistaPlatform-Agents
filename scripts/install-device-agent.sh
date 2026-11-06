@@ -2,7 +2,8 @@
 
 # Vista Platform Device Agent installer (Linux, systemd).
 #
-# Installs ./device-agent as a service, writes its configuration, starts it,
+# Installs the device agent (./device-agent, or the loose release file
+# vista-device-agent_<version>_linux_<arch>) as a service, writes its configuration, starts it,
 # and waits for the agent to enroll itself with the platform. The counterpart
 # of install-sensor.sh: the same steps, the same output, the same
 # re-run-to-upgrade behaviour.
@@ -73,10 +74,11 @@ Options:
     --ca-fingerprint SHA256    Expected SHA-256 fingerprint of the platform's CA, for a
                                platform whose certificate this host does not already trust
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
-    --check-dependencies       Check ./device-agent runs on this host, then exit (no root needed)
+    --check-dependencies       Check the agent binary runs on this host, then exit (no root needed)
     -h, --help                 Show this help
 
-Run it from the directory holding the downloaded agent, saved as ./device-agent.
+Run it from the directory holding the downloaded agent: the contents of the
+.tar.gz archive (./device-agent), or the loose vista-device-agent_<version>_linux_<arch>.
 Re-running it with the same key keeps the agent's enrollment and replaces only
 the binary, which is how to upgrade it.
 EOF
@@ -95,17 +97,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Finds the binary to install and sets BINARY: ./$1 (its name in the release
+# archive), else the one loose release file for this host,
+# ./$2_<version>_linux_<arch>. Fails, naming both, otherwise.
+resolve_binary() {
+    local installed=$1 prefix=$2 arch f count=0
+    BINARY=""
+    if [[ -f "./$installed" ]]; then
+        BINARY="./$installed"
+        return 0
+    fi
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) arch=$(uname -m) ;;
+    esac
+    for f in ./"${prefix}"_*_linux_"${arch}"; do
+        [[ -f "$f" ]] || continue
+        BINARY=$f
+        count=$((count + 1))
+    done
+    if [[ $count -eq 1 ]]; then
+        return 0
+    fi
+    if [[ $count -gt 1 ]]; then
+        BINARY=""
+        print_error "Several ${prefix}_<version>_linux_${arch} files are in the current directory; keep only the one to install."
+        return 1
+    fi
+    print_error "$3 binary not found in the current directory."
+    print_error "Download and verify the Linux build for this host's architecture ($arch), and place it here either as ./$installed (its name in the .tar.gz archive) or under its release name ${prefix}_<version>_linux_${arch}."
+    return 1
+}
+
 # The agent is statically linked; running it proves it is the right build for
 # this host's architecture. --version exits before configuration or enrollment.
 check_agent_binary() {
-    local binary="./device-agent" output
-    if [[ ! -f "$binary" ]]; then
-        print_error "Device agent binary not found: $binary"
-        print_error "Download the Linux device agent for this host's architecture, save it as device-agent, and place it in the current directory."
-        return 1
-    fi
+    local binary output
+    resolve_binary device-agent vista-device-agent "Device agent" || return 1
+    binary=$BINARY
     if [[ ! -x "$binary" ]]; then
-        print_error "Device agent binary is not executable. Run: chmod +x ./device-agent"
+        print_error "Device agent binary is not executable. Run: chmod +x $binary"
         return 1
     fi
     if output=$(LC_ALL=C "$binary" -version 2>&1); then
@@ -119,7 +151,7 @@ check_agent_binary() {
 }
 
 if [[ $(uname -s) != Linux ]]; then
-    print_error "This installer requires Linux with systemd. On Windows use install-device-agent.ps1."
+    print_error "This installer requires Linux with systemd. On macOS use install-device-agent-macos.sh; on Windows use install-device-agent.ps1."
     exit 1
 fi
 
@@ -141,7 +173,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-AGENT_VERSION=$(./device-agent -version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
+AGENT_VERSION=$("$BINARY" -version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
 
 print_header "🚀 Vista Platform Device Agent Installer"
 echo "=================================================="
@@ -204,7 +236,7 @@ systemctl stop "$SERVICE_NAME.service" 2>/dev/null || true
 
 # Step 3: Binary
 print_status "Installing device agent binary..."
-cp ./device-agent "$INSTALL_DIR/device-agent"
+cp "$BINARY" "$INSTALL_DIR/device-agent"
 chmod 755 "$INSTALL_DIR/device-agent"
 
 # Step 4: Configuration
