@@ -569,7 +569,8 @@ test('build.sh copies the installer release/agents.json names for each agent and
   const surface = JSON.parse(source(fileURLToPath(new URL('../release/agents.json', import.meta.url))));
   for (const agent of surface.agents) {
     for (const [os, file] of Object.entries(agent.installers || {})) {
-      const line = new RegExp(`^\\s*${agent.kind}:${os}\\) cp scripts/${file.replace(/\./g, '\\.')} `, 'm');
+      const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const line = new RegExp(`^\\s*${esc(agent.kind)}:${esc(os)}\\) cp scripts/${esc(file)} `, 'm');
       assert.match(build, line, `build.sh does not copy ${file} for ${agent.kind} on ${os}`);
     }
   }
