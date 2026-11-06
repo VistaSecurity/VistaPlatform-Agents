@@ -3,6 +3,7 @@ package hostinventory
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -550,6 +551,49 @@ func TestToObservations_AnEmptyButSuccessfulSectionEmitsZero(t *testing.T) {
 // locally-administered MAC.
 // To mutation-test: in hostPeerRef, drop `ifc.Virtual ||` or
 // `|| locallyAdministered(ifc.MAC)` from the skip condition.
+// A guest's MAC on a macvtap or macvlan interface and a VRRP virtual MAC look
+// burned in: the locally-administered bit is clear on all three here, so only
+// the interface name keeps them out of the host's identity. Through the real
+// collection: `ip -j addr` to the observation's subject.
+func TestToObservations_GuestAndFloatingMACsAreNotIdentity(t *testing.T) {
+	const ipJSON = `[
+	  {"ifname":"eth0","link_type":"ether","address":"b4:96:91:1a:2b:3c","operstate":"UP"},
+	  {"ifname":"macvtap0","link":"eth0","link_type":"ether","address":"00:0c:29:aa:bb:01","operstate":"UP"},
+	  {"ifname":"macvlan1","link":"eth0","link_type":"ether","address":"00:50:56:aa:bb:02","operstate":"UP"},
+	  {"ifname":"vrrp.51","link":"eth0","link_type":"ether","address":"00:00:5e:00:01:33","operstate":"UP"}
+	]`
+	f := scriptUbuntu(t, newFakeLocal())
+	f.cmd(linuxCmdIPJ, ipJSON)
+	rep, err := Collect(context.Background(), f, Options{Mode: ModeLocal, Platform: PlatformLinux, Now: fixedNow})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	result, err := ToObservations(rep)
+	if err != nil {
+		t.Fatalf("observations: %v", err)
+	}
+	if len(result.Facts) == 0 {
+		t.Fatal("no facts")
+	}
+	var macs []string
+	for _, id := range result.Facts[0].Subject.Identifiers {
+		if id.Kind == di.IdentifierMACAddress {
+			macs = append(macs, id.Value)
+		}
+	}
+	if want := []string{"b4:96:91:1a:2b:3c"}; !slices.Equal(macs, want) {
+		t.Errorf("identity MACs = %v, want only the physical NIC's %v", macs, want)
+	}
+	// Reported all the same, marked virtual: identity is what changes.
+	virtual := map[string]bool{}
+	for _, ifc := range rep.Interfaces {
+		virtual[ifc.Name] = ifc.Virtual
+	}
+	if len(virtual) != 4 || virtual["eth0"] || !virtual["macvtap0"] || !virtual["macvlan1"] || !virtual["vrrp.51"] {
+		t.Errorf("interfaces = %+v", rep.Interfaces)
+	}
+}
+
 func TestToObservations_VirtualAndLocallyAdministeredMACsAreNotIdentity(t *testing.T) {
 	rep, err := Collect(context.Background(), scriptUbuntu(t, newFakeLocal()), Options{
 		Mode: ModeLocal, Platform: PlatformLinux, Now: fixedNow,
