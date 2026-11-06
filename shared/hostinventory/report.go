@@ -60,7 +60,7 @@ const (
 	ModeRemote Mode = "remote"
 )
 
-// Section outcomes. The three values are the point: a section that is empty
+// Section outcomes. The distinct values are the point: a section that is empty
 // because nothing was found and a section that is empty because the step failed
 // are different claims, and collapsing them is how "not assessed" comes to read
 // as "clean" (CLAUDE.md, the three-valued-honesty rule).
@@ -71,6 +71,11 @@ const (
 	// SectionFailed — the step ran and failed, or could not run. The section is
 	// empty and its emptiness means nothing.
 	SectionFailed = "failed"
+	// SectionPartial — the step ran, but could see only part of the answer, and
+	// an entry in Errors says which part. Everything in the section is true;
+	// what is absent from it means nothing, so it is no basis for retiring
+	// anything an earlier report listed.
+	SectionPartial = "partial"
 	// SectionUnsupported — this platform has no way to answer. Not a failure,
 	// and not an absence of the thing either.
 	SectionUnsupported = "unsupported"
@@ -152,7 +157,7 @@ type Report struct {
 	// records an error and leaves its section empty; it never guesses.
 	Errors []StepError `json:"errors,omitempty"`
 	// Sections maps a section name to SectionOK / SectionFailed /
-	// SectionUnsupported. Always populated for every section the platform
+	// SectionPartial / SectionUnsupported. Always populated for every section the platform
 	// attempts, so a missing key means the collector never reached that step at
 	// all (a context cancellation part-way through).
 	Sections map[string]string `json:"sections"`
@@ -279,7 +284,8 @@ type Listener struct {
 	Address string `json:"address,omitempty"`
 	Port    int    `json:"port"`
 	// Process is the process or service name holding the socket, where the
-	// collector could see it (it needs privilege on most platforms).
+	// collector could see it. That needs privilege on Linux and Windows; macOS's
+	// netstat prints it for every socket to any account.
 	Process string `json:"process,omitempty"`
 	PID     int    `json:"pid,omitempty"`
 }
@@ -355,6 +361,16 @@ const maxErrorMessage = 300
 // fail records a step failure and marks the section failed.
 func (r *Report) fail(step string, err error) {
 	r.mark(step, SectionFailed)
+	r.recordError(step, err)
+}
+
+// partial marks a section that holds only part of the answer and says why.
+func (r *Report) partial(step string, err error) {
+	r.mark(step, SectionPartial)
+	r.recordError(step, err)
+}
+
+func (r *Report) recordError(step string, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()

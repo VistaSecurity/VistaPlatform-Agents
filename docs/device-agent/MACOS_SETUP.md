@@ -64,6 +64,20 @@ change what it runs. What the agent writes is the account's: `etc/` (its
 config), `data/` (its certificate and the platform CA) and
 `/Library/Logs/Vista/device-agent/`.
 
+### What that account can see
+
+The host inventory reads this Mac's sockets with `netstat`, which macOS answers
+in full for any account: every listening and bound socket and every connection,
+with the process that owns it, including root's. The process name is cut to 16
+characters.
+
+If `netstat` does not answer, the agent falls back to `lsof`, which shows a
+non-root account only that account's own processes. It then reports the
+`listeners` and `bound_udp_sockets` sections as `partial`, with the reason in
+the report's `errors`, and `connections` as `failed`. Sockets in a partial
+report are real; ones missing from it mean nothing, and the platform does not
+treat them as closed.
+
 ## Running it
 
 | | |
