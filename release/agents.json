@@ -31,7 +31,7 @@
         { "os": "darwin", "arch": "arm64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] },
         { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] }
       ],
-      "installers": { "linux": "install-device-agent.sh", "darwin": "install-device-agent-macos.sh" },
+      "installers": { "linux": "install-device-agent.sh", "darwin": "install-device-agent-macos.sh", "windows": "install-device-agent.ps1" },
       "capabilities": ["device_discovery"]
     }
   ],

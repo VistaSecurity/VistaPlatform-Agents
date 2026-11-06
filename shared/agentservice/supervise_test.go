@@ -1,33 +1,33 @@
-package main
+package agentservice
 
 import (
 	"testing"
 	"time"
 )
 
-// fakeSensor stands in for runSensor under superviseService.
+// fakeSensor stands in for runSensor under Supervise.
 type fakeSensor struct {
-	started    chan func()        // the run's started callback, once it is running
-	stopReason chan string        // what arrived on the stop channel
-	finish     chan sensorOutcome // tells the run to return
+	started    chan func()  // the run's started callback, once it is running
+	stopReason chan string  // what arrived on the stop channel
+	finish     chan Outcome // tells the run to return
 }
 
 func newFakeSensor() *fakeSensor {
 	return &fakeSensor{
 		started:    make(chan func(), 1),
 		stopReason: make(chan string, 1),
-		finish:     make(chan sensorOutcome, 1),
+		finish:     make(chan Outcome, 1),
 	}
 }
 
 // run behaves like runSensor: it returns on a stop request (with
-// sensorStopped) or when the test injects an outcome (a restart request).
-func (f *fakeSensor) run(started func(), stop <-chan string) sensorOutcome {
+// Stopped) or when the test injects an outcome (a restart request).
+func (f *fakeSensor) run(started func(), stop <-chan string) Outcome {
 	f.started <- started
 	select {
 	case reason := <-stop:
 		f.stopReason <- reason
-		return sensorStopped
+		return Stopped
 	case outcome := <-f.finish:
 		return outcome
 	}
@@ -36,31 +36,31 @@ func (f *fakeSensor) run(started func(), stop <-chan string) sensorOutcome {
 type serviceHarness struct {
 	t        *testing.T
 	sensor   *fakeSensor
-	cmds     chan serviceCommand
-	statuses chan serviceStatus
+	cmds     chan Command
+	statuses chan Status
 	exit     chan uint32
 }
 
-// startService runs superviseService with a progress tick long enough that it
+// startService runs Supervise with a progress tick long enough that it
 // never fires unless a test asks for it.
-func startService(t *testing.T, timings serviceTimings) *serviceHarness {
+func startService(t *testing.T, timings Timings) *serviceHarness {
 	t.Helper()
 	h := &serviceHarness{
 		t:        t,
 		sensor:   newFakeSensor(),
-		cmds:     make(chan serviceCommand),
-		statuses: make(chan serviceStatus, 64),
+		cmds:     make(chan Command),
+		statuses: make(chan Status, 64),
 		exit:     make(chan uint32, 1),
 	}
 	go func() {
-		h.exit <- superviseService(h.sensor.run, h.cmds, func(s serviceStatus) { h.statuses <- s }, timings)
+		h.exit <- Supervise(h.sensor.run, h.cmds, func(s Status) { h.statuses <- s }, timings)
 	}()
 	return h
 }
 
-var quietTimings = serviceTimings{progress: time.Hour, waitHint: 30 * time.Second}
+var quietTimings = Timings{Progress: time.Hour, WaitHint: 30 * time.Second}
 
-func (h *serviceHarness) nextStatus() serviceStatus {
+func (h *serviceHarness) nextStatus() Status {
 	h.t.Helper()
 	select {
 	case s := <-h.statuses:
@@ -68,7 +68,7 @@ func (h *serviceHarness) nextStatus() serviceStatus {
 	case <-time.After(5 * time.Second):
 		h.t.Fatal("no status reported")
 	}
-	return serviceStatus{}
+	return Status{}
 }
 
 func (h *serviceHarness) noStatus() {
@@ -80,7 +80,7 @@ func (h *serviceHarness) noStatus() {
 	}
 }
 
-func (h *serviceHarness) send(c serviceCommand) {
+func (h *serviceHarness) send(c Command) {
 	h.t.Helper()
 	select {
 	case h.cmds <- c:
@@ -120,7 +120,7 @@ func TestSuperviseService_ReportsRunningOnlyOnceTheSensorHasStarted(t *testing.T
 	h := startService(t, quietTimings)
 
 	first := h.nextStatus()
-	if first.State != serviceStartPending || first.AcceptsStop || first.WaitHint <= 0 {
+	if first.State != StartPending || first.AcceptsStop || first.WaitHint <= 0 {
 		t.Fatalf("first report = %+v, want start-pending with a wait hint and no stop accepted", first)
 	}
 	// The run has begun but not said it is up: Running would be a lie.
@@ -128,12 +128,12 @@ func TestSuperviseService_ReportsRunningOnlyOnceTheSensorHasStarted(t *testing.T
 
 	h.markStarted()
 	running := h.nextStatus()
-	if running.State != serviceRunning || !running.AcceptsStop {
+	if running.State != Running || !running.AcceptsStop {
 		t.Fatalf("after started: %+v, want running and accepting stop", running)
 	}
 
-	h.send(serviceCmdStop)
-	if s := h.nextStatus(); s.State != serviceStopPending || s.AcceptsStop {
+	h.send(CmdStop)
+	if s := h.nextStatus(); s.State != StopPending || s.AcceptsStop {
 		t.Fatalf("after stop: %+v, want stop-pending, no longer accepting stop", s)
 	}
 	if code := h.exitCode(); code != 0 {
@@ -143,11 +143,11 @@ func TestSuperviseService_ReportsRunningOnlyOnceTheSensorHasStarted(t *testing.T
 
 func TestSuperviseService_StopAndShutdownReachTheSensorLoop(t *testing.T) {
 	for _, tc := range []struct {
-		cmd    serviceCommand
+		cmd    Command
 		reason string
 	}{
-		{serviceCmdStop, "Service stop requested"},
-		{serviceCmdShutdown, "System shutdown"},
+		{CmdStop, "Service stop requested"},
+		{CmdShutdown, "System shutdown"},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			h := startService(t, quietTimings)
@@ -177,68 +177,68 @@ func TestSuperviseService_InterrogateEchoesTheCurrentStatus(t *testing.T) {
 	h := startService(t, quietTimings)
 	h.nextStatus()
 
-	h.send(serviceCmdInterrogate)
-	if s := h.nextStatus(); s.State != serviceStartPending {
+	h.send(CmdInterrogate)
+	if s := h.nextStatus(); s.State != StartPending {
 		t.Fatalf("interrogate while starting = %+v, want start-pending", s)
 	}
 
 	h.markStarted()
 	h.nextStatus()
-	h.send(serviceCmdInterrogate)
-	if s := h.nextStatus(); s.State != serviceRunning || !s.AcceptsStop {
+	h.send(CmdInterrogate)
+	if s := h.nextStatus(); s.State != Running || !s.AcceptsStop {
 		t.Fatalf("interrogate while running = %+v, want running", s)
 	}
 
-	h.send(serviceCmdOther) // never accepted, so ignored
+	h.send(CmdOther) // never accepted, so ignored
 	h.noStatus()
 
-	h.send(serviceCmdStop)
+	h.send(CmdStop)
 	h.nextStatus()
 	h.exitCode()
 }
 
 func TestSuperviseService_PendingStatesAdvanceTheirCheckpoint(t *testing.T) {
-	h := startService(t, serviceTimings{progress: 5 * time.Millisecond, waitHint: time.Second})
+	h := startService(t, Timings{Progress: 5 * time.Millisecond, WaitHint: time.Second})
 
 	first := h.nextStatus()
 	second := h.nextStatus()
-	if second.State != serviceStartPending || second.CheckPoint <= first.CheckPoint {
+	if second.State != StartPending || second.CheckPoint <= first.CheckPoint {
 		t.Fatalf("start-pending progress: %+v then %+v, want an advancing checkpoint", first, second)
 	}
 
 	h.markStarted()
 	// Drain the start-pending ticks that raced the start.
-	var s serviceStatus
-	for s = h.nextStatus(); s.State == serviceStartPending; s = h.nextStatus() {
+	var s Status
+	for s = h.nextStatus(); s.State == StartPending; s = h.nextStatus() {
 	}
-	if s.State != serviceRunning {
+	if s.State != Running {
 		t.Fatalf("got %+v, want running", s)
 	}
 	// Running does not tick.
 	h.noStatus()
 
-	h.send(serviceCmdStop)
+	h.send(CmdStop)
 	h.exitCode()
 }
 
 func TestSuperviseService_StopPendingTicksWhileTheSensorCleansUp(t *testing.T) {
 	// A sensor whose cleanup takes a while (it submits its last discoveries).
 	cleanupDone := make(chan struct{})
-	run := func(started func(), stop <-chan string) sensorOutcome {
+	run := func(started func(), stop <-chan string) Outcome {
 		started()
 		<-stop
 		<-cleanupDone
-		return sensorStopped
+		return Stopped
 	}
-	statuses := make(chan serviceStatus, 64)
-	cmds := make(chan serviceCommand)
+	statuses := make(chan Status, 64)
+	cmds := make(chan Command)
 	exit := make(chan uint32, 1)
 	go func() {
-		exit <- superviseService(run, cmds, func(s serviceStatus) { statuses <- s },
-			serviceTimings{progress: 5 * time.Millisecond, waitHint: time.Second})
+		exit <- Supervise(run, cmds, func(s Status) { statuses <- s },
+			Timings{Progress: 5 * time.Millisecond, WaitHint: time.Second})
 	}()
 
-	waitFor := func(want serviceState) serviceStatus {
+	waitFor := func(want State) Status {
 		t.Helper()
 		deadline := time.After(5 * time.Second)
 		for {
@@ -252,10 +252,10 @@ func TestSuperviseService_StopPendingTicksWhileTheSensorCleansUp(t *testing.T) {
 			}
 		}
 	}
-	waitFor(serviceRunning)
-	cmds <- serviceCmdStop
-	first := waitFor(serviceStopPending)
-	next := waitFor(serviceStopPending)
+	waitFor(Running)
+	cmds <- CmdStop
+	first := waitFor(StopPending)
+	next := waitFor(StopPending)
 	if next.CheckPoint <= first.CheckPoint {
 		t.Fatalf("stop-pending checkpoint did not advance: %d then %d", first.CheckPoint, next.CheckPoint)
 	}
@@ -268,24 +268,24 @@ func TestSuperviseService_StopPendingTicksWhileTheSensorCleansUp(t *testing.T) {
 func TestSuperviseService_RepeatedStopIsIgnored(t *testing.T) {
 	cleanupDone := make(chan struct{})
 	stopsSeen := make(chan string, 4)
-	run := func(started func(), stop <-chan string) sensorOutcome {
+	run := func(started func(), stop <-chan string) Outcome {
 		started()
 		stopsSeen <- <-stop
 		<-cleanupDone
-		return sensorStopped
+		return Stopped
 	}
-	statuses := make(chan serviceStatus, 64)
-	cmds := make(chan serviceCommand)
+	statuses := make(chan Status, 64)
+	cmds := make(chan Command)
 	exit := make(chan uint32, 1)
 	go func() {
-		exit <- superviseService(run, cmds, func(s serviceStatus) { statuses <- s }, quietTimings)
+		exit <- Supervise(run, cmds, func(s Status) { statuses <- s }, quietTimings)
 	}()
 
-	cmds <- serviceCmdStop
+	cmds <- CmdStop
 	// A system shutdown arriving during cleanup must neither block the
 	// supervisor nor restart stop-pending's checkpoint.
-	cmds <- serviceCmdShutdown
-	cmds <- serviceCmdStop
+	cmds <- CmdShutdown
+	cmds <- CmdStop
 	close(cleanupDone)
 	if code := waitExit(t, exit); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
@@ -293,7 +293,7 @@ func TestSuperviseService_RepeatedStopIsIgnored(t *testing.T) {
 	close(statuses)
 	stopPending := 0
 	for s := range statuses {
-		if s.State == serviceStopPending {
+		if s.State == StopPending {
 			stopPending++
 		}
 	}
@@ -314,9 +314,9 @@ func TestSuperviseService_ControlPlaneRestartExitsNonZero(t *testing.T) {
 	h.markStarted()
 	h.nextStatus()
 
-	h.sensor.finish <- sensorRestartRequested
-	if code := h.exitCode(); code != serviceExitRestart || code == 0 {
-		t.Fatalf("exit code after a restart request = %d, want %d", code, serviceExitRestart)
+	h.sensor.finish <- RestartRequested
+	if code := h.exitCode(); code != ExitRestart || code == 0 {
+		t.Fatalf("exit code after a restart request = %d, want %d", code, ExitRestart)
 	}
 }
 
@@ -324,18 +324,18 @@ func TestSuperviseService_ControlPlaneRestartExitsNonZero(t *testing.T) {
 // control-plane restart raced the stop.
 func TestSuperviseService_OperatorStopBeatsARacingRestart(t *testing.T) {
 	stopped := make(chan struct{})
-	run := func(started func(), stop <-chan string) sensorOutcome {
+	run := func(started func(), stop <-chan string) Outcome {
 		started()
 		<-stop
 		close(stopped)
-		return sensorRestartRequested
+		return RestartRequested
 	}
-	cmds := make(chan serviceCommand)
+	cmds := make(chan Command)
 	exit := make(chan uint32, 1)
 	go func() {
-		exit <- superviseService(run, cmds, func(serviceStatus) {}, quietTimings)
+		exit <- Supervise(run, cmds, func(Status) {}, quietTimings)
 	}()
-	cmds <- serviceCmdStop
+	cmds <- CmdStop
 	select {
 	case <-stopped:
 	case <-time.After(5 * time.Second):

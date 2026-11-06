@@ -34,7 +34,10 @@ param(
     # Human-readable sensor name. Defaults to the hostname + date.
     [string]$Name = "",
 
-    # Comma-separated capture interfaces. Empty = let the sensor auto-select.
+    # Comma-separated capture interfaces, each named as Windows shows the
+    # adapter ("Ethernet 2", "Wi-Fi"), by its description, or by its Npcap
+    # device name (\Device\NPF_{GUID}). Empty = the sensor captures on every
+    # adapter that is up and has an address.
     [string]$Interfaces = "",
 
     # Deployment profile. Not surfaced in the console; datacenter_host is the
@@ -69,6 +72,7 @@ if (-not (Test-Path $BinarySource)) {
 
 # The version the platform shows is the one stamped into this binary - the
 # sensor reports it itself at registration and on every heartbeat.
+# Display only: an unreadable version leaves "unknown" and changes nothing.
 $SensorVersion = "unknown"
 try {
     $versionLine = (& $BinarySource --version 2>$null | Select-Object -First 1)
@@ -145,6 +149,8 @@ if ($keepEnrolment) {
 }
 
 # Stop a previous install so it cannot rewrite the config while we replace it.
+# Best effort: a service that will not stop keeps its binary locked, and the
+# Copy-Item below then fails loudly.
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
 }
@@ -208,6 +214,37 @@ storage:
     [System.IO.File]::WriteAllText($ConfigPath, $configContent, (New-Object System.Text.UTF8Encoding $false))
 }
 
+#region service-config
+# Points the service at $PathName and makes it start on boot, then reads both
+# back and throws unless they took. Windows PowerShell 5.1 mangles the quotes
+# embedded in an argument to a native program, so the
+# `sc.exe config <name> binPath= "<path with quotes>"` this replaced printed its
+# usage text and changed nothing, unnoticed: a re-run never re-enabled a
+# service the installer had disabled, and a new command line never reached an
+# existing service. Win32_Service.Change takes the path as data, not as a
+# command line. $Get and $Change stand in for Win32_Service in tests
+# (scripts/install-*-ps1 tests); the read-back is what makes a no-op fail.
+function Set-ServiceStartup {
+    param(
+        [string]$Name,
+        [string]$PathName,
+        [scriptblock]$Get = { param($n) Get-CimInstance -ClassName Win32_Service -Filter "Name='$n'" },
+        [scriptblock]$Change = {
+            param($svc, $path)
+            (Invoke-CimMethod -InputObject $svc -MethodName Change -Arguments @{ PathName = $path; StartMode = 'Automatic' }).ReturnValue
+        }
+    )
+    $svc = & $Get $Name
+    if (-not $svc) { throw "Service $Name does not exist." }
+    $rc = & $Change $svc $PathName
+    if ($rc -ne 0) { throw "Could not reconfigure service ${Name}: Win32_Service.Change returned $rc." }
+    $after = & $Get $Name
+    if ("$($after.PathName)" -ne $PathName -or "$($after.StartMode)" -ne 'Auto') {
+        throw "Service $Name was not reconfigured: it runs '$($after.PathName)' and starts '$($after.StartMode)'; the installer set '$PathName' and Auto."
+    }
+}
+#endregion service-config
+
 # --- Install + start the Windows service ----------------------------------
 # Auto-start (survives reboot / maintenance) + restart-on-failure = the Windows
 # equivalent of systemd `WantedBy=multi-user.target` + `Restart=always`.
@@ -217,21 +254,40 @@ $binPath = "`"$InstallDir\crypto-sensor.exe`" --verbose -config `"$ConfigPath`""
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Warn "Service already exists - reconfiguring."
-    # sc.exe is the reliable way to rewrite binPath on an existing service.
-    sc.exe config $ServiceName binPath= "$binPath" start= auto | Out-Null
 } else {
+    # A cmdlet, not a native command: it takes the path as data and throws
+    # (ErrorActionPreference Stop) if it cannot create the service.
     New-Service -Name $ServiceName -DisplayName $ServiceDisplay `
         -BinaryPathName $binPath -StartupType Automatic `
         -Description "Vista Platform passive crypto-discovery sensor" | Out-Null
 }
+# Both paths: an existing service may be Disabled (this installer disables it
+# on a rejected key or a sensor that cannot capture) or run an older command
+# line; a new one is read back too.
+try {
+    Set-ServiceStartup $ServiceName $binPath
+} catch {
+    Write-Err "Could not configure the service: $($_.Exception.Message)"
+    exit 1
+}
 
 # Restart on crash: reset failure count daily, restart after 10s on each of the
 # first three failures (the SCM repeats the last action for any later one).
+# Neither argument list has a quote for Windows PowerShell 5.1 to mangle, but
+# each exit status is checked: without these the sensor stays down.
 sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/10000/restart/10000 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not set the service's restart-on-failure actions (sc.exe failure exit $LASTEXITCODE)."
+    exit 1
+}
 # Also restart when the sensor stops itself with a failure exit code: that is
 # how it honours a restart command from the control plane. Without this flag
 # the SCM only acts on a crash, and the sensor would stay stopped.
 sc.exe failureflag $ServiceName 1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Could not make the service restart after a failure exit (sc.exe failureflag exit $LASTEXITCODE)."
+    exit 1
+}
 
 # The address the operator entered when creating the registration key (-IP).
 # Pinning it makes registration report the address the platform expects even on
@@ -277,11 +333,16 @@ $timeoutSeconds = 90
 Write-Info "Waiting up to ${timeoutSeconds}s for the sensor to register..."
 $sensorId = $null
 $rejected = $false
+$cannotCapture = $false
 $deadline = (Get-Date).AddSeconds($timeoutSeconds)
 while ((Get-Date) -lt $deadline) {
     $value = Get-ConfigValue 'sensorId'
     if ($value -match $uuidPattern) { $sensorId = $value; break }
-    if ((Get-NewLogText) -match 'Registration was REJECTED') { $rejected = $true; break }
+    $newLog = Get-NewLogText
+    if ($newLog -match 'Registration was REJECTED') { $rejected = $true; break }
+    # The sensor checks that it can capture before it registers, and stops
+    # with the key unused when it cannot.
+    if ($newLog -match 'Not registering: the registration key is unused') { $cannotCapture = $true; break }
     Start-Sleep -Seconds 2
 }
 
@@ -290,7 +351,7 @@ if (-not $sensorId) {
     Write-Host ""
     # The sensor marks failures with these emoji. Built from code points: this
     # file has no BOM, so Windows PowerShell reads it as ANSI, not UTF-8.
-    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)"
+    $failureMarks = "$([char]::ConvertFromUtf32(0x26D4))|$([char]::ConvertFromUtf32(0x274C))|Registration (FAILED|retry failed)|Failed to start capture on interface"
     (Get-NewLogText) -split "`r?`n" | Where-Object { $_ -match $failureMarks } |
         Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }
     Write-Host ""
@@ -298,10 +359,20 @@ if (-not $sensorId) {
         # A rejected key never succeeds; stop the service rather than leave the
         # SCM restarting it every 10 seconds.
         # Disable first so a restart the SCM has already queued cannot start it.
+        # Best effort: the install has already failed and says so; a re-run
+        # re-enables it (Set-ServiceStartup).
         Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         Write-Err "The control plane REJECTED the registration key (see above): it is invalid, expired, or already used."
         Write-Err "Generate a new key (Discovery -> Sensors & Agents -> Register) and re-run this installer with it."
+        Write-Info "The sensor service has been stopped and disabled."
+    } elseif ($cannotCapture) {
+        # Retrying cannot help until the interfaces change; the key is still
+        # good, so re-running the installer with -Interfaces is the fix.
+        Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        Write-Err "The sensor cannot capture on this host (see above), so it did not register: the registration key was NOT used."
+        Write-Err "Re-run this installer with -Interfaces naming an adapter from the list above (for example -Interfaces `"Ethernet`")."
         Write-Info "The sensor service has been stopped and disabled."
     } else {
         if ($startError) { Write-Err "Starting the service failed: $startError" }

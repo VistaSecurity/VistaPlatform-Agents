@@ -40,7 +40,7 @@ carries the installer for its system.
 | | Linux (systemd) | macOS (launchd) | Windows (service) |
 |---|---|---|---|
 | Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
-| Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | |
+| Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
 
 ## Pull-request checks
 
