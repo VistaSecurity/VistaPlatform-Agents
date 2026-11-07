@@ -9,7 +9,7 @@ import { accessSync, constants, cpSync, mkdirSync, mkdtempSync, readFileSync, rm
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { REPO_ROOT, bundleAsset, expectedArtifacts, loadSurface, parseTag, stableJson } from './lib.mjs';
+import { REPO_ROOT, binaryAsset, bundleAsset, expectedArtifacts, loadSurface, packageAsset, parseTag, stableJson } from './lib.mjs';
 import { packageRelease } from './package.mjs';
 import { writeMetadata } from './metadata.mjs';
 
@@ -157,8 +157,7 @@ export function makeRelease({ tag = 'v5.3.0', modules = { 'github.com/example/mi
     const executed = [];
     for (const agent of loadSurface(root).agents) {
       if (!agent.targets.some((x) => x.os === leg.os && x.arch === leg.arch)) continue;
-      const base = `${agent.asset_prefix}_${t.version}_${leg.os}_${leg.arch}`;
-      executed.push(base, `${base}.tar.gz`, ...(agent.installers[leg.os] ? [agent.installers[leg.os]] : []));
+      executed.push(binaryAsset(agent, t.version, leg.os, leg.arch), packageAsset(agent, t.version, leg.os, leg.arch), ...(agent.installers[leg.os] ? [agent.installers[leg.os]] : []));
     }
     const ran = smokeExecuted ? smokeExecuted(leg, executed) : executed;
     if (ran !== null) writeFileSync(path.join(smoke, `smoke-${leg.os}-${leg.arch}.json`), stableJson({ os: leg.os, arch: leg.arch, result: 'passed', executed: ran }));

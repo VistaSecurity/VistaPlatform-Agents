@@ -14,8 +14,9 @@ Customers verify releases as `docs/verify-release.md` describes.
 
 `.github/workflows/build-agents.yml` is called by the first two and does the
 building: one leg per target in `release/agents.json` on GitHub-hosted runners,
-then packaging (`scripts/release/package.mjs`) and the smoke run on linux/amd64
-and linux/arm64 (`scripts/release/smoke.sh`). It holds `contents: read` only.
+then packaging (`scripts/release/package.mjs`) and the smoke run on every
+system in the release (`scripts/release/smoke.sh`, below). It holds
+`contents: read` only.
 
 Each trusted workflow keeps its write permissions in one job, run in its own
 environment (`release`, `nightly`, `compatibility`), and `scripts/check-workflows.mjs`
@@ -61,17 +62,34 @@ cache, or downloads another run's artefacts.
 
 The smoke legs (`scripts/release/smoke.sh`, the `smoke` job of
 `build-agents.yml`, one leg per entry of `smoke` in `release/agents.json`) run
-on GitHub-hosted linux/amd64, linux/arm64, darwin/amd64 (`macos-15-intel`) and
-darwin/arm64 (`macos-15`) runners. Each unpacks the packages for its machine,
+on GitHub-hosted linux/amd64, linux/arm64, darwin/amd64 (`macos-15-intel`),
+darwin/arm64 (`macos-15`) and windows/amd64 (`windows-2025`) runners. Each unpacks the packages for its machine,
 checks they hold the published binary and installer byte for byte, runs each
-binary's `-version` (the sensor loads the system's libpcap to get there) and
-the installer's `--check-dependencies`. That proves the published bytes start
-and link on that system; it does not install a service, capture, or register
+binary's `-version` (on Linux and macOS the sensor loads the system's libpcap to
+get there) and the installer's dependency check. That proves the published
+bytes start and link on that system; it does not install a service, capture, or
+register
 (the installers are tested for that in `scripts/`, and on real hosts before a
 platform release). What a leg executed is `runtime_qualified` in
 `agents-release.json` and "yes" in the release notes; a leg whose result is
-missing fails the release. Windows builds have no smoke leg and stay
-compile-only.
+missing fails the release.
+
+The Windows leg proves less for the sensor, and says so:
+
+| Build | What the leg does | What that does not prove |
+|---|---|---|
+| Device agent, Windows x64 | `-version`; `install-device-agent.ps1 -CheckDependencies` under Windows PowerShell | service install, enrollment |
+| Sensor, Windows x64 | `-version` on a runner without Npcap; `install-sensor.ps1` run to its Npcap check, which must refuse before anything changes | that the build loads Npcap, finds an adapter or captures; the installer's path past that check |
+| Sensor, Windows x86 | package and bytes checked, `-version` under WoW64 on the x64 runner; a failure fails the leg | anything on a 32-bit Windows host: the runner is not of its architecture, so it is listed as `started_not_qualified` in the leg's result and stays `runtime_qualified: false` |
+
+The hosted image has no Npcap, and the sensor starts without it: its import table
+names only `kernel32.dll`, and the pcap library's `init` ignores a failed load of
+`wpcap.dll`, which matters only when the sensor opens a capture. `smoke.sh` fails
+if it finds Npcap on the runner, so the release notes' "started without Npcap"
+stays true. The leg installs no third-party software: Npcap's free licence
+covers up to five systems, which a fleet of throwaway runners does not fit.
+`install-sensor.ps1` has no dependency-check switch, so the leg uses the check it
+has. Capture on Windows is proved on real hosts before a platform release.
 
 ## Immutability and failed runs
 

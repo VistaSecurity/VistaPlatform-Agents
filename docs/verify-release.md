@@ -170,9 +170,12 @@ jq --arg f "$F" '.agents[].artifacts[] | select(.file == $f)
 
 - `runtime_qualified: true` means the release run executed this artefact on a
   GitHub-hosted runner of its OS and architecture (today linux/amd64,
-  linux/arm64, darwin/amd64 and darwin/arm64: the binary's `-version` and the
-  installer's dependency check; no service is installed and nothing
-  registers).
+  linux/arm64, darwin/amd64, darwin/arm64 and windows/amd64: the binary's
+  `-version` and the installer's dependency check; no service is installed and
+  nothing registers). The Windows x64 sensor ran on a runner without Npcap: it
+  started and reported its version, without loading Npcap, and its installer
+  stopped at the Npcap check. The Windows x86 sensor is `false`: it is started
+  under WoW64 on the x64 runner, which is not its architecture.
   `false` means compile-only: built, checked and signed, but not supported.
 - `requires` is what the host must provide: `libpcap` (Linux, macOS) or
   `npcap` (Windows). Npcap is never bundled; install it yourself from

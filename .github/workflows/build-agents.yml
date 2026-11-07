@@ -14,12 +14,13 @@
 #   package  checks every binary's build information, generates
 #            THIRD_PARTY_LICENSES, the SBOMs and the packages
 #            (scripts/release/package.mjs).
-#   smoke    unpacks the Linux and macOS packages on linux/amd64,
-#            linux/arm64, darwin/amd64 (macos-15-intel) and darwin/arm64
-#            (macos-15) runners and runs each agent and its installer's
+#   smoke    unpacks the packages on linux/amd64, linux/arm64, darwin/amd64
+#            (macos-15-intel), darwin/arm64 (macos-15) and windows/amd64
+#            (windows-2025) runners and runs each agent and its installer's
 #            dependency check (scripts/release/smoke.sh). Only what this job
-#            executed may be called runtime_qualified. Windows builds are not
-#            run here.
+#            executed may be called runtime_qualified. The Windows runner has
+#            no Npcap, so the Windows sensor is started without it, and the
+#            x86 sensor is started there under WoW64 but is not qualified.
 #
 # scripts/release-metadata.test.mjs fails when the matrices below disagree
 # with release/agents.json.
@@ -168,6 +169,7 @@ jobs:
           - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
           - {os: darwin, arch: amd64, runner: macos-15-intel}
           - {os: darwin, arch: arm64, runner: macos-15}
+          - {os: windows, arch: amd64, runner: windows-2025}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -184,7 +186,9 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libpcap0.8t64
+      # Git Bash on Windows; Windows PowerShell runs the installers from there.
       - name: Smoke-run the packaged agents
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |

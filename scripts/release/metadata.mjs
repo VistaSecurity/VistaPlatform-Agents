@@ -33,7 +33,13 @@ export function readSmoke(dir, surface) {
     if (!existsSync(f)) { errors.push(`smoke result for ${leg.os}/${leg.arch} is missing (${f})`); continue; }
     const r = JSON.parse(readFileSync(f, 'utf8'));
     if (r.os !== leg.os || r.arch !== leg.arch || r.result !== 'passed') { errors.push(`smoke ${leg.os}/${leg.arch}: ${JSON.stringify({ os: r.os, arch: r.arch, result: r.result })}`); continue; }
-    for (const file of r.executed || []) qualified.add(file);
+    // Started on a machine of another architecture (x86 under WoW64) is not
+    // executed on a runner of its system, whatever a result file says.
+    const elsewhere = (leg.also_started || []).map((a) => `_${leg.os}_${a}`);
+    for (const file of r.executed || []) {
+      if (elsewhere.some((s) => file.includes(s))) errors.push(`smoke ${leg.os}/${leg.arch}: ${file} is not of this leg's architecture`);
+      else qualified.add(file);
+    }
   }
   return { errors, qualified };
 }
