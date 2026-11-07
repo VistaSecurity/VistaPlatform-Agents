@@ -361,7 +361,7 @@ func getDefaultDataPath() string {
 		return "/tmp/crypto-device-agent"
 	default:
 		// Linux and other Unix-like systems
-		return "/var/lib/crypto-device-agent"
+		return sharedconfig.LinuxDataPath("/var/lib/vista-device-agent", "/var/lib/crypto-device-agent")
 	}
 }
 

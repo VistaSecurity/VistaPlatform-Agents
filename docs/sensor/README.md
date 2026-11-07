@@ -36,6 +36,10 @@ This verifies startup dependencies; it does not test packet-capture permissions
 or connectivity to the control plane. Launching a bare binary bypasses the
 installer's diagnostics.
 
+On a host installed under the old `crypto-sensor` names, running the new
+installer moves it to the `vista-sensor` names and keeps its enrolment; see
+"Linux host names" in the repository README.
+
 ## Configuration
 The sensor currently reads configuration from environment variables. A sample YAML file is provided for reference/documentation and future file-based config support.
 

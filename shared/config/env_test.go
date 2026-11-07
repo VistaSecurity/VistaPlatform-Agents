@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -30,4 +31,26 @@ func TestGetEnvIfPresent(t *testing.T) {
 			t.Fatalf("got %q, want explicit value", got)
 		}
 	})
+}
+
+func TestLinuxDataPath(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "vista")
+	legacy := filepath.Join(dir, "crypto")
+
+	if got := LinuxDataPath(current, legacy); got != current {
+		t.Errorf("neither exists: got %s, want the current name", got)
+	}
+	if err := os.Mkdir(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := LinuxDataPath(current, legacy); got != legacy {
+		t.Errorf("only the legacy directory exists: got %s, an existing host must keep it", got)
+	}
+	if err := os.Mkdir(current, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := LinuxDataPath(current, legacy); got != current {
+		t.Errorf("both exist: got %s, want the current name", got)
+	}
 }

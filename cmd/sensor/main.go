@@ -35,6 +35,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentservice"
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
+	sharedconfig "github.com/vistasecurity/vistaplatform-agents/shared/config"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	sharednetwork "github.com/vistasecurity/vistaplatform-agents/shared/network"
@@ -3149,7 +3150,7 @@ func getDefaultDataPath() string {
 		return "/tmp/crypto-sensor"
 	default:
 		// Linux and other Unix-like systems
-		return "/var/lib/crypto-sensor"
+		return sharedconfig.LinuxDataPath("/var/lib/vista-sensor", "/var/lib/crypto-sensor")
 	}
 }
 

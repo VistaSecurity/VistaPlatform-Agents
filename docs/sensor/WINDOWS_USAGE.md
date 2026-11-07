@@ -144,7 +144,7 @@ crypto-sensor-windows-amd64.exe -test -verbose
 ### Data Path by OS
 
 - **Windows**: `%LOCALAPPDATA%\CryptoSensor` (e.g., `C:\Users\{username}\AppData\Local\CryptoSensor`)
-- **Linux**: `/var/lib/crypto-sensor`
+- **Linux**: `/var/lib/vista-sensor` (`/var/lib/crypto-sensor` if only that exists)
 - **macOS**: `~/Library/Application Support/CryptoSensor`
 
 ## Troubleshooting

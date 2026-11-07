@@ -42,6 +42,27 @@ carries the installer for its system.
 | Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
 | Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
 
+### Linux host names
+
+The Linux installers use `vista-sensor.service`, user and group `vista-sensor`,
+and `/opt/vista-sensor`, and likewise `vista-device-agent` for the device agent.
+
+**Upgrading from the `crypto-sensor` and `crypto-device-agent` names:** run the
+installer of the new release. It stops the old service, moves the install
+directory with its configuration, certificates and data, updates the paths in the
+configuration, and starts the service under the new names. An enrolled host keeps
+its identity and needs no registration key, `--url` or `--ip`:
+
+```bash
+sudo bash install-sensor.sh
+sudo bash install-device-agent.sh
+```
+
+A custom directory stays where it is unless `--dir` names another. If the run
+stops part-way the installer says where the files are; fix the cause and run it
+again with the same options. Anything that named the old service, such as a
+monitoring check, needs the new name.
+
 ## Which file do I need
 
 Each release lists about 70 files; a person installing an agent needs one. The

@@ -38,7 +38,7 @@ After successful registration, certificates are automatically saved to disk:
 **Platform-Specific Data Paths:**
 - **Windows:** `%LOCALAPPDATA%\CryptoSensor\` (typically `C:\Users\<username>\AppData\Local\CryptoSensor\`)
 - **macOS:** `~/Library/Application Support/CryptoSensor/`
-- **Linux:** `/var/lib/crypto-sensor/`
+- **Linux:** `/var/lib/vista-sensor/` (`/var/lib/crypto-sensor/` if only that exists); installed with `install-sensor.sh`, `/opt/vista-sensor/data/`
 
 ### 3. Subsequent Startups
 
