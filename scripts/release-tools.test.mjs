@@ -163,9 +163,7 @@ const machine = { x64: 'amd64', arm64: 'arm64' }[hostArch()];
 // A stand-in executable: carries the stamped version (as a real binary's data
 // does) and prints a -version report, here with whatever version report()
 // says.
-const fakeExe = (report) => (agent, t, version) => (t.os !== 'windows'
-  ? `#!/bin/sh\n# stamped ${version}\necho "Vista Platform agent v${report(version)}"\necho "Platform: ${t.os}/${t.arch}"\n`
-  : `fake, stamped ${version}\n`);
+const fakeExe = (report) => (agent, t, version) => `#!/bin/sh\n# stamped ${version}\necho "Vista Platform agent v${report(version)}"\necho "Platform: ${t.os}/${t.arch}"\n`;
 
 test('smoke: the packaged agents run here and are reported as executed', { skip: (platform() !== 'linux' || !machine) && 'smoke.sh runs on Linux amd64/arm64' }, () => {
   const r = makeRelease({ exeContent: fakeExe((v) => v) });
@@ -238,6 +236,86 @@ for (const sh of SMOKE_BASHES) {
     assert.match(res.stderr, /differs from the published install-sensor-macos\.sh/);
   });
 }
+
+// The Windows leg, as Git Bash shows Windows to the script. The installers' own
+// behaviour is tested in the *-ps1 tests; here a stand-in for Windows PowerShell
+// logs how it was called and answers as the real one does on a host without
+// Npcap: exit 1 at the sensor's check, 0 for the device agent's.
+function asWindows(r, { sensorInstaller = 'echo "[ERROR] Npcap is not installed; the sensor needs it to capture packets."; exit 1', uname = 'MINGW64_NT-10.0-26100' } = {}) {
+  const bin = tempDir('fake-win-');
+  const log = path.join(bin, 'powershell.log');
+  writeFileSync(path.join(bin, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo ${uname} ;; -m) echo x86_64 ;; esac\n`, { mode: 0o755 });
+  writeFileSync(path.join(bin, 'cygpath'), '#!/bin/sh\necho "$2"\n', { mode: 0o755 });
+  writeFileSync(path.join(bin, 'powershell.exe'), `#!/bin/sh\necho "$*" >> "${log}"\ncase "$*" in\n  *install-sensor.ps1*) ${sensorInstaller} ;;\nesac\n`, { mode: 0o755 });
+  const systemRoot = path.join(r.dir, 'Windows');
+  mkdirSync(systemRoot);
+  return { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYSTEMROOT: systemRoot }, log, systemRoot };
+}
+const windowsSmoke = (r, win) => spawnSync('bash', [path.join(here, 'release', 'smoke.sh'), r.assets, '5.3.0', path.join(r.dir, 'smoke-win.json')], { encoding: 'utf8', env: win.env });
+const unix = { skip: platform() === 'win32' && 'the stand-ins need a POSIX shell' };
+
+for (const uname of ['MINGW64_NT-10.0-26100', 'MSYS_NT-10.0-26100']) {
+  test(`smoke: on Windows (${uname}) the x64 agents are executed and the x86 sensor is only started`, unix, () => {
+    const r = makeRelease({ exeContent: fakeExe((v) => v) });
+    assert.deepEqual(r.errors, []);
+    const win = asWindows(r, { uname });
+    const res = windowsSmoke(r, win);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    const j = JSON.parse(readFileSync(path.join(r.dir, 'smoke-win.json'), 'utf8'));
+    assert.deepEqual([j.os, j.arch], ['windows', 'amd64']);
+    assert.deepEqual(j.executed, [
+      'install-device-agent.ps1', 'install-sensor.ps1',
+      'vista-device-agent_5.3.0_windows_amd64.exe', 'vista-device-agent_5.3.0_windows_amd64.zip',
+      'vista-sensor_5.3.0_windows_amd64.exe', 'vista-sensor_5.3.0_windows_amd64.zip',
+    ]);
+    assert.deepEqual(j.started_not_qualified, ['vista-sensor_5.3.0_windows_386.exe', 'vista-sensor_5.3.0_windows_386.zip']);
+    assert.match(res.stdout, /without Npcap \(capture library not loaded\)/);
+    const calls = readFileSync(win.log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 2, calls.join('\n'));
+    assert.match(calls.find((c) => c.includes('install-device-agent.ps1')), /-ExecutionPolicy Bypass -File \S+install-device-agent\.ps1 -CheckDependencies$/);
+    assert.match(calls.find((c) => c.includes('install-sensor.ps1')), /install-sensor\.ps1 -IP 192\.0\.2\.1 -Key REG-SMOKE-NEVER-SENT$/);
+  });
+}
+
+test('smoke: on Windows the leg fails if Npcap is on the runner', unix, () => {
+  for (const lib of ['System32/Npcap', 'System32', 'SysWOW64/Npcap', 'SysWOW64']) {
+    const r = makeRelease({ exeContent: fakeExe((v) => v) });
+    const win = asWindows(r);
+    mkdirSync(path.join(win.systemRoot, lib), { recursive: true });
+    writeFileSync(path.join(win.systemRoot, lib, 'wpcap.dll'), 'MZ');
+    const res = windowsSmoke(r, win);
+    assert.notEqual(res.status, 0, lib);
+    assert.match(res.stderr, /ran without Npcap/);
+  }
+});
+
+test('smoke: on Windows the sensor installer must stop at its Npcap check, and no other way', unix, () => {
+  const r = makeRelease({ exeContent: fakeExe((v) => v) });
+  let res = windowsSmoke(r, asWindows(r, { sensorInstaller: 'exit 0' }));
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /did not refuse a host without Npcap/);
+  res = windowsSmoke(r, asWindows(makeRelease({ exeContent: fakeExe((v) => v) }), { sensorInstaller: 'echo "[ERROR] must be run from an elevated session"; exit 1' }));
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /not at its Npcap check/);
+});
+
+test('smoke: on Windows a tampered zip, a wrong version or a failed x86 start fails the leg', unix, () => {
+  let r = makeRelease({ exeContent: fakeExe((v) => v) });
+  writeFileSync(path.join(r.assets, 'vista-device-agent_5.3.0_windows_amd64.exe'), 'other');
+  let res = windowsSmoke(r, asWindows(r));
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /differs from vista-device-agent_5\.3\.0_windows_amd64\.exe/);
+
+  r = makeRelease({ exeContent: fakeExe(() => '5.2.0') });
+  res = windowsSmoke(r, asWindows(r));
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /does not report v5\.3\.0/);
+
+  r = makeRelease({ exeContent: (a, t, v) => (t.arch === '386' ? `#!/bin/sh\n# stamped ${v}\nexit 3\n` : fakeExe((x) => x)(a, t, v)) });
+  res = windowsSmoke(r, asWindows(r));
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /crypto-sensor -version failed/);
+});
 
 // --- nightly retention (dry run) -------------------------------------------
 

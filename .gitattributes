@@ -1,0 +1,2 @@
+# Bash reads a CR as part of the command: a checkout under Windows keeps LF.
+*.sh text eol=lf

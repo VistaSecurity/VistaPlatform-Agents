@@ -99,6 +99,7 @@ import { fileURLToPath } from 'node:url';
 export const HOSTED_LABELS = new Set([
   'ubuntu-24.04', 'ubuntu-24.04-arm',
   'macos-15', 'macos-15-intel',
+  'windows-2025',
 ]);
 
 export const FORBIDDEN_TRIGGERS = ['pull_request_target', 'workflow_run'];
