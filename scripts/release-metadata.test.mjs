@@ -77,18 +77,21 @@ function downloadRow(notes, file) {
 test('runtime_qualified is true exactly for what the smoke legs executed', () => {
   const q = release().agents.flatMap((a) => a.artifacts.filter((x) => x.runtime_qualified).map((x) => x.file)).sort();
   assert.deepEqual(q, [
-    'install-device-agent-macos.sh', 'install-device-agent.sh', 'install-sensor-macos.sh', 'install-sensor.sh',
+    'install-device-agent-macos.sh', 'install-device-agent.ps1', 'install-device-agent.sh', 'install-sensor-macos.sh', 'install-sensor.ps1', 'install-sensor.sh',
     'vista-device-agent_5.3.0_darwin_amd64', 'vista-device-agent_5.3.0_darwin_amd64.tar.gz',
     'vista-device-agent_5.3.0_darwin_arm64', 'vista-device-agent_5.3.0_darwin_arm64.tar.gz',
     'vista-device-agent_5.3.0_linux_amd64', 'vista-device-agent_5.3.0_linux_amd64.tar.gz',
     'vista-device-agent_5.3.0_linux_arm64', 'vista-device-agent_5.3.0_linux_arm64.tar.gz',
+    'vista-device-agent_5.3.0_windows_amd64.exe', 'vista-device-agent_5.3.0_windows_amd64.zip',
     'vista-sensor_5.3.0_darwin_amd64', 'vista-sensor_5.3.0_darwin_amd64.tar.gz',
     'vista-sensor_5.3.0_darwin_arm64', 'vista-sensor_5.3.0_darwin_arm64.tar.gz',
     'vista-sensor_5.3.0_linux_amd64', 'vista-sensor_5.3.0_linux_amd64.tar.gz',
     'vista-sensor_5.3.0_linux_arm64', 'vista-sensor_5.3.0_linux_arm64.tar.gz',
+    'vista-sensor_5.3.0_windows_amd64.exe', 'vista-sensor_5.3.0_windows_amd64.zip',
   ]);
-  // Windows has no smoke leg: every Windows artefact stays compile-only.
-  assert.ok(release().agents.every((a) => a.artifacts.filter((x) => x.os === 'windows').every((x) => !x.runtime_qualified)));
+  // The x86 sensor is started on the x64 runner, which is not its architecture.
+  const x86 = release().agents.flatMap((a) => a.artifacts).filter((x) => x.os === 'windows' && x.arch === '386');
+  assert.ok(x86.length > 0 && x86.every((x) => !x.runtime_qualified));
   assert.ok(release().agents.every((a) => a.artifacts.every((x) => x.native_signing === 'none')));
 });
 
@@ -120,9 +123,22 @@ test('a darwin artefact is executed only if its darwin smoke leg ran it; a missi
   assert.equal(intel[1], 'macOS Intel');
   assert.deepEqual(intel.slice(5), ['no: compile-only, not supported', 'libpcap']);
   assert.deepEqual(downloadRow(notes, 'vista-sensor_5.3.0_darwin_arm64.tar.gz').slice(5), ['yes (runtime-qualified)', 'libpcap']);
-  assert.deepEqual(downloadRow(notes, 'vista-device-agent_5.3.0_windows_amd64.zip').slice(5), ['no: compile-only, not supported', 'nothing']);
   const missing = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'darwin' && leg.arch === 'arm64' ? null : ex) });
   assert.ok(missing.errors.some((e) => e.includes('smoke result for darwin/arm64 is missing')), missing.errors.join('\n'));
+});
+
+test('a Windows artefact is executed only if the Windows leg ran it; a missing leg fails; a leg cannot qualify x86', () => {
+  const partial = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'windows' ? ex.filter((f) => !f.startsWith('vista-sensor_')) : ex) });
+  assert.deepEqual(partial.errors, []);
+  const m = JSON.parse(readFileSync(path.join(partial.assets, 'agents-release.json'), 'utf8'));
+  const art = (f) => m.agents.flatMap((a) => a.artifacts).find((x) => x.file === f);
+  assert.equal(art('vista-sensor_5.3.0_windows_amd64.exe').runtime_qualified, false);
+  assert.equal(art('vista-device-agent_5.3.0_windows_amd64.exe').runtime_qualified, true);
+  assert.deepEqual(downloadRow(releaseNotes(m), 'vista-sensor_5.3.0_windows_amd64.zip').slice(5), ['no: compile-only, not supported', 'npcap']);
+  const missing = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'windows' ? null : ex) });
+  assert.ok(missing.errors.some((e) => e.includes('smoke result for windows/amd64 is missing')), missing.errors.join('\n'));
+  const claimed = makeRelease({ smokeExecuted: (leg, ex) => (leg.os === 'windows' ? [...ex, 'vista-sensor_5.3.0_windows_386.exe'] : ex) });
+  assert.ok(claimed.errors.some((e) => e.includes("vista-sensor_5.3.0_windows_386.exe is not of this leg's architecture")), (claimed.errors || []).join('\n'));
 });
 
 test('release notes say what the metadata says: executed or compile-only, the exact signer, no native signing', () => {
@@ -134,6 +150,11 @@ test('release notes say what the metadata says: executed or compile-only, the ex
     'vista-device-agent_5.3.0_darwin_amd64.tar.gz', 'vista-device-agent_5.3.0_darwin_arm64.tar.gz']) {
     assert.equal(downloadRow(notes, f)[5], 'yes (runtime-qualified)', f);
   }
+  // Windows: the agent ran in full, the sensor without Npcap, x86 not at all as far as a claim goes.
+  assert.deepEqual(downloadRow(notes, 'vista-device-agent_5.3.0_windows_amd64.zip').slice(5), ['yes (runtime-qualified)', 'nothing']);
+  assert.deepEqual(downloadRow(notes, 'vista-sensor_5.3.0_windows_amd64.zip').slice(5), ['yes (runtime-qualified), started without Npcap: capture library not loaded', 'npcap']);
+  assert.match(notes, /nothing on that runner loaded Npcap or captured a packet/);
+  assert.match(notes, /under WoW64 as an extra check; that is not a machine of its architecture, so it stays compile-only/);
   assert.ok(notes.includes(`| Sensor | Windows x86 (32-bit) | [\`vista-sensor_5.3.0_windows_386.zip\`](${dl}/vista-sensor_5.3.0_windows_386.zip) | [\`vista-sensor_5.3.0_windows_386.exe\`](${dl}/vista-sensor_5.3.0_windows_386.exe) | [\`install-sensor.ps1\`](${dl}/install-sensor.ps1) | no: compile-only, not supported | npcap |`), notes);
   assert.ok(notes.includes("--certificate-identity 'https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/v5.3.0'"));
   assert.match(notes, /not Authenticode-signed/);
@@ -317,6 +338,15 @@ test('build-agents.yml builds exactly the targets in release/agents.json, on the
   const smokeWant = surface.smoke.map((s) => `${s.os}/${s.arch} ${s.runner}`).sort();
   const smokeGot = wf('build-agents.yml').jobs.smoke.strategy.matrix.include.map((m) => `${m.os}/${m.arch} ${m.runner}`).sort();
   assert.deepEqual(smokeGot, smokeWant);
+});
+
+// The two lists above can shrink together, so each is also held to the targets:
+// a system the release ships has a leg, and Windows has exactly this one.
+test('every OS the release builds for has a smoke leg; the x86 sensor is started, never a leg of its own', () => {
+  const surface = loadSurface();
+  const legs = surface.smoke.map((s) => s.os);
+  for (const a of surface.agents) for (const t of a.targets) assert.ok(legs.includes(t.os), `${t.os} has no smoke leg`);
+  assert.deepEqual(surface.smoke.filter((s) => s.os === 'windows'), [{ os: 'windows', arch: 'amd64', runner: 'windows-2025', also_started: ['386'] }]);
 });
 
 test('the sensor is CGO exactly where it links libpcap; the device agent never is', () => {

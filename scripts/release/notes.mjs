@@ -43,7 +43,10 @@ export function downloadTable(meta) {
       const bin = a.artifacts.find((x) => x.type === 'binary' && x.os === p.os && x.arch === p.arch);
       const inst = a.artifacts.find((x) => x.type === 'installer' && x.os === p.os);
       const system = `${OS_NAMES[p.os] || p.os} ${(ARCH_NAMES[p.os] || {})[p.arch] || p.arch}`;
-      const executed = (bin || p).runtime_qualified ? 'yes (runtime-qualified)' : 'no: compile-only, not supported';
+      const art = bin || p;
+      // smoke.sh fails when it finds Npcap, so an executed npcap build ran without it.
+      const executed = !art.runtime_qualified ? 'no: compile-only, not supported'
+        : art.requires.includes('npcap') ? 'yes (runtime-qualified), started without Npcap: capture library not loaded' : 'yes (runtime-qualified)';
       lines.push(`| ${AGENT_NAMES[a.kind] || a.kind} | ${system} | ${link(p)} | ${bin ? link(bin) : ''} | ${inst ? link(inst) : 'none'} | ${executed} | ${(bin || p).requires.join(', ') || 'nothing'} |`);
     }
   }
@@ -70,6 +73,10 @@ export function releaseNotes(meta) {
     `\`${meta.initial_record.record_id}\`, in which every platform claim is **pending**. ` +
     'A platform release offers these agents only after a later, separately signed record says **tested** for its exact version and edition.');
   lines.push('', 'Each binary has a CycloneDX SBOM (`<binary>.cdx.json`). "Executed" means this release\'s workflow ran that build on a GitHub-hosted runner of its system; a compile-only build is published but not supported.');
+  lines.push('', '**Windows in this run:** the Windows leg is a hosted Windows Server x64 runner with no Npcap. ' +
+    'The device agent ran `-version` and `install-device-agent.ps1 -CheckDependencies`. ' +
+    'The x64 sensor started and reported its version without loading Npcap, and `install-sensor.ps1` stopped at its Npcap check as it should on such a host; nothing on that runner loaded Npcap or captured a packet. ' +
+    'The x86 sensor was started on the same runner under WoW64 as an extra check; that is not a machine of its architecture, so it stays compile-only.');
   lines.push('', '**Native code signing:** Windows binaries are not Authenticode-signed and macOS binaries are not notarized. The Sigstore signatures below prove origin; they do not satisfy Windows SmartScreen or macOS Gatekeeper.');
   lines.push('', '**Packet capture:** the sensor uses the host\'s libpcap on Linux and macOS. On Windows it needs Npcap, which you install yourself from https://npcap.com under its own licence (the free licence covers up to five systems); it is never bundled.');
   const re = identityRegexps(slug);
