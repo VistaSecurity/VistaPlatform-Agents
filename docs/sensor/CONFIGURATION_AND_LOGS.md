@@ -15,7 +15,7 @@ This document describes where the Crypto Inventory Network Sensor stores its con
 **Example locations by OS**:
 
 - **Windows**: `C:\Users\{username}\AppData\Local\CryptoSensor\sensor-config.yaml`
-- **Linux**: `/var/lib/crypto-sensor/sensor-config.yaml`
+- **Linux**: `/var/lib/vista-sensor/sensor-config.yaml` (`/var/lib/crypto-sensor/` if only that exists); installed with `install-sensor.sh`, `/opt/vista-sensor/sensor-config.yaml`
 - **macOS**: `~/Library/Application Support/CryptoSensor/sensor-config.yaml`
 
 **Contents**:
@@ -146,7 +146,7 @@ The sensor reads configuration in the following order (highest to lowest priorit
 
 ### Linux
 
-**Default Path**: `/var/lib/crypto-sensor`
+**Default Path**: `/var/lib/vista-sensor` (`/var/lib/crypto-sensor` if only that exists)
 
 **Why this location**:
 
@@ -214,7 +214,7 @@ These certificates enable mTLS (mutual TLS) authentication between the sensor an
 
    ```bash
    # Linux
-   cd /var/lib/crypto-sensor
+   cd /var/lib/vista-sensor
    
    # macOS
    cd ~/Library/Application\ Support/CryptoSensor

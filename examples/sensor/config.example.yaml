@@ -7,7 +7,7 @@ storage:
   maxStorageSize: 104857600    # 100 MB
   rotationSize: 10485760       # 10 MB
   retentionDays: 7
-  dataPath: "/var/lib/crypto-sensor"
+  dataPath: "/var/lib/vista-sensor"
 
   # encryptionKey: AES encryption key for local discovery storage.
   # Provide a 64-character hex string (= 32 bytes, AES-256). Leave blank to

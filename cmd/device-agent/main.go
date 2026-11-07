@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentservice"
 	"github.com/vistasecurity/vistaplatform-agents/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
+	sharedconfig "github.com/vistasecurity/vistaplatform-agents/shared/config"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 	"golang.org/x/term"
@@ -1589,6 +1590,6 @@ func getDefaultDataPath() string {
 		}
 		return "/tmp/crypto-device-agent"
 	default:
-		return "/var/lib/crypto-device-agent"
+		return sharedconfig.LinuxDataPath("/var/lib/vista-device-agent", "/var/lib/crypto-device-agent")
 	}
 }

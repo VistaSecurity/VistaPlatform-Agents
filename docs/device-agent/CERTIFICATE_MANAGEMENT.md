@@ -38,7 +38,7 @@ After successful registration, certificates are automatically saved to disk:
 **Platform-Specific Data Paths:**
 - **Windows:** `%LOCALAPPDATA%\CryptoDeviceAgent\` (typically `C:\Users\<username>\AppData\Local\CryptoDeviceAgent\`)
 - **macOS:** `~/Library/Application Support/CryptoDeviceAgent/`
-- **Linux:** `/var/lib/crypto-device-agent/`
+- **Linux:** `/var/lib/vista-device-agent/` (`/var/lib/crypto-device-agent/` if only that exists); installed with `install-device-agent.sh`, `/opt/vista-device-agent/data/`
 
 ### 3. Subsequent Startups
 
@@ -91,7 +91,7 @@ Authentication: mTLS Certificate
 platform_url: "http://192.0.2.10:8080"
 registration_key: "REG-abc-123-xyz"
 poll_interval: 30s
-data_path: "/var/lib/crypto-device-agent"
+data_path: "/var/lib/vista-device-agent"
 ```
 
 ### After Registration
@@ -100,17 +100,17 @@ platform_url: "http://192.0.2.10:8080"
 agent_id: "550e8400-e29b-41d4-a716-446655440000"
 registration_key: "REG-abc-123-xyz"
 poll_interval: 30s
-data_path: "/var/lib/crypto-device-agent"
+data_path: "/var/lib/vista-device-agent"
 
 # mTLS Certificate Configuration (auto-generated after registration)
 security:
-  client_cert_path: "/var/lib/crypto-device-agent/certs/client.crt"  # Unix/Linux/macOS
+  client_cert_path: "/var/lib/vista-device-agent/certs/client.crt"  # Unix/Linux/macOS
   # OR on Windows:
   # client_cert_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\client.crt"
-  client_key_path: "/var/lib/crypto-device-agent/certs/client.key"
+  client_key_path: "/var/lib/vista-device-agent/certs/client.key"
   # OR on Windows:
   # client_key_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\client.key"
-  server_ca_cert_path: "/var/lib/crypto-device-agent/certs/ca.crt"
+  server_ca_cert_path: "/var/lib/vista-device-agent/certs/ca.crt"
   # OR on Windows:
   # server_ca_cert_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\ca.crt"
   use_tls: true
@@ -275,13 +275,13 @@ Preferred method - all settings in one YAML file:
 agent_id: "550e8400-e29b-41d4-a716-446655440000"
 platform_url: "http://192.0.2.10:8080"
 poll_interval: 30s
-data_path: "/var/lib/crypto-device-agent"
+data_path: "/var/lib/vista-device-agent"
 verbose: false
 
 security:
-  client_cert_path: "/var/lib/crypto-device-agent/certs/client.crt"
-  client_key_path: "/var/lib/crypto-device-agent/certs/client.key"
-  server_ca_cert_path: "/var/lib/crypto-device-agent/certs/ca.crt"
+  client_cert_path: "/var/lib/vista-device-agent/certs/client.crt"
+  client_key_path: "/var/lib/vista-device-agent/certs/client.key"
+  server_ca_cert_path: "/var/lib/vista-device-agent/certs/ca.crt"
   use_tls: true
 ```
 

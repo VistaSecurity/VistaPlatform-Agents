@@ -64,3 +64,16 @@ func GetEnvAsDuration(key string, fallback time.Duration) time.Duration {
 	}
 	return fallback
 }
+
+// LinuxDataPath returns an agent's default data directory on Linux: current,
+// unless only legacy exists, because an install made before the rename keeps
+// its data there and must go on finding it.
+func LinuxDataPath(current, legacy string) string {
+	if _, err := os.Stat(current); err == nil {
+		return current
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return current
+}

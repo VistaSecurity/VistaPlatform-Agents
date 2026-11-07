@@ -5,6 +5,8 @@
 
 set -e
 
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
 # Default values
 CONTROL_PLANE_URL="https://app.vistasecurity.io"
 # The key may come from the environment so it stays out of the process list.
@@ -12,8 +14,18 @@ REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 SENSOR_NAME=""
 INTERFACES=""
 PROFILE="datacenter_host"
-INSTALL_DIR="/opt/crypto-sensor"
-SERVICE_USER="crypto-sensor"
+INSTALL_DIR="/opt/vista-sensor"
+DIR_GIVEN=false
+SERVICE_NAME="vista-sensor"
+SERVICE_USER="vista-sensor"
+UNIT_DIR="/etc/systemd/system"
+CONFIG_NAME="sensor-config.yaml"
+INSTALLED_BINARY="vista-sensor"
+# What earlier releases called them. See migrate_legacy_install.
+LEGACY_NAME="crypto-sensor"
+LEGACY_DEFAULT_DIR="/opt/crypto-sensor"
+LEGACY_BINARY="crypto-sensor"
+MIGRATION_STEP=""
 VERBOSE=false
 EXPECTED_IP=""
 CA_FINGERPRINT=""
@@ -72,7 +84,8 @@ Usage: $0 [options]
 
 Options:
     -u, --url URL              Control plane URL (default: $CONTROL_PLANE_URL)
-    -k, --key KEY              Registration key (required). A key on the command line is
+    -k, --key KEY              Registration key (required unless this host is already
+                               enrolled). A key on the command line is
                                visible to other users in the process list; prefer one of:
     --key-stdin                Read the key from the first line of standard input
                                (VISTA_REGISTRATION_KEY=... in the environment also works)
@@ -81,7 +94,8 @@ Options:
     -p, --profile PROFILE      Deployment profile (default: $PROFILE; not yet applied —
                                the sensor registers as datacenter_host)
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
-    --ip IP_ADDRESS            Expected IP address for validation (required)
+    --ip IP_ADDRESS            Expected IP address for validation (required on a first
+                               install; a re-run reuses the address in the service)
     --ca-fingerprint SHA256    Expected SHA-256 fingerprint of the platform's CA, for a
                                platform whose certificate this host does not already trust
     --interactive              Run in interactive mode (ask for all settings)
@@ -91,6 +105,9 @@ Options:
 
 Run it from the directory holding the downloaded sensor: the contents of the
 .tar.gz archive (./crypto-sensor), or the loose vista-sensor_<version>_linux_<arch>.
+Re-running it keeps an enrolled sensor's identity and replaces the binary, which
+is how to upgrade it; a host installed under the old crypto-sensor names moves to
+the vista-sensor names on the way, with no new key.
 
 Examples:
     # Interactive installation (recommended)
@@ -150,6 +167,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--dir)
             INSTALL_DIR="$2"
+            DIR_GIVEN=true
             shift 2
             ;;
         --ip)
@@ -183,6 +201,224 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Prints the value of a top-level `key: value` line in the sensor config, with
+# optional surrounding double quotes removed (the sensor writes sensorId quoted
+# and controlPlaneUrl bare).
+read_config_value() {
+    sed -n "s/^$1:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" "$2" 2>/dev/null | head -1
+}
+
+# Prints the SHA-256 (hex) of its argument.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | cut -d' ' -f1
+    else
+        printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
+    fi
+}
+
+# True when the config at $1 records that this host enrolled with registration
+# key $2: either the key itself (a config written before the sensor stopped
+# keeping it) or its SHA-256 fingerprint, which is all it keeps once the
+# platform has issued the per-sensor secret that replaced it.
+enrolled_with_key() {
+    [[ "$(read_config_value registrationKey "$1")" == "$2" ]] && return 0
+    [[ "$(read_config_value registrationKeySha256 "$1")" == "$(sha256_of "$2")" ]]
+}
+
+# Creates the service user if it does not exist.
+create_service_user() {
+    print_status "Creating service user: $SERVICE_USER"
+    if ! id "$SERVICE_USER" &>/dev/null; then
+        useradd -r -s /bin/false -d "$INSTALL_DIR" "$SERVICE_USER"
+        print_status "Service user created"
+    else
+        print_status "Service user already exists"
+    fi
+}
+
+# --- shared Linux migration functions (begin) ---
+# This block is byte-identical in install-sensor.sh and install-device-agent.sh;
+# scripts/install-linux-migration.test.mjs holds them equal.
+#
+# Earlier releases installed under the crypto-* names. Re-running the installer
+# moves such a host to the Vista names and keeps its enrollment. Each step checks
+# what is on disk rather than assuming the one before it ran, so a run that
+# stopped part-way is finished by running the installer again.
+
+# Prints the value of a `Name=value` line in a systemd unit.
+unit_value() {
+    sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1
+}
+
+# Works out where this host's install is. Sets LEGACY_DIR, LEGACY_UNIT, NEW_UNIT,
+# CONFIG_FILE and EXISTING_CONFIG, and INSTALL_DIR unless --dir chose it. Changes
+# nothing. A directory an operator chose stays where it is.
+locate_install() {
+    local current
+    INSTALL_DIR=${INSTALL_DIR%/}
+    LEGACY_UNIT="$UNIT_DIR/$LEGACY_NAME.service"
+    NEW_UNIT="$UNIT_DIR/$SERVICE_NAME.service"
+    LEGACY_DIR=$(unit_value WorkingDirectory "$LEGACY_UNIT")
+    LEGACY_DIR=${LEGACY_DIR:-$LEGACY_DEFAULT_DIR}
+    if [[ "$DIR_GIVEN" != "true" ]]; then
+        current=$(unit_value WorkingDirectory "$NEW_UNIT")
+        if [[ -n "$current" ]]; then
+            INSTALL_DIR=$current
+        elif [[ "$LEGACY_DIR" != "$LEGACY_DEFAULT_DIR" ]]; then
+            INSTALL_DIR=$LEGACY_DIR
+        fi
+    fi
+    CONFIG_FILE="$INSTALL_DIR/$CONFIG_NAME"
+    EXISTING_CONFIG=$CONFIG_FILE
+    if [[ ! -f "$CONFIG_FILE" && -f "$LEGACY_DIR/$CONFIG_NAME" ]]; then
+        EXISTING_CONFIG="$LEGACY_DIR/$CONFIG_NAME"
+    fi
+}
+
+# Replaces directory $2 with $3 in the config at $1, as a whole path component:
+# /opt/name-backup is another directory. Fails rather than start a service on a
+# config that still names a directory that has gone.
+rewrite_config_paths() {
+    local config=$1 old=$2 new=$3 escaped replacement pattern before after
+    if [[ "$old" == "$new" || ! -f "$config" ]]; then
+        return 0
+    fi
+    escaped=$(printf '%s' "$old" | sed 's/[][\.*^$+?(){}|#]/\\&/g')
+    replacement=$(printf '%s' "$new" | sed 's/[&#\]/\\&/g')
+    pattern="(^|[^[:alnum:]_./-])$escaped(/|[^[:alnum:]_./-]|\$)"
+    before=$(grep -cE "$pattern" "$config" || true)
+    if [[ "$before" -eq 0 ]]; then
+        return 0
+    fi
+    sed -i -E "s#$pattern#\\1$replacement\\2#g" "$config"
+    after=$(grep -cE "$pattern" "$config" || true)
+    if [[ "$after" -ne 0 ]] || ! grep -qF "$new" "$config"; then
+        print_error "Could not rewrite $old to $new in $config ($after of $before lines still name it)."
+        print_error "Edit those lines by hand so they name $new, then run this installer again."
+        return 1
+    fi
+    print_status "Updated $before line(s) of $config to name $new."
+}
+
+# Moves LEGACY_DIR to INSTALL_DIR. A rename cannot be left half done; across
+# filesystems the copy appears under its final name only once it is complete, and
+# the original goes only after that.
+move_legacy_dir() {
+    local parent staging="$INSTALL_DIR.migrating"
+    parent=$(dirname "$INSTALL_DIR")
+    mkdir -p "$parent"
+    if [[ -d "$INSTALL_DIR" ]]; then
+        rmdir "$INSTALL_DIR"
+    fi
+    if [[ "$(stat -c %d "$LEGACY_DIR")" == "$(stat -c %d "$parent")" ]]; then
+        mv -T "$LEGACY_DIR" "$INSTALL_DIR"
+    else
+        rm -rf "$staging"
+        cp -a "$LEGACY_DIR" "$staging"
+        mv -T "$staging" "$INSTALL_DIR"
+        rm -rf "$LEGACY_DIR"
+    fi
+    print_status "Moved $LEGACY_DIR to $INSTALL_DIR"
+}
+
+# Removes the old service user once nothing runs as it. Never `userdel -r`: its
+# home directory is the install directory.
+remove_legacy_user() {
+    local found=0
+    if ! id "$LEGACY_NAME" &>/dev/null; then
+        return 0
+    fi
+    pgrep -u "$LEGACY_NAME" >/dev/null 2>&1 || found=$?
+    if [[ "$found" -ne 1 ]]; then
+        print_warning "Left user $LEGACY_NAME in place: a process may still run as it. Run this installer again once none does, or: userdel $LEGACY_NAME"
+        return 0
+    fi
+    if ! userdel "$LEGACY_NAME"; then
+        print_warning "Could not remove user $LEGACY_NAME; nothing depends on it. Remove it with: userdel $LEGACY_NAME"
+        return 0
+    fi
+    if getent group "$LEGACY_NAME" >/dev/null 2>&1; then
+        groupdel "$LEGACY_NAME" 2>/dev/null || true
+    fi
+    print_status "Removed user $LEGACY_NAME"
+}
+
+# Says what to do when the run ends with an install taken apart.
+migration_exit() {
+    local status=$?
+    if [[ "$status" -eq 0 || -z "$MIGRATION_STEP" ]]; then
+        return 0
+    fi
+    print_error "The move from $LEGACY_NAME to $SERVICE_NAME stopped while $MIGRATION_STEP; the service is not running."
+    print_error "Its configuration, certificates and data are in $( [[ -f "$CONFIG_FILE" ]] && echo "$INSTALL_DIR" || echo "$LEGACY_DIR" )."
+    print_status "Fix the cause above, then run this installer again with the same options: it carries on from here, and a host that is already enrolled needs no key."
+}
+
+# Takes a legacy install apart and leaves INSTALL_DIR holding what it held, for
+# the normal install path to finish. Does nothing on a host without one.
+migrate_legacy_install() {
+    local move=false keep_dir=false
+    if [[ ! -f "$LEGACY_UNIT" && ! -d "$LEGACY_DIR" ]]; then
+        # An earlier run may have stopped just after the move.
+        rewrite_config_paths "$CONFIG_FILE" "$LEGACY_DIR" "$INSTALL_DIR"
+        remove_legacy_user
+        return 0
+    fi
+    if [[ -d "$LEGACY_DIR" && "$LEGACY_DIR" != "$INSTALL_DIR" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            keep_dir=true
+        elif [[ -e "$INSTALL_DIR" && ( ! -d "$INSTALL_DIR" || -n "$(ls -A "$INSTALL_DIR")" ) ]]; then
+            print_error "$INSTALL_DIR already exists and is not empty, so $LEGACY_DIR cannot move there. Nothing was changed."
+            print_error "Empty it, or choose another directory with --dir."
+            exit 1
+        else
+            move=true
+        fi
+    fi
+
+    print_status "Moving this host from $LEGACY_NAME to $SERVICE_NAME; its enrollment is kept."
+    trap migration_exit EXIT
+    if [[ -f "$LEGACY_UNIT" ]]; then
+        MIGRATION_STEP="stopping $LEGACY_NAME.service"
+        systemctl stop "$LEGACY_NAME.service" 2>/dev/null || true
+        if systemctl is-active --quiet "$LEGACY_NAME.service"; then
+            MIGRATION_STEP=""
+            print_error "$LEGACY_NAME.service did not stop; nothing else was changed. Stop it, then run this installer again."
+            exit 1
+        fi
+        systemctl disable "$LEGACY_NAME.service" 2>/dev/null || true
+    fi
+    if [[ "$move" == "true" ]]; then
+        MIGRATION_STEP="moving $LEGACY_DIR to $INSTALL_DIR"
+        move_legacy_dir
+    fi
+    MIGRATION_STEP="rewriting the paths in $CONFIG_FILE"
+    rewrite_config_paths "$CONFIG_FILE" "$LEGACY_DIR" "$INSTALL_DIR"
+
+    MIGRATION_STEP="handing $INSTALL_DIR to user $SERVICE_USER"
+    create_service_user
+    if [[ -d "$INSTALL_DIR" ]]; then
+        chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+    fi
+
+    MIGRATION_STEP="removing $LEGACY_NAME.service"
+    if [[ -d "$LEGACY_UNIT.d" ]]; then
+        rm -rf "$NEW_UNIT.d"
+        mv -T "$LEGACY_UNIT.d" "$NEW_UNIT.d"
+        print_warning "Kept the local overrides in $NEW_UNIT.d; check them for the old names."
+    fi
+    rm -f "$LEGACY_UNIT"
+    systemctl daemon-reload
+    if [[ "$keep_dir" == "true" ]]; then
+        print_warning "$CONFIG_FILE already exists, so $LEGACY_DIR was not moved and its contents were not used. Remove it, and user $LEGACY_NAME, once you no longer need them."
+    else
+        remove_legacy_user
+    fi
+    MIGRATION_STEP="installing $SERVICE_NAME.service"
+}
+# --- shared Linux migration functions (end) ---
 
 # Finds the binary to install and sets BINARY: ./$1 (its name in the release
 # archive), else the one loose release file for this host,
@@ -273,7 +509,12 @@ run_interactive_mode() {
 
     # Get registration key - required for sensor authentication
     # Format: REG-{tenant_id}-{timestamp}-{checksum}
-    while [[ -z "$REGISTRATION_KEY" ]]; do
+    # An existing install may already be enrolled and need none.
+    if [[ -z "$REGISTRATION_KEY" && -f "$EXISTING_CONFIG" ]]; then
+        read -r -s -p "Enter registration key (leave empty to keep this host's enrolment): " REGISTRATION_KEY
+        echo ""
+    fi
+    while [[ -z "$REGISTRATION_KEY" && ! -f "$EXISTING_CONFIG" ]]; do
         read -r -s -p "Enter registration key: " REGISTRATION_KEY
         echo ""
         if [[ -z "$REGISTRATION_KEY" ]]; then
@@ -353,6 +594,7 @@ run_interactive_mode() {
     read -p "Enter installation directory (default: $INSTALL_DIR): " INSTALL_DIR_INPUT
     if [[ -n "$INSTALL_DIR_INPUT" ]]; then
         INSTALL_DIR="$INSTALL_DIR_INPUT"
+        DIR_GIVEN=true
     fi
 
     # Show configuration summary
@@ -393,13 +635,22 @@ run_interactive_mode() {
 # Fail before prompts, installation side effects or control-plane registration.
 check_sensor_dependencies
 
+locate_install
+if [[ -z "$EXPECTED_IP" ]]; then
+    # A re-run reuses the address the service was installed with.
+    EXPECTED_IP=$(unit_value Environment=SENSOR_IP_ADDRESS "$NEW_UNIT")
+    EXPECTED_IP=${EXPECTED_IP:-$(unit_value Environment=SENSOR_IP_ADDRESS "$LEGACY_UNIT")}
+fi
+
 if [[ "$INTERACTIVE" == "true" ]]; then
     run_interactive_mode
+    locate_install
 fi
 
 # Validate required parameters (skip if interactive mode already handled)
 if [[ "$INTERACTIVE" != "true" ]]; then
-    if [[ -z "$REGISTRATION_KEY" ]]; then
+    # An existing install may be enrolled already; that is checked as root below.
+    if [[ -z "$REGISTRATION_KEY" && ! -f "$EXISTING_CONFIG" ]]; then
         print_error "Registration key is required"
         show_usage
         exit 1
@@ -415,6 +666,13 @@ fi
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
     print_error "This script must be run as root (use sudo)"
+    exit 1
+fi
+
+# Nothing has changed yet. Without a key, only an enrolled host can go on.
+if [[ -z "$REGISTRATION_KEY" ]] \
+    && ! [[ "$(read_config_value sensorId "$EXISTING_CONFIG")" =~ $UUID_RE ]]; then
+    print_error "Registration key is required: $EXISTING_CONFIG does not record an enrolled sensor."
     exit 1
 fi
 
@@ -475,14 +733,9 @@ if ! ip addr show | grep -q "$EXPECTED_IP"; then
 fi
 print_status "✅ IP address validation passed"
 
-# Step 2: Create service user
-print_status "Creating service user: $SERVICE_USER"
-if ! id "$SERVICE_USER" &>/dev/null; then
-    useradd -r -s /bin/false -d "$INSTALL_DIR" "$SERVICE_USER"
-    print_status "Service user created"
-else
-    print_status "Service user already exists"
-fi
+# Step 2: Move an install made under the old names, then create the service user
+migrate_legacy_install
+create_service_user
 
 # Step 3: Create installation directory
 print_status "Creating installation directory: $INSTALL_DIR"
@@ -490,55 +743,30 @@ mkdir -p "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/data"
 mkdir -p "$INSTALL_DIR/logs"
 
-CONFIG_FILE="$INSTALL_DIR/sensor-config.yaml"
-UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-
-# Prints the value of a top-level `key: value` line in the sensor config, with
-# optional surrounding double quotes removed (the sensor writes sensorId quoted
-# and controlPlaneUrl bare).
-read_config_value() {
-    sed -n "s/^$1:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" "$2" 2>/dev/null | head -1
-}
-
-# Prints the SHA-256 (hex) of its argument.
-sha256_of() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        printf '%s' "$1" | sha256sum | cut -d' ' -f1
-    else
-        printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
-    fi
-}
-
-# True when the config at $1 records that this host enrolled with registration
-# key $2: either the key itself (a config written before the sensor stopped
-# keeping it) or its SHA-256 fingerprint, which is all it keeps once the
-# platform has issued the per-sensor secret that replaced it (#2437).
-enrolled_with_key() {
-    [[ "$(read_config_value registrationKey "$1")" == "$2" ]] && return 0
-    [[ "$(read_config_value registrationKeySha256 "$1")" == "$(sha256_of "$2")" ]]
-}
-
-# A host this key already enrolled keeps its identity. Re-running the same
-# install command (to upgrade the binary, or by mistake) must not discard the
-# certificate and UUID the sensor holds and send it back to register with a key
-# it has already spent. A different key means the operator wants a fresh
-# enrolment, and gets one.
+# A host this key already enrolled keeps its identity, and so does one re-run
+# with no key at all. Re-running the install (to upgrade the binary, or by
+# mistake) must not discard the certificate and UUID the sensor holds and send
+# it back to register with a key it has already spent. A different key means the
+# operator wants a fresh enrolment, and gets one.
 KEEP_ENROLMENT=false
 if [[ -f "$CONFIG_FILE" ]] \
     && [[ "$(read_config_value sensorId "$CONFIG_FILE")" =~ $UUID_RE ]] \
-    && enrolled_with_key "$CONFIG_FILE" "$REGISTRATION_KEY"; then
+    && { [[ -z "$REGISTRATION_KEY" ]] || enrolled_with_key "$CONFIG_FILE" "$REGISTRATION_KEY"; }; then
     KEEP_ENROLMENT=true
-    print_status "This host is already enrolled with this key (sensor $(read_config_value sensorId "$CONFIG_FILE")); keeping its identity and configuration."
+    print_status "This host is already enrolled (sensor $(read_config_value sensorId "$CONFIG_FILE")); keeping its identity and configuration."
+    # The sensor keeps talking to the platform in its config; say that one.
+    CONFIGURED_URL=$(read_config_value controlPlaneUrl "$CONFIG_FILE")
+    CONTROL_PLANE_URL=${CONFIGURED_URL:-$CONTROL_PLANE_URL}
 fi
 
 # Stop a previous install: its binary cannot be replaced while it runs ("Text
 # file busy"), and it must not rewrite the config while we replace it.
-systemctl stop crypto-sensor.service 2>/dev/null || true
+systemctl stop "$SERVICE_NAME.service" 2>/dev/null || true
 
 # Step 4: Install sensor binary
 print_status "Installing sensor binary..."
-cp "$BINARY" "$INSTALL_DIR/crypto-sensor"
-chmod +x "$INSTALL_DIR/crypto-sensor"
+cp "$BINARY" "$INSTALL_DIR/$INSTALLED_BINARY"
+chmod +x "$INSTALL_DIR/$INSTALLED_BINARY"
 print_status "Sensor binary installed"
 
 # Step 5: Create configuration file
@@ -607,15 +835,15 @@ fi
 
 # Step 6: Create systemd service
 print_status "Creating systemd service..."
-EXEC_START="$INSTALL_DIR/crypto-sensor --verbose -config $CONFIG_FILE"
+EXEC_START="$INSTALL_DIR/$INSTALLED_BINARY --verbose -config $CONFIG_FILE"
 if [[ -n "$CA_FINGERPRINT" ]]; then
     # Pins the platform's CA on first start, verified against this
     # fingerprint; ignored once a CA is in the config.
     EXEC_START+=" -ca-fingerprint $CA_FINGERPRINT"
 fi
-cat > "/etc/systemd/system/crypto-sensor.service" << EOF
+cat > "$NEW_UNIT" << EOF
 [Unit]
-Description=Crypto Inventory Network Sensor
+Description=Vista Platform Sensor
 After=network-online.target
 Wants=network-online.target
 
@@ -640,7 +868,7 @@ RestartSec=10
 RestartPreventExitStatus=78
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=crypto-sensor
+SyslogIdentifier=$SERVICE_NAME
 
 # Security settings
 NoNewPrivileges=true
@@ -668,12 +896,17 @@ chmod 600 "$CONFIG_FILE"
 # Step 8: Start the service; the sensor registers itself
 print_status "Starting the sensor; it registers itself with the control plane..."
 systemctl daemon-reload
-systemctl enable crypto-sensor.service
+systemctl enable "$SERVICE_NAME.service"
 START_EPOCH=$(date +%s)
-if ! systemctl restart crypto-sensor.service; then
+if ! systemctl restart "$SERVICE_NAME.service"; then
     print_error "Failed to start sensor service"
-    print_status "Check logs with: journalctl -u crypto-sensor -f"
+    print_status "Check logs with: journalctl -u $SERVICE_NAME -f"
     exit 1
+fi
+MIGRATION_STEP=""
+# The old binary came along with the directory.
+if [[ ! "$INSTALL_DIR/$LEGACY_BINARY" -ef "$BINARY" ]]; then
+    rm -f "$INSTALL_DIR/$LEGACY_BINARY"
 fi
 
 # Step 9: Wait for registration
@@ -691,7 +924,7 @@ while (( $(date +%s) - START_EPOCH < REGISTRATION_TIMEOUT )); do
         SENSOR_ID="$current_id"
         break
     fi
-    if journalctl -u crypto-sensor.service --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
+    if journalctl -u "$SERVICE_NAME.service" --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
         | grep -q 'Registration was REJECTED'; then
         REJECTED=true
         break
@@ -701,28 +934,28 @@ done
 
 if [[ -z "$SENSOR_ID" ]]; then
     echo ""
-    journalctl -u crypto-sensor.service --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
+    journalctl -u "$SERVICE_NAME.service" --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
         | grep -E '⛔|❌|Registration (FAILED|retry failed)' | tail -8 || true
     echo ""
     if [[ "$REJECTED" == "true" ]]; then
         # A rejected key never succeeds; stop the service rather than leave it
         # restarting every 10 seconds.
-        systemctl stop crypto-sensor.service || true
-        systemctl disable crypto-sensor.service 2>/dev/null || true
+        systemctl stop "$SERVICE_NAME.service" || true
+        systemctl disable "$SERVICE_NAME.service" 2>/dev/null || true
         print_error "The control plane REJECTED the registration key (see above): it is invalid, expired, or already used."
         print_error "Generate a new key (Discovery → Sensors & Agents → Register) and re-run this installer with it."
         print_status "The sensor service has been stopped and disabled."
     else
         print_error "The sensor did not register within ${REGISTRATION_TIMEOUT}s."
         print_status "It is still running and retrying in the background; check that $CONTROL_PLANE_URL is reachable from this host."
-        print_status "Watch it with: journalctl -u crypto-sensor -f"
+        print_status "Watch it with: journalctl -u $SERVICE_NAME -f"
     fi
     exit 1
 fi
 
-if ! systemctl is-active --quiet crypto-sensor.service; then
+if ! systemctl is-active --quiet "$SERVICE_NAME.service"; then
     print_error "❌ The sensor registered but is not running"
-    print_status "Check logs with: journalctl -u crypto-sensor -f"
+    print_status "Check logs with: journalctl -u $SERVICE_NAME -f"
     exit 1
 fi
 
@@ -734,15 +967,15 @@ echo "Sensor ID: $SENSOR_ID"
 echo "Sensor Version: $SENSOR_VERSION"
 echo "Installation Directory: $INSTALL_DIR"
 echo "Configuration: $CONFIG_FILE"
-echo "Service: crypto-sensor.service"
+echo "Service: $SERVICE_NAME.service"
 echo "Control Plane: $CONTROL_PLANE_URL"
 echo ""
 echo "📋 Management Commands:"
-echo "  Status:     systemctl status crypto-sensor"
-echo "  Logs:       journalctl -u crypto-sensor -f"
-echo "  Restart:    systemctl restart crypto-sensor"
-echo "  Stop:       systemctl stop crypto-sensor"
-echo "  Uninstall:  systemctl stop crypto-sensor && systemctl disable crypto-sensor"
+echo "  Status:     systemctl status $SERVICE_NAME"
+echo "  Logs:       journalctl -u $SERVICE_NAME -f"
+echo "  Restart:    systemctl restart $SERVICE_NAME"
+echo "  Stop:       systemctl stop $SERVICE_NAME"
+echo "  Uninstall:  systemctl stop $SERVICE_NAME && systemctl disable $SERVICE_NAME"
 echo ""
 print_status "Sensor is registered and monitoring network traffic on: $INTERFACES"
 print_status "It appears under Discovery → Sensors & Agents once its first heartbeat arrives."

@@ -21,7 +21,7 @@ import (
 //
 // That is exactly what the console's manual steps did when run as an ordinary
 // user: registration succeeded, the save failed on the root-owned default data
-// path (/var/lib/crypto-device-agent), the agent logged a WARNING and moved on,
+// path under /var/lib, the agent logged a WARNING and moved on,
 // and the run step then failed every call with "certificate signed by unknown
 // authority" — the CA had been lost with the certificate.
 //

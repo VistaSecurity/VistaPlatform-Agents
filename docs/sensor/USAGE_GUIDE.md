@@ -91,7 +91,7 @@ Sensor ID: hostname-1234567890
 Control Plane URL: http://my-control-plane:8080
 Registration Key: my***key
 Reporting Interval: 60 seconds
-Data Path: /var/lib/crypto-sensor
+Data Path: /var/lib/vista-sensor
 Selected Interfaces: [eth0]
 Test Mode: false
 
@@ -126,8 +126,8 @@ Test mode is perfect for:
 
 ```
 🧪 Running in TEST MODE - discoveries will be logged to file instead of control plane
-🧪 Test logger initialized: /var/lib/crypto-sensor/test-discoveries.log
-📝 Logged 3 discoveries to test file: /var/lib/crypto-sensor/test-discoveries.log
+🧪 Test logger initialized: /var/lib/vista-sensor/test-discoveries.log
+📝 Logged 3 discoveries to test file: /var/lib/vista-sensor/test-discoveries.log
 💓 Logged heartbeat to test file
 ```
 
@@ -180,7 +180,7 @@ Select interface(s) by number (comma-separated, e.g., 1,2 or just 1):
 
 - **Windows**: `%LOCALAPPDATA%\CryptoSensor`
 - **macOS**: `~/Library/Application Support/CryptoSensor`
-- **Linux**: `/var/lib/crypto-sensor`
+- **Linux**: `/var/lib/vista-sensor` (`/var/lib/crypto-sensor` if only that exists)
 
 ### Files Created
 
@@ -299,7 +299,7 @@ Configuration loaded:
   Control Plane URL: http://localhost:8080
   Registration Key: (empty)
   Reporting Interval: 30s
-  Data Path: /var/lib/crypto-sensor
+  Data Path: /var/lib/vista-sensor
   Interfaces: [eth0]
 🔧 Initializing sensor components...
 ✅ Sensor components initialized successfully
@@ -315,8 +315,8 @@ Configuration loaded:
 
 ```
 🧪 Running in TEST MODE - discoveries will be logged to file instead of control plane
-🧪 Test logger initialized: /var/lib/crypto-sensor/test-discoveries.log
-📝 Logged 5 discoveries to test file: /var/lib/crypto-sensor/test-discoveries.log
+🧪 Test logger initialized: /var/lib/vista-sensor/test-discoveries.log
+📝 Logged 5 discoveries to test file: /var/lib/vista-sensor/test-discoveries.log
 💓 Logged heartbeat to test file
 ```
 
