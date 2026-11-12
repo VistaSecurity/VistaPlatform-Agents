@@ -7,7 +7,7 @@
 // through pwsh: cmd/device-agent/installer_config_ps1_test.go.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -199,4 +199,102 @@ test('no state-changing native command has its exit status ignored', () => {
   });
   assert.deepEqual(unchecked, []);
   assert.ok(lines.filter((l) => /^\s*(&\s*)?(sc|icacls)(\.exe)?\s/i.test(l)).length >= 3, 'the guard matches nothing');
+});
+
+// --- No default platform, keyless upgrade, -Uninstall ------------------------
+
+const region = (name) => {
+  const start = raw.indexOf(`#region ${name}`);
+  const end = raw.indexOf(`#endregion ${name}`);
+  assert.ok(start >= 0 && end > start, `no #region ${name}`);
+  return raw.slice(start, end);
+};
+
+test('a first install without -Url says the URL is the customer\'s own console', needsPwsh, t => {
+  const r = run(t, { args: ['-Key', 'REG-x'] });
+  assert.equal(r.status, 1, r.output);
+  assert.match(r.output, /-Url is the address of your own Vista Platform console, as shown in your browser/);
+  assert.doesNotMatch(raw, /app\.vistasecurity\.io/);
+});
+
+function agentConfig(t, script, env = {}) {
+  const r = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'\n${region('agent-config')}\n${script}`],
+    { encoding: 'utf8', env: { ...process.env, ...env } });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout.trim();
+}
+
+test('an enrolled host is recognised with no key, and the keep decision uses it', needsPwsh, t => {
+  const dir = mkdtempSync(join(tmpdir(), 'device-agent-ps1-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const enrolled = join(dir, 'a.yaml');
+  writeFileSync(enrolled, 'agent_id: "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59"\nplatform_url: "https://p.example"\nregistration_key_sha256: "00"\n');
+  const pending = join(dir, 'b.yaml');
+  writeFileSync(pending, "platform_url: 'https://p.example'\nregistration_key: 'REG-x'\n");
+  assert.equal(agentConfig(t, 'Test-Enrolled $env:CFG', { CFG: enrolled }), 'True');
+  assert.equal(agentConfig(t, 'Test-Enrolled $env:CFG', { CFG: pending }), 'False');
+  assert.equal(agentConfig(t, 'Test-Enrolled $env:CFG', { CFG: join(dir, 'missing.yaml') }), 'False');
+  assert.equal(agentConfig(t, "Get-ConfigValue $env:CFG 'platform_url'", { CFG: enrolled }), 'https://p.example');
+  // The installer keeps an enrolled host's identity when it brings no key,
+  // refuses a keyless run of a host that is not enrolled, and falls back to
+  // the platform in the config.
+  assert.match(code, /\$keepEnrollment = \(\$enrolled -and \[string\]::IsNullOrWhiteSpace\(\$Key\)\) -or \(Test-EnrolledWithKey \$ConfigPath \$Key\)/);
+  assert.match(code, /if \(\[string\]::IsNullOrWhiteSpace\(\$Key\) -and -not \$enrolled\) \{/);
+  assert.match(code, /if \(\[string\]::IsNullOrWhiteSpace\(\$Url\)\) \{ \$Url = Get-ConfigValue \$ConfigPath 'platform_url' \}/);
+  assert.equal((code.match(/if \(-not \$keepEnrollment\) \{/g) || []).length, 2, 'the certificates or the config are replaced on a kept enrollment');
+});
+
+test('a CA fingerprint is normalised the way the agent compares it, and must be 64 hex digits', needsPwsh, t => {
+  const hex = 'cd'.repeat(32);
+  const conv = (v) => agentConfig(t, '$r = ConvertTo-CaFingerprint $env:FP; if ($null -eq $r) { "NULL" } else { $r }', { FP: v });
+  assert.equal(conv(`sha256:${hex.toUpperCase().match(/../g).join(':')}`), hex);
+  for (const bad of ['abc', `${hex}0`, 'g'.repeat(64)]) assert.equal(conv(bad), 'NULL', bad);
+  assert.match(code, /\$normalized = ConvertTo-CaFingerprint \$CaFingerprint/);
+});
+
+function uninstall(t, { service = false, files = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'device-agent-ps1-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const installDir = join(dir, 'VistaDeviceAgent');
+  if (files) {
+    mkdirSync(join(installDir, 'data', 'certs'), { recursive: true });
+    for (const f of files) writeFileSync(join(installDir, f), 'x');
+  }
+  const log = join(dir, 'calls.log');
+  const script = `$ErrorActionPreference = 'Stop'
+$ServiceName = 'VistaDeviceAgent'; $InstallDir = $env:DIR; $ConfigPath = Join-Path $InstallDir 'device-agent.yaml'; $InstalledBinaryName = 'device-agent.exe'
+function Write-Info { param($m) Write-Host "[INFO]  $m" }
+function Write-Warn { param($m) Write-Host "[WARN]  $m" }
+function Write-Err { param($m) Write-Host "[ERROR] $m" }
+function Assert-Administrator { Add-Content $env:LOG 'admin' }
+function Test-ServiceInstalled { param($n) $env:SERVICE -eq '1' }
+function Stop-Service { Add-Content $env:LOG 'stop' }
+function sc.exe { Add-Content $env:LOG "sc $args"; $global:LASTEXITCODE = 0 }
+${region('uninstall')}
+Invoke-Uninstall`;
+  const r = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', env: { ...process.env, DIR: installDir, LOG: log, SERVICE: service ? '1' : '0' } });
+  return { ...r, output: r.stdout + r.stderr, installDir, calls: existsSync(log) ? readFileSync(log, 'utf8') : '' };
+}
+
+test('-Uninstall stops and deletes the service and the install directory; nothing installed is not an error', needsPwsh, t => {
+  const r = uninstall(t, { service: true, files: ['device-agent.yaml', 'device-agent.exe'] });
+  assert.equal(r.status, 0, r.output);
+  assert.equal(r.calls, 'admin\nstop\nsc delete VistaDeviceAgent\n');
+  assert.ok(!existsSync(r.installDir), 'the directory with the config and private key is still there');
+  const none = uninstall(t);
+  assert.equal(none.status, 0, none.output);
+  assert.match(none.output, /Nothing to remove/);
+  const theirs = uninstall(t, { files: ['their-file'] });
+  assert.ok(existsSync(join(theirs.installDir, 'their-file')), 'a directory without an agent install was deleted');
+});
+
+test('-Uninstall needs neither a binary nor a key, and the final output gives it', needsPwsh, t => {
+  const r = run(t, { binary: null, args: ['-Uninstall'] });
+  assert.equal(r.status, 1, r.output);
+  assert.match(r.output, /Windows Principal functionality is not supported|must be run from an elevated/, r.output);
+  assert.doesNotMatch(r.output, /No device agent binary|required/);
+  assert.match(code, /Write-Host "  Uninstall: & '\$PSCommandPath' -Uninstall"/);
+  assert.doesNotMatch(code, /Uninstall: Stop-Service/);
+  assert.ok(code.indexOf('if ($Uninstall) { Invoke-Uninstall }') < code.indexOf('Find-AgentBinary $PSScriptRoot'));
 });
