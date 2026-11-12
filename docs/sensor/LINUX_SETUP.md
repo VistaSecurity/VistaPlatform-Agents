@@ -80,7 +80,7 @@ Other options:
 | `--key-stdin`, `--key KEY` | Registration key (or `VISTA_REGISTRATION_KEY`) |
 | `--ip ADDRESS` | The address the key was created for (required on a first install) |
 | `--name NAME` | Sensor name (default `sensor-<host name>-<date>`) |
-| `--interfaces LIST` | Interfaces to capture on, comma-separated, for example `eth0,eth1` (default: up to five interfaces named `eth*`, `ens*`, `enp*` or `wl*`) |
+| `--interfaces LIST` | Interfaces to capture on, comma-separated, for example `eth0,eth1` (default: the interface of the default route; without one, interfaces named `eth*`, `ens*`, `enp*`, `eno*` or `wl*`; the installer stops and asks for this option if it finds none) |
 | `--ca-fingerprint SHA256` | Pin a private platform CA (see above) |
 | `--dir DIRECTORY` | Installation directory (default `/opt/vista-sensor`) |
 | `--check-dependencies` | Check the binary loads here, then exit |
