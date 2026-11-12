@@ -57,6 +57,16 @@ test('every installer offers an uninstall and prints the real command', () => {
     assert.match(text, /Uninstall: +(sudo bash \$0 --uninstall|& '\$PSCommandPath' -Uninstall)/, `${name} does not print the uninstall command`);
     assert.doesNotMatch(text, /Uninstall: +systemctl stop|Uninstall: +Stop-Service/, `${name} prints a stop, not an uninstall`);
   }
+  // It needs root or Administrator, and nothing else: it runs before the
+  // binary is looked for or a key is asked for. (The Linux and macOS runs
+  // under test replace the root check, so this holds it in the text.)
+  for (const name of ['install-sensor.sh', 'install-device-agent.sh']) {
+    const text = read(`./${name}`);
+    const at = text.indexOf('if [[ "$UNINSTALL" == "true" ]]; then\n    require_root\n    uninstall_install\n    exit 0\nfi');
+    assert.ok(at > 0, `${name}: --uninstall does not check for root first`);
+    assert.ok(at < text.search(/^check_(sensor_dependencies|agent_binary)$/m), `${name}: --uninstall needs the binary`);
+  }
+  for (const name of PS1) assert.match(read(`./${name}`), /function Invoke-Uninstall \{\n {4}Assert-Administrator\n/, `${name}: -Uninstall does not check for Administrator first`);
 });
 
 test('the four shell installers check the CA fingerprint with one function', () => {

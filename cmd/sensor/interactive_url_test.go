@@ -27,7 +27,7 @@ func withPrompt(t *testing.T, input string, fn func()) string {
 	if _, err := io.WriteString(inW, input); err != nil {
 		t.Fatal(err)
 	}
-	inW.Close()
+	_ = inW.Close()
 
 	printed := make(chan string, 1)
 	go func() {
@@ -43,11 +43,11 @@ func withPrompt(t *testing.T, input string, fn func()) string {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		os.Stdout = oldOut
-		outW.Close()
+		_ = outW.Close()
 		t.Fatalf("setup did not return on empty input; it printed:\n%s", <-printed)
 	}
 	os.Stdout = oldOut
-	outW.Close()
+	_ = outW.Close()
 	return <-printed
 }
 
