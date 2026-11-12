@@ -19,7 +19,8 @@ Bugs and requests go to this repository's issues (see
 
 `release.yml` publishes a release for each protected `vX.Y.Z` tag (release
 candidates `vX.Y.Z-rc.N` as prereleases) and `nightly.yml` a prerelease of the
-head of `main` every night, under `nightly-YYYYMMDD-<commit>`. Both build every
+head of `main` on every push to `main` and daily (skipped when that commit
+already has one), under `nightly-YYYYMMDD-<commit>`. Both build every
 target on GitHub-hosted runners, run the Linux builds on linux/amd64 and
 linux/arm64, and publish each binary, package and installer with a Sigstore
 signature, an SBOM, `SHA256SUMS`, the release metadata `agents-release.json`
@@ -34,13 +35,32 @@ what protects them: `docs/releasing.md`.
 
 ## Installing
 
+The agents report to your own Vista Platform; there is no hosted platform and
+no default URL. To install one:
+
+1. In your Vista Platform console, open Discovery → Sensors & Agents and choose
+   **Register sensor or agent**. The dialog creates a single-use registration
+   key and prints the install commands for your system, with your platform's
+   URL (`--url`, `-Url`) and, for a platform with a private CA, its CA
+   fingerprint (`--ca-fingerprint`, `-CaFingerprint`).
+2. Download the agent for your system from the release the console names
+   (see "Which file do I need" below) and verify it
+   ([`docs/verify-release.md`](docs/verify-release.md)).
+3. Run the installer from the directory holding the downloaded files. It
+   installs the agent as a service, which registers itself with your platform.
+
 Each agent has one installer per supported system; each release archive
 carries the installer for its system.
 
 | | Linux (systemd) | macOS (launchd) | Windows (service) |
 |---|---|---|---|
-| Sensor | `install-sensor.sh` | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
-| Device agent | `install-device-agent.sh` | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
+| Sensor | `install-sensor.sh` ([guide](docs/sensor/LINUX_SETUP.md)) | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
+| Device agent | `install-device-agent.sh` ([guide](docs/device-agent/LINUX_SETUP.md)) | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
+
+To upgrade, run the new release's installer with no key: it keeps the agent's
+identity. A registration key works once; a new key registers the host as a new
+agent. Each installer removes its agent with `--uninstall` (`-Uninstall` on
+Windows).
 
 ### Linux host names
 
@@ -73,10 +93,15 @@ short, download the archive for your agent and system:
 |---|---|---|
 | Sensor | Linux x86-64 / ARM64 | `vista-sensor_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
 | Sensor | macOS Intel / Apple silicon | `vista-sensor_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
-| Sensor | Windows x64 / x86 | `vista-sensor_<version>_windows_amd64.zip` / `..._windows_386.zip` |
+| Sensor | Windows x64 | `vista-sensor_<version>_windows_amd64.zip` |
 | Device agent | Linux x86-64 / ARM64 | `vista-device-agent_<version>_linux_amd64.tar.gz` / `..._linux_arm64.tar.gz` |
 | Device agent | macOS Intel / Apple silicon | `vista-device-agent_<version>_darwin_amd64.tar.gz` / `..._darwin_arm64.tar.gz` |
 | Device agent | Windows x64 | `vista-device-agent_<version>_windows_amd64.zip` |
+
+Releases also contain a Windows x86 sensor (`..._windows_386.zip`). It is
+compile-only: built, checked and signed, but never run on its architecture in
+the release run (`runtime_qualified: false` in `agents-release.json`), and not
+supported.
 
 Each archive holds the binary, the installer for its system where there is
 one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`; run the installer from the

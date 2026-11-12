@@ -88,8 +88,7 @@ names only `kernel32.dll`, and the pcap library's `init` ignores a failed load o
 if it finds Npcap on the runner, so the release notes' "started without Npcap"
 stays true. The leg installs no third-party software: Npcap's free licence
 covers up to five systems, which a fleet of throwaway runners does not fit.
-`install-sensor.ps1` has no dependency-check switch, so the leg uses the check it
-has. Capture on Windows is proved on real hosts before a platform release.
+The leg runs the installer only as far as its Npcap check. Capture on Windows is proved on real hosts before a platform release.
 
 ## Immutability and failed runs
 
@@ -130,6 +129,30 @@ record it replaces and an opaque `qualification_ref`. On merge,
 `compatibility.yml` verifies the release in full, checks the record against
 it, signs it and attaches it. Records are append-only: a push that modifies,
 renames or deletes one fails.
+
+## Pairing a platform release
+
+The agents' version tracks the platform's, and a platform release offers only
+agents that a signed record says were tested with it. The order, as the
+platform's release process requires it:
+
+1. **Tag the agents `vX.Y.Z`** here (as in "Cutting a release"). `release.yml`
+   publishes the release with its first compatibility record,
+   `agents-X.Y.Z-c1`, in which every claim is `pending`.
+2. **The platform qualifies a candidate build** stamped exactly `X.Y.Z` against
+   these published bytes, privately.
+3. **A reviewed pull request here adds the next record**,
+   `compatibility/records/agents-X.Y.Z-c<n+1>.json` (`c2` after the first),
+   whose `supersedes` names the record it replaces and whose
+   `platform_compatibility` has a `tested` claim naming the exact platform
+   version (and edition), with its opaque `qualification_ref`.
+4. **On merge, `compatibility.yml`** verifies the release, checks the record
+   against it, signs it with its own identity and attaches it to the release.
+5. **The platform vendors the signed record and rebuilds**: the record names an
+   exact release, so the build that ships is made after the record exists.
+
+The record format and rules are in `compatibility/records/README.md`; how to
+check a record, in `docs/verify-release.md`.
 
 ## Nightly retention
 
