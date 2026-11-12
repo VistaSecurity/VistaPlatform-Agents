@@ -12,11 +12,17 @@
     the release package, or the release file
     vista-sensor_<version>_windows_<arch>.exe as downloaded.
 
+    Re-running it with no key (or with the key it enrolled with) on a host
+    whose sensor is enrolled replaces only the binary and keeps the sensor's
+    identity, configuration and certificates: that is how to upgrade it. A
+    different key enrolls it afresh.
+
 .EXAMPLE
-    .\install-sensor.ps1 -Url https://app.vistasecurity.io -KeyStdin -IP 10.0.0.10 -Name sensor-dc01
+    .\install-sensor.ps1 -Url https://vista.example.com -KeyStdin -IP 10.0.0.10 -Name sensor-dc01
 
     Prompts for the registration key, so it does not appear on the command
-    line or in the process list.
+    line or in the process list. -Url is the address of your own Vista
+    Platform console, as shown in your browser.
 
 .EXAMPLE
     $env:VISTA_REGISTRATION_KEY = "REG-..."; .\install-sensor.ps1 -Url https://vista.example.com -IP 10.0.0.10
@@ -28,18 +34,38 @@
     does not trust: the sensor pins the control plane's CA only if it has this
     SHA-256 fingerprint.
 
+.EXAMPLE
+    .\install-sensor.ps1
+
+    Upgrades an enrolled sensor in place: no key, URL or address needed.
+
+.EXAMPLE
+    .\install-sensor.ps1 -CheckDependencies
+
+    Checks that the sensor binary runs on this host and that Npcap is
+    installed, then exits. Needs neither Administrator rights nor a key.
+
+.EXAMPLE
+    .\install-sensor.ps1 -Uninstall
+
+    Stops and deletes the service and deletes the install directory, which
+    holds the configuration, certificates and private key.
+
 .NOTES
-    Must be run from an elevated (Administrator) PowerShell session.
+    Must be run from an elevated (Administrator) PowerShell session, except
+    with -CheckDependencies.
 #>
 
 [CmdletBinding()]
 param(
-    # Control plane URL the sensor registers and reports to.
-    [string]$Url = "https://app.vistasecurity.io",
+    # Address of your own Vista Platform console, as shown in your browser.
+    # Required on a first install; a re-run keeps the one in the config.
+    [string]$Url = "",
 
-    # Registration key minted in the console (REG-...). Required, from here,
-    # -KeyStdin or VISTA_REGISTRATION_KEY. A key on the command line is visible
-    # to other users in the process list; prefer the other two.
+    # Registration key minted in the console (REG-...). Required on a first
+    # install, from here, -KeyStdin or VISTA_REGISTRATION_KEY. A key on the
+    # command line is visible to other users in the process list; prefer the
+    # other two.
     [string]$Key = "",
 
     # Read the registration key from standard input (the first line) when it
@@ -50,9 +76,9 @@ param(
     # control plane whose certificate this host does not already trust.
     [string]$CaFingerprint = "",
 
-    # IP address the operator entered when registering. Required (parity with --ip).
-    [Parameter(Mandatory = $true)]
-    [string]$IP,
+    # IP address the operator entered when registering (parity with --ip).
+    # Required on a first install; a re-run reuses the service's address.
+    [string]$IP = "",
 
     # Human-readable sensor name. Defaults to the hostname + date.
     [string]$Name = "",
@@ -63,23 +89,38 @@ param(
     # adapter that is up and has an address.
     [string]$Interfaces = "",
 
-    # Deployment profile. Not surfaced in the console; datacenter_host is the
-    # full-feature default and matches install-sensor.sh.
+    # Deployment profile. Accepted but currently ignored: every sensor
+    # registers and reports the datacenter_host profile.
     [string]$Profile = "datacenter_host",
 
     # Install location. The service binPath and -config point here.
-    [string]$InstallDir = "$env:ProgramFiles\VistaSensor"
+    [string]$InstallDir = "$env:ProgramFiles\VistaSensor",
+
+    # Check that the sensor binary runs on this host and Npcap is installed,
+    # then exit.
+    [switch]$CheckDependencies,
+
+    # Stop and delete the service, and delete the install directory.
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
 $ServiceName = "VistaSensor"
 $ServiceDisplay = "Vista Platform Crypto Sensor"
+$UrlHelp = "the address of your own Vista Platform console, as shown in your browser (for example -Url https://vista.example.com)"
 
 function Write-Info  { param($m) Write-Host "[INFO]  $m" -ForegroundColor Green }
 function Write-Warn  { param($m) Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Write-Err   { param($m) Write-Host "[ERROR] $m" -ForegroundColor Red }
 
-# --- Preconditions ---------------------------------------------------------
+# --- Layout ----------------------------------------------------------------
+$CertsDir  = Join-Path $InstallDir "certs"
+$DataDir   = Join-Path $InstallDir "data"
+$ConfigPath = Join-Path $InstallDir "sensor-config.yaml"
+# The sensor writes its log here when it runs as a service (stderr goes nowhere
+# under the Service Control Manager); it rotates at 10 MB to sensor.log.1.
+$LogFile    = Join-Path $DataDir "logs\sensor.log"
+$uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
 #region sensor-binary
 # The binary's name in the release package (and once installed), and the
@@ -101,10 +142,173 @@ function Find-SensorBinary([string]$dir) {
 }
 #endregion sensor-binary
 
+#region sensor-enrollment
+# Value of a top-level `key: value` line in the sensor config, quotes removed.
+function Get-ConfigValue([string]$key, [string]$path = $ConfigPath) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $line = Get-Content -LiteralPath $path | Where-Object { $_ -match "^${key}:" } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return ($line -replace "^${key}:\s*", '').Trim().Trim('"', "'")
+}
+
+function Get-KeySha256([string]$value) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($value))) -replace '-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+# What a run does with the config at $path: 'keep' its enrolled identity,
+# 'enroll' afresh, or 'needs-key' (no key, and nothing enrolled to keep).
+# A host that is enrolled keeps its identity when the run brings no key or
+# the key it enrolled with. Re-running the install (to upgrade the binary, or
+# by mistake) must not discard the certificate and UUID the sensor holds and
+# send it back to register with a key it has already spent. A different key
+# means a fresh enrolment. The config records the key itself (a config written
+# before the sensor stopped keeping it) or its SHA-256 fingerprint, which is
+# all the sensor keeps once the platform has issued the per-sensor secret
+# that replaced it (#2437).
+function Get-EnrollmentDecision([string]$path, [string]$key) {
+    $enrolled = (Get-ConfigValue 'sensorId' $path) -match $uuidPattern
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        if ($enrolled) { return 'keep' }
+        return 'needs-key'
+    }
+    if ($enrolled -and (((Get-ConfigValue 'registrationKey' $path) -eq $key) -or ((Get-ConfigValue 'registrationKeySha256' $path) -eq (Get-KeySha256 $key)))) {
+        return 'keep'
+    }
+    return 'enroll'
+}
+
+# The fingerprint as the sensor compares it (shared/certificates): case, an
+# optional sha256: prefix and separators do not matter. $null unless exactly
+# 64 hexadecimal digits remain.
+function ConvertTo-CaFingerprint([string]$value) {
+    $normalized = ($value.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
+    if ($normalized -notmatch '^[0-9a-f]{64}$') { return $null }
+    return $normalized
+}
+#endregion sensor-enrollment
+
+# True when the service exists. Get-Service exists on Windows only.
+function Test-ServiceInstalled([string]$name) {
+    try { return [bool](Get-Service -Name $name -ErrorAction SilentlyContinue) } catch { return $false }
+}
+
+# The address the service was installed with (SENSOR_IP_ADDRESS in its
+# environment), or "".
+function Get-ServiceSensorIP {
+    try {
+        $vars = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name Environment -ErrorAction Stop).Environment
+        foreach ($v in @($vars)) { if ("$v" -like 'SENSOR_IP_ADDRESS=*') { return "$v".Substring(18) } }
+    } catch { }
+    return ""
+}
+
+function Assert-Administrator {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+        exit 1
+    }
+}
+
+# Packet capture needs Npcap: the sensor loads its wpcap.dll at runtime and
+# cannot capture without it. Npcap installs the DLL under System32\Npcap, and
+# also into System32 itself in WinPcap API-compatible mode; the sensor loads
+# either.
+function Test-Npcap {
+    if (-not $env:SystemRoot) { return $false }
+    $wpcapCandidates = @(
+        (Join-Path $env:SystemRoot "System32\Npcap\wpcap.dll"),
+        (Join-Path $env:SystemRoot "System32\wpcap.dll")
+    )
+    return [bool]($wpcapCandidates | Where-Object { Test-Path -LiteralPath $_ })
+}
+
+#region uninstall
+# -Uninstall: stops and deletes the service, then deletes the install
+# directory, which holds the configuration, the certificates and the private
+# key. Needs Administrator and nothing else; on a host with nothing installed
+# it removes nothing and succeeds. A directory that holds no sensor install is
+# left in place, so a mistyped -InstallDir cannot delete it.
+function Invoke-Uninstall {
+    Assert-Administrator
+    $removed = 0
+    if (Test-ServiceInstalled $ServiceName) {
+        Write-Info "Stopping and removing the service '$ServiceName'..."
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $ServiceName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Could not delete the service $ServiceName (sc.exe delete exit $LASTEXITCODE). Nothing else was removed."
+            exit 1
+        }
+        Write-Info "Removed the service $ServiceName"
+        $removed++
+    }
+    if (Test-Path -LiteralPath $InstallDir) {
+        $ours = @($ConfigPath, (Join-Path $InstallDir $InstalledBinaryName)) | Where-Object { Test-Path -LiteralPath $_ }
+        $empty = -not (Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+        if ($ours -or $empty) {
+            # The stopped service may hold its binary for a moment longer.
+            for ($i = 1; $i -le 10; $i++) {
+                try { Remove-Item -LiteralPath $InstallDir -Recurse -Force; break }
+                catch {
+                    if ($i -eq 10) { Write-Err "Could not remove ${InstallDir}: $($_.Exception.Message)"; exit 1 }
+                    Start-Sleep -Seconds 1
+                }
+            }
+            Write-Info "Removed $InstallDir (configuration, certificates and private key)"
+            $removed++
+        } else {
+            Write-Warn "Left $InstallDir in place: it does not hold a sensor install. Remove it by hand if it is one."
+        }
+    }
+    if ($removed -eq 0) {
+        Write-Info "Nothing to remove: the sensor is not installed on this host."
+    } else {
+        Write-Info "The sensor is uninstalled. It still appears in the console until you delete it there (Discovery -> Sensors & Agents)."
+    }
+    exit 0
+}
+#endregion uninstall
+
+if ($Uninstall) { Invoke-Uninstall }
+
+# --- Preconditions ---------------------------------------------------------
+
 try {
     $BinarySource = Find-SensorBinary $PSScriptRoot
 } catch {
     Write-Err $_.Exception.Message
+    exit 1
+}
+
+# The version the platform shows is the one stamped into this binary - the
+# sensor reports it itself at registration and on every heartbeat.
+# Display only: an unreadable version leaves "unknown" and changes nothing.
+$SensorVersion = "unknown"
+$versionRan = $false
+try {
+    $versionOutput = @(& $BinarySource --version 2>$null)
+    $versionRan = ($LASTEXITCODE -eq 0)
+    if ($versionOutput.Count -gt 0 -and "$($versionOutput[0])" -match ' v(\S+)$') { $SensorVersion = $Matches[1] }
+} catch { }
+
+if ($CheckDependencies) {
+    $ok = $true
+    if ($versionRan) {
+        Write-Info "Sensor v$SensorVersion runs on this host."
+    } else {
+        Write-Err "The sensor ($BinarySource) cannot run on this host. Check that it is the Windows build for this host's architecture (amd64 or 386)."
+        $ok = $false
+    }
+    if (Test-Npcap) {
+        Write-Info "Npcap is installed (wpcap.dll found)."
+    } else {
+        Write-Err "Npcap is not installed; the sensor needs it to capture packets. Install it from https://npcap.com/#download (keep 'WinPcap API-compatible Mode' checked)."
+        $ok = $false
+    }
+    if ($ok) { exit 0 }
     exit 1
 }
 
@@ -120,48 +324,57 @@ if ($KeyStdin) {
 }
 if ([string]::IsNullOrEmpty($Key) -and $env:VISTA_REGISTRATION_KEY) { $Key = $env:VISTA_REGISTRATION_KEY }
 if ($null -ne $Key) { $Key = $Key.Trim() }
-if ([string]::IsNullOrWhiteSpace($Key)) {
+# A host with an install may be enrolled already and need no key, URL or
+# address; whether it is enrolled is read as Administrator below.
+$existingInstall = (Test-Path -LiteralPath $ConfigPath) -or (Test-ServiceInstalled $ServiceName)
+if ([string]::IsNullOrWhiteSpace($Key) -and -not $existingInstall) {
     Write-Err "A registration key is required: -Key, -KeyStdin, or VISTA_REGISTRATION_KEY in the environment."
     exit 1
 }
+if ([string]::IsNullOrWhiteSpace($Url) -and -not $existingInstall) {
+    Write-Err "-Url is required: $UrlHelp."
+    exit 1
+}
+if ([string]::IsNullOrWhiteSpace($IP) -and -not $existingInstall) {
+    Write-Err "-IP is required on a first install: the address of this host that the registration key was created for."
+    exit 1
+}
 if ($CaFingerprint) {
-    # The sensor's own normalisation: case, an optional sha256: prefix and
-    # separators do not matter.
-    $normalized = ($CaFingerprint.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
-    if ($normalized -notmatch '^[0-9a-f]{64}$') {
-        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (colons allowed)."
+    $normalized = ConvertTo-CaFingerprint $CaFingerprint
+    if (-not $normalized) {
+        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (upper or lower case; colons and a sha256: prefix allowed)."
         exit 1
     }
     $CaFingerprint = $normalized
 }
 
-# The version the platform shows is the one stamped into this binary - the
-# sensor reports it itself at registration and on every heartbeat.
-# Display only: an unreadable version leaves "unknown" and changes nothing.
-$SensorVersion = "unknown"
-try {
-    $versionLine = (& $BinarySource --version 2>$null | Select-Object -First 1)
-    if ($versionLine -match ' v(\S+)$') { $SensorVersion = $Matches[1] }
-} catch { }
-
 # After the argument checks, so a mistake is reported without elevation.
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+Assert-Administrator
+
+# Nothing has changed yet. Without a key, only an enrolled host can go on, and
+# it keeps the platform, the address and the identity it has.
+$decision = Get-EnrollmentDecision $ConfigPath $Key
+if ($decision -eq 'needs-key') {
+    Write-Err "A registration key is required: $ConfigPath does not record an enrolled sensor."
+    exit 1
+}
+$keepEnrolment = ($decision -eq 'keep')
+$configuredUrl = Get-ConfigValue 'controlPlaneUrl'
+if ($keepEnrolment -and $configuredUrl) { $Url = $configuredUrl }
+if ([string]::IsNullOrWhiteSpace($Url)) { $Url = $configuredUrl }
+if ([string]::IsNullOrWhiteSpace($Url)) {
+    Write-Err "-Url is required: $ConfigPath does not record a platform. It is $UrlHelp."
+    exit 1
+}
+if ([string]::IsNullOrWhiteSpace($IP)) { $IP = Get-ServiceSensorIP }
+if ([string]::IsNullOrWhiteSpace($IP)) {
+    Write-Err "-IP is required: the service does not record the address of this host that the registration key was created for."
     exit 1
 }
 
-# Packet capture needs Npcap: the sensor loads its wpcap.dll at runtime and
-# cannot capture without it. Check before touching the service or config, so a
-# missing runtime fails here with instructions rather than as a sensor that
-# starts and captures nothing. Npcap installs the DLL under System32\Npcap, and
-# also into System32 itself in WinPcap API-compatible mode; the sensor loads
-# either.
-$wpcapCandidates = @(
-    (Join-Path $env:SystemRoot "System32\Npcap\wpcap.dll"),
-    (Join-Path $env:SystemRoot "System32\wpcap.dll")
-)
-if (-not ($wpcapCandidates | Where-Object { Test-Path $_ })) {
+# Check before touching the service or config, so a missing runtime fails here
+# with instructions rather than as a sensor that starts and captures nothing.
+if (-not (Test-Npcap)) {
     Write-Err "Npcap is not installed; the sensor needs it to capture packets."
     Write-Err "Install it from https://npcap.com/#download (keep 'WinPcap API-compatible Mode' checked), then re-run this installer."
     exit 1
@@ -186,39 +399,8 @@ if ($Profile -ne "datacenter_host") {
     Write-Warn "-Profile $Profile is not applied yet: the sensor registers itself and reports the datacenter_host profile."
 }
 
-# --- Layout ----------------------------------------------------------------
-$CertsDir  = Join-Path $InstallDir "certs"
-$DataDir   = Join-Path $InstallDir "data"
-$ConfigPath = Join-Path $InstallDir "sensor-config.yaml"
-# The sensor writes its log here when it runs as a service (stderr goes nowhere
-# under the Service Control Manager); it rotates at 10 MB to sensor.log.1.
-$LogFile    = Join-Path $DataDir "logs\sensor.log"
-$uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-
-# Value of a top-level `key: value` line in the sensor config, quotes removed.
-function Get-ConfigValue([string]$key) {
-    if (-not (Test-Path $ConfigPath)) { return $null }
-    $line = Get-Content $ConfigPath | Where-Object { $_ -match "^${key}:" } | Select-Object -First 1
-    if (-not $line) { return $null }
-    return ($line -replace "^${key}:\s*", '').Trim().Trim('"', "'")
-}
-
-# A host this key already enrolled keeps its identity. Re-running the same
-# install command (to upgrade the binary, or by mistake) must not discard the
-# certificate and UUID the sensor holds and send it back to register with a key
-# it has already spent. A different key means a fresh enrolment.
-# The registration key itself (a config written before the sensor stopped keeping
-# it) or its SHA-256 fingerprint, which is all the sensor keeps once the platform
-# has issued the per-sensor secret that replaced it (#2437).
-function Get-KeySha256([string]$value) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try { return ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($value))) -replace '-', '').ToLowerInvariant() }
-    finally { $sha.Dispose() }
-}
-$enrolledWithKey = ((Get-ConfigValue 'registrationKey') -eq $Key) -or ((Get-ConfigValue 'registrationKeySha256') -eq (Get-KeySha256 $Key))
-$keepEnrolment = ((Get-ConfigValue 'sensorId') -match $uuidPattern) -and $enrolledWithKey
 if ($keepEnrolment) {
-    Write-Info "This host is already enrolled with this key (sensor $(Get-ConfigValue 'sensorId')); keeping its identity and configuration."
+    Write-Info "This host is already enrolled (sensor $(Get-ConfigValue 'sensorId')); keeping its identity and configuration."
 }
 
 # Stop a previous install so it cannot rewrite the config while we replace it.
@@ -497,3 +679,4 @@ Write-Host "  Logs:    Get-Content -Tail 50 -Wait '$LogFile'"
 Write-Host "  Events:  Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'} -MaxEvents 20"
 Write-Host "  Stop:    Stop-Service $ServiceName"
 Write-Host "  Restart: Restart-Service $ServiceName"
+Write-Host "  Uninstall: & '$PSCommandPath' -Uninstall"
