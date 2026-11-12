@@ -5,8 +5,8 @@ editions were tested with one agents release's exact bytes. The format is
 `schemas/compatibility/v1/record.schema.json`; `docs/releasing.md` explains the
 lifecycle and `docs/verify-release.md` how to check a record.
 
-- **One file per record**, named `<record_id>.json`, for example
-  `agents-5.3.0-c2.json`. The first record of every release (`-c1`, every claim
+- **One file per record**, named `<record_id>.json`, that is
+  `agents-<version>-c<n>.json` (for example `agents-5.4.0-c2.json`). The first record of every release (`-c1`, every claim
   `pending`) is written by the release workflow and published with the release;
   it is not committed here.
 - **Records are added, never edited or deleted.** A correction is a new record

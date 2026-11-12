@@ -1,267 +1,161 @@
-# Windows Sensor Setup Guide
+# Installing the sensor on Windows
 
-## 🚨 Required Dependencies
+`install-sensor.ps1` installs the Vista Platform sensor as a Windows service:
+it starts at boot, the Service Control Manager restarts it after a failure, and
+it registers itself with your Vista Platform on first start.
 
-The Windows sensor requires a packet capture library to monitor network traffic. You need to install one of the following:
+## What you need
 
-### Option 1: Npcap (Recommended)
+- **Windows x64**: Windows 10 or 11, or Windows Server 2016 or later. The
+  release also contains a Windows x86 (`windows_386`) sensor; it is
+  compile-only (`runtime_qualified: false` in `agents-release.json`) and not
+  supported.
+- **An elevated (Administrator) PowerShell session.** Windows PowerShell 5.1,
+  which ships with Windows, is enough.
+- **Npcap**, which the sensor uses to capture packets. Download it from
+  <https://npcap.com/#download>, run its installer as Administrator, and keep
+  **"API-compatible Mode"** checked. Npcap is published under its own
+  licence, whose free tier covers up to five systems; it is never bundled with
+  the sensor. The installer checks for Npcap first and stops, changing nothing,
+  if it is missing.
+- **The commands from your console.** In your Vista Platform console, open
+  Discovery → Sensors & Agents and choose **Register sensor or agent**. The
+  dialog creates the registration key and prints the install commands for
+  Windows, with your platform's URL and, where needed, its CA fingerprint (see
+  below). You also need the address of this host that the key was created for
+  (`-IP`).
+- **The sensor for Windows** from the release page of the agents release your
+  console names: the package `vista-sensor_<version>_windows_amd64.zip` (it
+  holds `crypto-sensor.exe`, `install-sensor.ps1`, `LICENSE`, `NOTICE` and
+  `THIRD_PARTY_LICENSES`), or the loose files
+  `vista-sensor_<version>_windows_amd64.exe` and `install-sensor.ps1` in one
+  directory. The installer takes the binary under either name; no rename is
+  needed.
 
-**Npcap** is the modern, actively maintained packet capture library for Windows.
+Verify what you downloaded before you run it: [verify-release.md](../verify-release.md).
+The Windows binaries carry **no Authenticode signature**, so SmartScreen may
+warn on first run; their Sigstore signature and `SHA256SUMS` are how to check
+where they came from. Use the installer from the release, never a copy from this
+repository's source tree.
 
-1. **Download Npcap**:
-   - Go to: <https://npcap.com/>
-   - Download the latest version (Npcap installer)
+## The platform URL and CA fingerprint
 
-2. **Install Npcap**:
-   - Run the installer as Administrator
-   - **Important**: Check "Install Npcap in WinPcap API-compatible Mode"
-   - Check "Start Npcap service at boot time"
-   - Complete the installation
+There is no hosted platform and no default URL: `-Url` is the address of your
+own Vista Platform console, the URL the registration dialog was opened at. The
+commands the dialog prints already carry it.
 
-3. **Verify Installation**:
+If your platform's certificate is signed by a private CA that this host does not
+trust, the dialog shows a **Platform CA fingerprint** panel with a copy button,
+and its commands carry `-CaFingerprint`. The value is the CA's SHA-256
+fingerprint, 64 hexadecimal digits (colons and a `sha256:` prefix are accepted).
+The sensor pins that CA on first start only if it has this fingerprint.
 
-   ```cmd
-   sc query npcap
-   ```
+## Install
 
-   Should show "RUNNING" status.
+From an elevated PowerShell, in the directory holding the downloaded files:
 
-### Option 2: WinPcap (Legacy)
+```powershell
+# The installer script is not signed, so Windows' default execution policy
+# refuses to run it. This allows unsigned scripts for this PowerShell window
+# only; it changes no machine or user setting.
+Set-ExecutionPolicy -Scope Process Bypass
+.\install-sensor.ps1 -CheckDependencies          # checks the binary runs here; installs nothing
+.\install-sensor.ps1 -Url https://vista.example.com -IP 192.0.2.10 -KeyStdin
+```
 
-**WinPcap** is the older packet capture library.
+- `-KeyStdin` prompts for the registration key without echoing it, or reads the
+  first line of standard input when it is redirected. `VISTA_REGISTRATION_KEY`
+  in the environment also works; `-Key REG-...` is visible to other users while
+  the installer runs. A registration key works once.
+- `-Name NAME`: the sensor's name (default: the host name and the date).
+- `-Interfaces LIST`: the adapters to capture on, comma-separated, each named as
+  Windows shows it (`Ethernet 2`, `Wi-Fi`), by its description, or by its Npcap
+  device name (`\Device\NPF_{GUID}`). Without it the sensor captures on every
+  adapter that is up and has an address.
+- `-CaFingerprint SHA256`: pin a private platform CA (see above).
+- `-InstallDir DIRECTORY`: default `%ProgramFiles%\VistaSensor`.
 
-1. **Download WinPcap**:
-   - Go to: <https://www.winpcap.org/>
-   - Download the latest version
+`-Profile` is accepted and not applied yet: the sensor registers with the
+`datacenter_host` profile.
 
-2. **Install WinPcap**:
-   - Run the installer as Administrator
-   - Complete the installation
+## What it does
 
-3. **Verify Installation**:
+1. Checks that Npcap is installed, before it changes anything.
+2. Creates `%ProgramFiles%\VistaSensor` and restricts it to **Administrators
+   and SYSTEM**: the configuration holds the registration key until the sensor
+   redeems it, and `data\certs` holds the sensor's private key.
+3. Copies the binary there as `crypto-sensor.exe` and writes
+   `sensor-config.yaml` with the platform URL, the key, the interfaces and the
+   data path (`data\` inside the install directory).
+4. Installs the service **`VistaSensor`** (display name "Vista Platform Crypto
+   Sensor"), which runs `crypto-sensor.exe --verbose -config <sensor-config.yaml>`.
+   It starts on boot, and the Service Control Manager restarts it 10 seconds
+   after a failure.
+5. Starts it and waits for the sensor to **register itself**. The installer
+   never registers on the sensor's behalf: the sensor generates its key pair on
+   the host, sends a certificate request with the key, and writes the UUID it
+   was given back into `sensor-config.yaml`.
 
-   ```cmd
-   sc query npf
-   ```
+If the platform rejects the key (invalid, expired or already used), the
+installer stops and disables the service and asks for a new key. If the sensor
+has not registered in time for any other reason, the service keeps running and
+retrying, and the installer says where to look.
 
-   Should show "RUNNING" status.
+## Running it
 
-## Installing as a service (install-sensor.ps1)
+| | |
+|---|---|
+| Status | `Get-Service VistaSensor` |
+| Log | `Get-Content -Tail 50 -Wait "$env:ProgramFiles\VistaSensor\data\logs\sensor.log"` (rotates at 10 MB to `sensor.log.1`) |
+| Service events | `Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='VistaSensor'} -MaxEvents 20` |
+| Stop | `Stop-Service VistaSensor` |
+| Restart | `Restart-Service VistaSensor` |
 
-From an elevated PowerShell, in the directory holding `install-sensor.ps1` and the sensor binary
-(`crypto-sensor.exe` from the release package, or the downloaded `vista-sensor_<version>_windows_<arch>.exe`):
+The sensor makes **outbound connections only** to your platform; it opens no
+inbound port. If outbound traffic is filtered, allow HTTPS from
+`crypto-sensor.exe` to the platform's address.
+
+## Upgrade
+
+Download and verify the new release, then run its installer again from the
+directory holding the new files, with **no key**:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install-sensor.ps1 -Url https://vista.example.com -IP <this host's address> -KeyStdin
+.\install-sensor.ps1
 ```
 
-- `-KeyStdin` prompts for the registration key without echoing it, or reads the first line of
-  standard input when it is redirected. `VISTA_REGISTRATION_KEY` in the environment also works;
-  `-Key REG-...` is visible to other users while the installer runs.
-- `-CaFingerprint <SHA-256>`: for a control plane whose certificate is signed by a private CA this
-  host does not trust; the sensor pins that CA only if it has this fingerprint.
-- `-Interfaces`: see [CONFIGURATION_AND_LOGS.md](CONFIGURATION_AND_LOGS.md) for the names it takes.
+It keeps the sensor's identity, configuration and certificate and replaces only
+the binary.
 
-It installs the service `VistaSensor` in `%ProgramFiles%\VistaSensor`, restricted to Administrators
-and SYSTEM (the configuration holds the key, the certs directory the sensor's private key), and waits
-for the sensor to register itself. Re-running it with the same key upgrades the binary and keeps the
-sensor's identity.
+A registration key cannot be used twice. Running the installer with a **new**
+key registers this host as a **second, new sensor**: the old certificate is
+removed and the old sensor stays in the console until you remove it there. Do
+that only to replace the sensor's identity on purpose.
 
-## 🔧 Installation Steps
+## Uninstall
 
-### Step 1: Install Packet Capture Library
+From an elevated PowerShell, in the directory holding the installer:
 
-Choose either Npcap or WinPcap (Npcap recommended).
-
-### Step 2: Run Sensor as Administrator
-
-**Important**: The sensor must run with Administrator privileges to access network interfaces.
-
-```cmd
-# Right-click Command Prompt and select "Run as administrator"
-# Then navigate to your sensor directory and run:
-crypto-sensor-windows-amd64.exe -interactive
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install-sensor.ps1 -Uninstall
 ```
 
-### Step 3: Configure Sensor
+It stops and removes the `VistaSensor` service and the installation. The sensor
+stays listed in the console until you remove it there. Npcap stays installed;
+remove it from Settings → Apps if nothing else uses it.
 
-Use the interactive mode to set up your sensor:
+## Troubleshooting
 
-```cmd
-crypto-sensor-windows-amd64.exe -interactive
-```
+| What you see | What to do |
+|---|---|
+| `install-sensor.ps1 cannot be loaded because running scripts is disabled` | Run `Set-ExecutionPolicy -Scope Process Bypass` in the same window first. |
+| The installer says Npcap is not installed | Install Npcap from <https://npcap.com/#download> with "API-compatible Mode" checked, then run the installer again. |
+| `couldn't load wpcap.dll` in the log | Npcap is missing or was removed: reinstall it as above and restart the service. |
+| No adapter to capture on, or an `-Interfaces` name not found | Run the installer again with `-Interfaces` naming the adapter as `Get-NetAdapter` shows it. The sensor checks that capture can start before it registers, so a failed check does not use the key. |
+| The key was rejected | Create a new key in the console and run the installer again with it. |
+| Antivirus blocks capture | Add `%ProgramFiles%\VistaSensor\crypto-sensor.exe` to its exclusions. |
 
-### Step 4: Test the Sensor
-
-```cmd
-crypto-sensor-windows-amd64.exe -test -verbose
-```
-
-## 🚨 Troubleshooting
-
-### Error: "couldn't load wpcap.dll"
-
-**Cause**: Packet capture library not installed or not running.
-
-**Solution**:
-
-1. Install Npcap or WinPcap (see above)
-2. Restart your computer
-3. Run sensor as Administrator
-
-### Error: "Operation not permitted"
-
-**Cause**: Not running as Administrator.
-
-**Solution**:
-
-1. Right-click Command Prompt
-2. Select "Run as administrator"
-3. Navigate to sensor directory
-4. Run the sensor
-
-### Error: "no interfaces available for capture"
-
-**Cause**: No network interfaces detected or packet capture service not running.
-
-**Solution**:
-
-1. Check network interfaces:
-
-   ```cmd
-   ipconfig /all
-   ```
-
-2. Check packet capture service:
-
-   ```cmd
-   sc query npcap
-   # or for WinPcap:
-   sc query npf
-   ```
-
-3. Start the service if not running:
-
-   ```cmd
-   sc start npcap
-   # or for WinPcap:
-   sc start npf
-   ```
-
-### Error: Antivirus Blocking
-
-**Cause**: Antivirus software blocking packet capture.
-
-**Solution**:
-
-1. Add sensor executable to antivirus exclusions
-2. Add packet capture service to exclusions
-3. Temporarily disable real-time protection for testing
-
-### Error: "failed to parse config file: yaml: line X: did not find expected hexdecimal number"
-
-**Cause**: Windows paths with backslashes in the configuration file are not properly quoted.
-
-**Solution**:
-
-This issue was fixed in sensor version 1.2.0. If you encounter it:
-
-1. **Update to the latest sensor version** (recommended)
-2. **OR manually fix the config file**:
-   - Open `%LOCALAPPDATA%\CryptoSensor\sensor-config.yaml`
-   - Ensure all Windows paths are quoted and backslashes are doubled:
-     ```yaml
-     dataPath: "C:\\Users\\username\\AppData\\Local\\CryptoSensor"
-     interfaces:
-       - "\\Device\\NPF_{GUID}"
-     ```
-3. **OR delete the config and re-run interactive setup**:
-   ```cmd
-   del "%LOCALAPPDATA%\CryptoSensor\sensor-config.yaml"
-   crypto-sensor-windows-amd64.exe -interactive
-   ```
-
-## 📁 Data and Key Storage
-
-The sensor writes two categories of files to disk:
-
-| Category | Default Path | Notes |
-|---|---|---|
-| **Discovery data** (encrypted) | `%APPDATA%\CryptoSensor\discoveries\` | Ciphertext only — safe to back up without key |
-| **Encryption key** | `%APPDATA%\CryptoSensor\` | `encryption.key` — keep this path separate and protected |
-
-> **Important:** The encryption key directory is intentionally separate from the discovery data directory so that ciphertext and key are never co-located. Do not store both on the same removable drive or shared network path.
-
-To override the key path, add `keyPath` under `storage:` in your config file:
-
-```yaml
-storage:
-  dataPath: "C:\\CryptoSensorData"
-  keyPath: "C:\\CryptoSensorKeys"   # Recommended: separate volume or protected share
-```
-
-### Windows Firewall Note
-
-The sensor makes **outbound-only** connections to the control plane. No inbound ports are opened. Windows Firewall rules need to allow outbound HTTPS (443) from the sensor executable to the configured `controlPlaneUrl`.
-
-## ✅ Verification Steps
-
-### 1. Check Packet Capture Service
-
-```cmd
-sc query npcap
-```
-
-Should show:
-
-```
-SERVICE_NAME: npcap
-        TYPE               : 1  KERNEL_DRIVER
-        STATE              : 4  RUNNING
-```
-
-### 2. Check Network Interfaces
-
-```cmd
-ipconfig /all
-```
-
-Should show active network adapters.
-
-### 3. Test with Wireshark (Optional)
-
-1. Install Wireshark
-2. Open Wireshark
-3. Check if network interfaces are listed
-4. If Wireshark works, the sensor should work too
-
-### 4. Test Sensor
-
-```cmd
-crypto-sensor-windows-amd64.exe -test -verbose
-```
-
-## 📋 Quick Setup Checklist
-
-- [ ] Install Npcap or WinPcap
-- [ ] Restart computer
-- [ ] Open Command Prompt as Administrator
-- [ ] Navigate to sensor directory
-- [ ] Run: `crypto-sensor-windows-amd64.exe -interactive`
-- [ ] Configure sensor settings
-- [ ] Test with: `crypto-sensor-windows-amd64.exe -test -verbose`
-
-## 🔗 Download Links
-
-- **Npcap**: <https://npcap.com/>
-- **WinPcap**: <https://www.winpcap.org/>
-- **Wireshark**: <https://www.wireshark.org/>
-
-## 💡 Tips
-
-1. **Npcap is recommended** over WinPcap for better Windows 10/11 compatibility
-2. **Always run as Administrator** - packet capture requires elevated privileges
-3. **Check antivirus settings** - some may block packet capture
-4. **Use test mode first** - `-test -verbose` to verify everything works
-5. **Check Windows Firewall** - ensure it's not blocking the sensor
+More: [WINDOWS_USAGE.md](WINDOWS_USAGE.md) (running the sensor by hand, file
+locations), [CERTIFICATE_MANAGEMENT.md](CERTIFICATE_MANAGEMENT.md).
