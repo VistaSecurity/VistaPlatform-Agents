@@ -99,7 +99,7 @@ test('resolve: a scheduled nightly of main', () => {
 
 const sensor = loadSurface().agents.find((a) => a.kind === 'sensor');
 const linux = sensor.targets.find((t) => t.os === 'linux' && t.arch === 'amd64');
-const expect = { modulePath: MODULE, command: 'cmd/sensor', goos: 'linux', goarch: 'amd64', cgo: true, version: '5.3.0', sourceSha: SHA, goVersion: 'go1.26.10' };
+const expect = { modulePath: MODULE, command: 'cmd/sensor', goos: 'linux', goarch: 'amd64', cgo: true, version: '5.3.0', sourceSha: SHA, goVersion: 'go1.26.11' };
 const setting = (info, key, value) => ({ ...info, Settings: info.Settings.map((s) => (s.Key === key ? { ...s, Value: value } : s)) });
 
 test('buildinfo: a correct binary passes', () => {
