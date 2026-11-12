@@ -37,8 +37,8 @@ env:
   # Go 1.26 only, at the exact patch go.mod declares. An exact GOTOOLCHAIN
   # hard-fails on a module that needs a newer toolchain instead of silently
   # downloading one.
-  GO_VERSION: '1.26.10'
-  GOTOOLCHAIN: go1.26.10
+  GO_VERSION: '1.26.11'
+  GOTOOLCHAIN: go1.26.11
   # The repository is one module with no workspace.
   GOWORK: 'off'
   # go.mod and go.sum must already be complete; CI never edits them.
