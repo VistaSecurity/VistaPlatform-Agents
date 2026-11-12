@@ -9,13 +9,16 @@
 # re-run-to-upgrade behaviour.
 #
 # Usage: sudo bash install-sensor-macos.sh --url URL --key-stdin --ip ADDRESS [options]
+#        sudo bash install-sensor-macos.sh --uninstall
 #
 # Written for the bash macOS ships (3.2): no associative arrays, no ${v,,}, no
 # GNU-only tools. scripts/install-macos.test.mjs holds it to that.
 
 set -e
 
-CONTROL_PLANE_URL="https://app.vistasecurity.io"
+# There is no default platform URL: every customer runs their own Vista Platform.
+CONTROL_PLANE_URL=""
+URL_HELP="the address of your own Vista Platform console, as shown in your browser (for example --url https://vista.example.com)"
 # The key may come from the environment so it stays out of the process list.
 REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 SENSOR_NAME=""
@@ -376,6 +379,20 @@ show_log_tail() {
         printf '%s\n' "$text" | tail -20
     fi
 }
+
+# Prints --ca-fingerprint the way the agents compare fingerprints
+# (shared/certificates): lower case, without a sha256: prefix, colons, spaces or
+# dashes. Fails unless exactly 64 hexadecimal digits remain.
+normalize_ca_fingerprint() {
+    local f
+    f=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//')
+    f=${f#sha256:}
+    f=$(printf '%s' "$f" | tr -d ': \t\r\n-')
+    if [[ ! "$f" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+    printf '%s' "$f"
+}
 # --- shared macOS installer functions (end) ---
 
 show_usage() {
@@ -386,18 +403,23 @@ Vista Platform Sensor Installer for macOS
 Usage: sudo bash $0 --url URL --key-stdin --ip ADDRESS [options]
 
 Options:
-    -u, --url URL              Platform URL, as shown in the console (default: $CONTROL_PLANE_URL)
-    -k, --key KEY              Registration key (required). A key on the command line is
+    -u, --url URL              Address of your own Vista Platform console, as shown in
+                               your browser (required unless this Mac is already enrolled)
+    -k, --key KEY              Registration key (required unless this Mac is already
+                               enrolled). A key on the command line is
                                visible to other users in the process list; prefer one of:
     --key-stdin                Read the key from the first line of standard input
                                (VISTA_REGISTRATION_KEY=... in the environment also works)
-    --ip IP_ADDRESS            This Mac's address the registration key was created for (required)
+    --ip IP_ADDRESS            This Mac's address the registration key was created for
+                               (required on a first install; a re-run reuses the address
+                               in the launchd job)
     -n, --name NAME            Sensor name (default: sensor-<host name>-<date>)
     -i, --interfaces IFACES    Interfaces to capture on, comma-separated (default: the
                                interface of the default route, for example en0)
     --ca-fingerprint SHA256    Expected SHA-256 fingerprint of the platform's CA, for a
                                platform whose certificate this Mac does not already trust
-    -p, --profile PROFILE      Deployment profile (default: $PROFILE; not yet applied)
+    -p, --profile PROFILE      Accepted but currently ignored: every sensor registers
+                               and reports the datacenter_host profile
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --check-dependencies       Check the sensor binary runs on this Mac, then exit (no root needed)
     --uninstall                Stop the sensor and remove it, its configuration and its logs
@@ -405,8 +427,14 @@ Options:
 
 Run it from the directory holding the downloaded sensor: the contents of the
 macOS .tar.gz archive, or the loose ${RELEASE_PREFIX}_<version>_darwin_<arch> file.
-Re-running it with the same key keeps the sensor's registration and replaces
-only the binary, which is how to upgrade it.
+Re-running it with no key, or with the key it enrolled with, keeps the sensor's
+registration and replaces only the binary, which is how to upgrade it. A
+different key enrolls it afresh.
+
+Examples:
+    sudo bash $0 --url https://vista.example.com --key-stdin --ip 192.0.2.10
+    sudo bash $0                # upgrade an enrolled sensor in place
+    sudo bash $0 --uninstall    # remove the sensor from this Mac
 
 The sensor runs as root: on macOS only root can open the packet-capture
 devices (/dev/bpf*) and send the raw packets of an active scan.
@@ -445,6 +473,13 @@ host_addresses() {
     ifconfig -a 2>/dev/null | awk '$1 == "inet" || $1 == "inet6" { sub(/%.*/, "", $2); print $2 }'
 }
 
+# Prints environment variable $2 of the launchd job description $1 as this
+# installer writes it: a <key> line, then its <string> line.
+plist_env_value() {
+    [[ -f "$1" ]] || return 0
+    sed -n "/<key>$2<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}" "$1" | head -1
+}
+
 uninstall() {
     require_root
     local plist="$LAUNCHD_DIR/$LABEL.plist"
@@ -477,51 +512,111 @@ main() {
         exit 0
     fi
 
-    if [[ -z "$REGISTRATION_KEY" ]]; then
+    local plist="$LAUNCHD_DIR/$LABEL.plist"
+    local CONFIG_FILE="$INSTALL_DIR/etc/sensor-config.yaml"
+    local wrapper="$INSTALL_DIR/service.sh"
+    local log_file="$LOG_DIR/sensor.log"
+    local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+    # An existing install may be enrolled already and need no key, URL or
+    # address; that is checked as root below (etc/ is root's only).
+    local existing=false
+    if [[ -f "$plist" || -f "$CONFIG_FILE" ]]; then
+        existing=true
+    fi
+    if [[ -z "$REGISTRATION_KEY" && "$existing" != "true" ]]; then
         print_error "Registration key is required"
         show_usage
         exit 1
+    fi
+    if [[ -z "$CONTROL_PLANE_URL" && "$existing" != "true" ]]; then
+        print_error "--url is required: $URL_HELP."
+        show_usage
+        exit 1
+    fi
+    if [[ -z "$EXPECTED_IP" ]]; then
+        # A re-run reuses the address the job was installed with.
+        EXPECTED_IP=$(plist_env_value "$plist" SENSOR_IP_ADDRESS)
     fi
     if [[ -z "$EXPECTED_IP" ]]; then
         print_error "Expected IP address is required for validation"
         show_usage
         exit 1
     fi
-    if [[ -n "$CA_FINGERPRINT" && ! "$CA_FINGERPRINT" =~ ^[0-9A-Fa-f:]+$ ]]; then
-        print_error "--ca-fingerprint must be the SHA-256 fingerprint in hexadecimal (colons allowed)"
+    if [[ -n "$CA_FINGERPRINT" ]] && ! CA_FINGERPRINT=$(normalize_ca_fingerprint "$CA_FINGERPRINT"); then
+        print_error "--ca-fingerprint must be the SHA-256 fingerprint of the platform's CA: 64 hexadecimal digits (upper or lower case; colons and a sha256: prefix are allowed)."
         exit 1
     fi
     require_root
+
+    # A host this key already enrolled keeps its identity, and so does one
+    # re-run with no key at all. Re-running the install (to upgrade the
+    # binary, or by mistake) must not discard the certificate and UUID the
+    # sensor holds and send it back to register with a key it has already
+    # spent. A different key means a fresh enrolment. The config keeps the key
+    # itself until the platform issues the sensor its own secret, then only
+    # the key's SHA-256. Nothing has changed yet.
+    local keep_enrolment=false current_id
+    current_id=$(read_config_value sensorId "$CONFIG_FILE")
+    if [[ -z "$REGISTRATION_KEY" ]] && ! [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]]; then
+        print_error "Registration key is required: $CONFIG_FILE does not record an enrolled sensor."
+        exit 1
+    fi
+    if [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]] \
+        && { [[ -z "$REGISTRATION_KEY" ]] \
+            || [[ "$(read_config_value registrationKey "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]] \
+            || [[ "$(read_config_value registrationKeySha256 "$CONFIG_FILE")" == "$(sha256_of "$REGISTRATION_KEY")" ]]; }; then
+        keep_enrolment=true
+        # The sensor keeps talking to the platform in its config; say that one.
+        local configured_url
+        configured_url=$(read_config_value controlPlaneUrl "$CONFIG_FILE")
+        CONTROL_PLANE_URL=${configured_url:-$CONTROL_PLANE_URL}
+    fi
+    if [[ -z "$CONTROL_PLANE_URL" ]]; then
+        CONTROL_PLANE_URL=$(read_config_value controlPlaneUrl "$CONFIG_FILE")
+    fi
+    if [[ -z "$CONTROL_PLANE_URL" ]]; then
+        print_error "--url is required: $CONFIG_FILE does not record a platform. It is $URL_HELP."
+        exit 1
+    fi
 
     local version=$AGENT_VERSION
 
     print_header "🚀 Vista Platform Sensor Installer (macOS)"
     echo "=================================================="
+    if [[ "$keep_enrolment" == "true" ]]; then
+        print_status "This Mac is already enrolled (sensor $current_id); keeping its identity and configuration."
+    fi
 
     # Interfaces: the default route's unless named. Each must exist: a name the
     # sensor cannot open would spend the key on a sensor that never captures.
-    if [[ -z "$INTERFACES" ]]; then
-        INTERFACES=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')
-        if [[ -z "$INTERFACES" ]]; then
-            print_error "This Mac has no default route, so no interface to capture on was found. Name one with --interfaces (see: ifconfig -l)."
-            exit 1
-        fi
-    fi
+    # An enrolled sensor keeps the interfaces its config names.
     local iface interfaces_yaml="" interface_list
-    IFS=',' read -ra interface_list <<< "$INTERFACES"
-    for iface in "${interface_list[@]}"; do
-        iface="${iface//[[:space:]]/}"
-        [[ -z "$iface" ]] && continue
-        if ! ifconfig "$iface" >/dev/null 2>&1; then
-            print_error "Interface $iface does not exist on this Mac. Interfaces: $(ifconfig -l 2>/dev/null)"
+    if [[ "$keep_enrolment" == "true" ]]; then
+        INTERFACES="(as configured)"
+    else
+        if [[ -z "$INTERFACES" ]]; then
+            INTERFACES=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }')
+            if [[ -z "$INTERFACES" ]]; then
+                print_error "This Mac has no default route, so no interface to capture on was found. Name one with --interfaces (see: ifconfig -l)."
+                exit 1
+            fi
+        fi
+        IFS=',' read -ra interface_list <<< "$INTERFACES"
+        for iface in "${interface_list[@]}"; do
+            iface="${iface//[[:space:]]/}"
+            [[ -z "$iface" ]] && continue
+            if ! ifconfig "$iface" >/dev/null 2>&1; then
+                print_error "Interface $iface does not exist on this Mac. Interfaces: $(ifconfig -l 2>/dev/null)"
+                exit 1
+            fi
+            [[ -n "$interfaces_yaml" ]] && interfaces_yaml+=", "
+            interfaces_yaml+=$(yaml_quote "$iface")
+        done
+        if [[ -z "$interfaces_yaml" ]]; then
+            print_error "--interfaces names no interface"
             exit 1
         fi
-        [[ -n "$interfaces_yaml" ]] && interfaces_yaml+=", "
-        interfaces_yaml+=$(yaml_quote "$iface")
-    done
-    if [[ -z "$interfaces_yaml" ]]; then
-        print_error "--interfaces names no interface"
-        exit 1
     fi
 
     if [[ -z "$SENSOR_NAME" ]]; then
@@ -546,27 +641,6 @@ main() {
         exit 1
     fi
     print_status "✅ IP address validation passed"
-
-    local plist="$LAUNCHD_DIR/$LABEL.plist"
-    local CONFIG_FILE="$INSTALL_DIR/etc/sensor-config.yaml"
-    local wrapper="$INSTALL_DIR/service.sh"
-    local log_file="$LOG_DIR/sensor.log"
-    local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-
-    # A host this key already enrolled keeps its identity. Re-running the same
-    # install command (to upgrade the binary, or by mistake) must not discard
-    # the certificate and UUID the sensor holds and send it back to register
-    # with a key it has already spent. A different key means a fresh
-    # enrolment. The config keeps the key itself until the platform issues the
-    # sensor its own secret, then only the key's SHA-256.
-    local keep_enrolment=false current_id
-    current_id=$(read_config_value sensorId "$CONFIG_FILE")
-    if [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]] \
-        && { [[ "$(read_config_value registrationKey "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]] \
-            || [[ "$(read_config_value registrationKeySha256 "$CONFIG_FILE")" == "$(sha256_of "$REGISTRATION_KEY")" ]]; }; then
-        keep_enrolment=true
-        print_status "This Mac is already enrolled with this key (sensor $current_id); keeping its identity and configuration."
-    fi
 
     # Stop a previous install: it must not rewrite the config while we replace it.
     stop_job "$LABEL" "$plist"

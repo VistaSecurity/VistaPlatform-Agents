@@ -384,7 +384,7 @@ function macHost(t, kind) {
   stub('xattr', '#!/bin/sh\nexit 0\n');
   stub('chown', '#!/bin/sh\necho "chown $*" >> "$FAKE_LAUNCHD/calls.log"\n');
   stub('plutil', `#!/bin/sh\n[ "$1" = -lint ] && exec ${PYTHON || 'python3'} -I -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$2"\nexit 64\n`);
-  stub('route', '#!/bin/sh\necho "   route to: default"\necho "  interface: en0"\n');
+  stub('route', '#!/bin/sh\n[ -n "$FAKE_NO_ROUTE" ] && { echo "route: writing to routing socket: not in table" >&2; exit 1; }\necho "   route to: default"\necho "  interface: en0"\n');
   stub('ifconfig', '#!/bin/sh\ncase "$1" in\n  -a) printf "lo0: flags\\n\\tinet 127.0.0.1 netmask 0xff000000\\nen0: flags\\n\\tinet6 fe80::1%%en0 prefixlen 64\\n\\tinet 192.0.2.10 netmask 0xffffff00\\n" ;;\n  -l) echo "lo0 en0 en1" ;;\n  en0|en1|lo0) echo "$1: flags" ;;\n  *) echo "ifconfig: interface $1 does not exist" >&2; exit 1 ;;\nesac\n');
   stub('hostname', '#!/bin/sh\necho testmac\n');
   stub('launchctl', LAUNCHCTL);
@@ -418,11 +418,14 @@ function macHost(t, kind) {
 }
 
 const KEY = 'REG-0123456789abcdef-secret';
+const FINGERPRINT = 'ab'.repeat(32);
+// The same fingerprint as a person might paste it.
+const PRETTY_FINGERPRINT = `SHA256:${FINGERPRINT.toUpperCase().match(/../g).join(':')}`;
 
 for (const sh of BASHES) {
   test(`sensor: a fresh install starts the job and reports the UUID the sensor recorded (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
     const h = macHost(t, 'sensor');
-    const r = h.install(sh, ['--url', 'https://p.example', '--key-stdin', '--ip', '192.0.2.10', '--ca-fingerprint', 'AB:CD'], { INPUT: `${KEY}\n` });
+    const r = h.install(sh, ['--url', 'https://p.example', '--key-stdin', '--ip', '192.0.2.10', '--ca-fingerprint', PRETTY_FINGERPRINT], { INPUT: `${KEY}\n` });
     assert.equal(r.status, 0, r.output);
     assert.match(r.output, new RegExp(`Sensor ID: ${UUID}`));
     assert.ok(!r.output.includes(KEY), 'the key was printed');
@@ -433,7 +436,7 @@ for (const sh of BASHES) {
     assert.match(started, /^registrationKey: "REG-0123456789abcdef-secret"$/m);
     assert.match(started, /^ {2}interfaces: \["en0"\]$/m, 'default-route interface not used');
     const args = readFileSync(join(h.state, 'agent-args'), 'utf8');
-    assert.match(args, /--verbose -config \S+sensor-config\.yaml -interactive=false -ca-fingerprint AB:CD/);
+    assert.match(args, new RegExp(`--verbose -config \\S+sensor-config\\.yaml -interactive=false -ca-fingerprint ${FINGERPRINT}$`, 'm'), 'the fingerprint is not passed on normalised');
     assert.equal(readFileSync(join(h.state, 'agent-env'), 'utf8').trim(), 'SENSOR_IP_ADDRESS=192.0.2.10');
     const p = plist(join(h.root.launchd, 'io.vistasecurity.sensor.plist'));
     assert.ok(!('UserName' in p), 'the sensor needs root for /dev/bpf*');
@@ -446,7 +449,7 @@ for (const sh of BASHES) {
     assert.equal(h.install(sh, [...base, '--key', KEY]).status, 0);
     const again = h.install(sh, [...base, '--key', KEY]);
     assert.equal(again.status, 0, again.output);
-    assert.match(again.output, /already enrolled with this key/);
+    assert.match(again.output, /already enrolled/);
     assert.match(readFileSync(join(h.state, 'config-at-start'), 'utf8'), new RegExp(`^sensorId: "${UUID}"`, 'm'), 'identity discarded');
     assert.match(h.calls(), /^bootout system\/io\.vistasecurity\.sensor$/m, 'the running job was not stopped first');
     const other = h.install(sh, [...base, '--key', 'REG-another-key-0000']);
@@ -469,12 +472,15 @@ for (const sh of BASHES) {
 
   test(`sensor: wrong address, unknown interface or missing key fail before anything changes (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
     const h = macHost(t, 'sensor');
+    const url = ['--url', 'https://p.example'];
     for (const [args, msg] of [
-      [['--key', KEY, '--ip', '192.0.2.99'], /192\.0\.2\.99 not found/],
-      [['--key', KEY, '--ip', '192.0.2.10', '--interfaces', 'en9'], /Interface en9 does not exist/],
-      [['--ip', '192.0.2.10'], /Registration key is required/],
-      [['--key', KEY], /Expected IP address is required/],
-      [['--key', KEY, '--ip', '192.0.2.10', '--ca-fingerprint', 'not hex'], /hexadecimal/],
+      [[...url, '--key', KEY, '--ip', '192.0.2.99'], /192\.0\.2\.99 not found/],
+      [[...url, '--key', KEY, '--ip', '192.0.2.10', '--interfaces', 'en9'], /Interface en9 does not exist/],
+      [[...url, '--ip', '192.0.2.10'], /Registration key is required/],
+      [[...url, '--key', KEY], /Expected IP address is required/],
+      [['--key', KEY, '--ip', '192.0.2.10'], /--url is required: the address of your own Vista Platform console, as shown in your browser/],
+      [[...url, '--key', KEY, '--ip', '192.0.2.10', '--ca-fingerprint', 'not hex'], /64 hexadecimal digits/],
+      [[...url, '--key', KEY, '--ip', '192.0.2.10', '--ca-fingerprint', 'AB:CD'], /64 hexadecimal digits/],
     ]) {
       const r = h.install(sh, args);
       assert.equal(r.status, 1, r.output);
@@ -517,13 +523,79 @@ for (const sh of BASHES) {
     assert.match(h.calls(), /^disable system\/io\.vistasecurity\.device-agent$/m);
   });
 
+  test(`sensor: a re-run with no key, URL or address upgrades the binary and keeps the identity (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
+    const h = macHost(t, 'sensor');
+    assert.equal(h.install(sh, ['--url', 'https://p.example', '--ip', '192.0.2.10', '--key', KEY, '--interfaces', 'en1']).status, 0);
+    writeFileSync(join(h.work, 'crypto-sensor'), fakeAgent('sensorId', 'registrationKey').replace('v9.9.9', 'v10.0.0'), { mode: 0o755 });
+    // No default route now: the interfaces in the config are kept, not looked for.
+    const r = h.install(sh, [], { FAKE_NO_ROUTE: '1' });
+    assert.equal(r.status, 0, r.output);
+    assert.match(r.output, /already enrolled/);
+    assert.match(r.output, /^Control Plane: https:\/\/p\.example$/m, 'the platform in the config is not the one shown');
+    const started = readFileSync(join(h.state, 'config-at-start'), 'utf8');
+    assert.match(started, new RegExp(`^sensorId: "${UUID}"`, 'm'), 'identity discarded');
+    assert.match(started, /^ {2}interfaces: \["en1"\]$/m, 'the interfaces it was installed with were replaced');
+    assert.equal(readFileSync(join(h.state, 'agent-env'), 'utf8').trim(), 'SENSOR_IP_ADDRESS=192.0.2.10', 'the address was not carried over');
+    assert.match(readFileSync(join(h.root.install, 'vista-sensor'), 'utf8'), /v10\.0\.0/, 'the binary was not replaced');
+    assert.match(h.calls(), /^bootout system\/io\.vistasecurity\.sensor$/m, 'the running job was not stopped first');
+  });
+
+  test(`sensor: a first install with no key, URL or address fails; one with a pending config needs a key (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
+    const h = macHost(t, 'sensor');
+    const r = h.install(sh, []);
+    assert.equal(r.status, 1, r.output);
+    assert.match(r.output, /Registration key is required/);
+    // An install whose sensor never enrolled cannot be re-run without a key.
+    mkdirSync(join(h.root.install, 'etc'), { recursive: true });
+    writeFileSync(join(h.root.install, 'etc', 'sensor-config.yaml'), `sensorId: "mac-1"\ncontrolPlaneUrl: "https://p.example"\nregistrationKey: "${KEY}"\n`);
+    const pending = h.install(sh, ['--ip', '192.0.2.10']);
+    assert.equal(pending.status, 1, pending.output);
+    assert.match(pending.output, /does not record an enrolled sensor/);
+    assert.doesNotMatch(h.calls(), /bootstrap/);
+  });
+
+  test(`device agent: a re-run with no key or URL upgrades the binary and keeps the identity (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
+    const h = macHost(t, 'device-agent');
+    assert.equal(h.install(sh, ['--url', 'https://p.example', '--key', KEY]).status, 0);
+    writeFileSync(join(h.work, 'device-agent'), fakeAgent('agent_id', 'registration_key').replace('v9.9.9', 'v10.0.0'), { mode: 0o755 });
+    const r = h.install(sh, []);
+    assert.equal(r.status, 0, r.output);
+    assert.match(r.output, /already enrolled/);
+    assert.match(r.output, /Platform: https:\/\/p\.example/);
+    assert.match(readFileSync(join(h.state, 'config-at-start'), 'utf8'), new RegExp(`^agent_id: "${UUID}"`, 'm'), 'identity discarded');
+    assert.match(readFileSync(join(h.root.install, 'vista-device-agent'), 'utf8'), /v10\.0\.0/, 'the binary was not replaced');
+    const other = h.install(sh, ['--key', 'REG-another-key-0000']);
+    assert.equal(other.status, 0, other.output);
+    assert.doesNotMatch(other.output, /already enrolled/);
+    const fresh = readFileSync(join(h.state, 'config-at-start'), 'utf8');
+    assert.match(fresh, /^registration_key: "REG-another-key-0000"$/m, 'a new key did not get a fresh enrollment');
+    assert.match(fresh, /^platform_url: "https:\/\/p\.example"$/m, 'the platform of the config was not kept');
+  });
+
+  test(`device agent: a first install needs a URL and a key, and the fingerprint is checked (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
+    const h = macHost(t, 'device-agent');
+    for (const [args, msg] of [
+      [['--key', KEY], /--url and --key are required \(--url is the address of your own Vista Platform console, as shown in your browser/],
+      [[], /--url and --key are required/],
+      [['--url', 'https://p.example', '--key', KEY, '--ca-fingerprint', 'abc'], /64 hexadecimal digits/],
+    ]) {
+      const r = h.install(sh, args);
+      assert.equal(r.status, 1, r.output);
+      assert.match(r.output, msg);
+    }
+    assert.ok(!existsSync(h.root.install), 'something was installed');
+    const r = h.install(sh, ['--url', 'https://p.example', '--key', KEY, '--ca-fingerprint', PRETTY_FINGERPRINT]);
+    assert.equal(r.status, 0, r.output);
+    assert.match(readFileSync(join(h.state, 'agent-args'), 'utf8').trim(), new RegExp(`-ca-fingerprint ${FINGERPRINT}$`));
+  });
+
   test(`check mode needs neither root nor a key; uninstall removes everything (${sh})`, { skip: !PYTHON && 'needs python3' }, (t) => {
     for (const kind of ['sensor', 'device-agent']) {
       const h = macHost(t, kind);
       const c = h.install(sh, ['--check-dependencies'], { FAKE_UID: '501' });
       assert.equal(c.status, 0, c.output);
       assert.match(c.output, /runs on this Mac/);
-      const args = kind === 'sensor' ? ['--ip', '192.0.2.10', '--key', KEY] : ['--url', 'https://p.example', '--key', KEY];
+      const args = kind === 'sensor' ? ['--url', 'https://p.example', '--ip', '192.0.2.10', '--key', KEY] : ['--url', 'https://p.example', '--key', KEY];
       assert.equal(h.install(sh, args).status, 0);
       const u = h.install(sh, ['--uninstall']);
       assert.equal(u.status, 0, u.output);

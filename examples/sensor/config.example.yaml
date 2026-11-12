@@ -1,64 +1,107 @@
-sensorId: "your-sensor-id"
-controlPlaneUrl: "https://app.vistasecurity.io"
+# Vista Platform sensor configuration: every key the sensor reads.
+#
+# The installers write this file for you (sensor-config.yaml, mode 0600 or
+# restricted to Administrators and SYSTEM, because it holds the registration
+# key until the sensor redeems it) and start the sensor with -config <file>.
+# The first block below is what they write; everything after it is optional.
+# Keys are flat camelCase as shown; a key the sensor does not know is ignored.
+
+# The sensor's name until it registers; the sensor then replaces it with the
+# UUID the platform accepted.
+sensorId: "sensor-host01"
+# The address of your own Vista Platform console. There is no default platform.
+controlPlaneUrl: "https://vista.example.com"
+# Single-use key from Discovery → Sensors & Agents → "Register sensor or agent".
+# Once the platform has issued the sensor its own secret, the sensor keeps only
+# the key's SHA-256 (registrationKeySha256) and clears this value.
 registrationKey: ""
-reportingIntervalSeconds: 30
-
-storage:
-  maxStorageSize: 104857600    # 100 MB
-  rotationSize: 10485760       # 10 MB
-  retentionDays: 7
-  dataPath: "/var/lib/vista-sensor"
-
-  # encryptionKey: AES encryption key for local discovery storage.
-  # Provide a 64-character hex string (= 32 bytes, AES-256). Leave blank to
-  # auto-generate a new key on first startup and persist it to keyPath.
-  # Example: encryptionKey: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-  encryptionKey: ""
-
-  # keyPath: Directory where the auto-generated encryption key is stored.
-  # Intentionally separate from dataPath so ciphertext and key are not co-located.
-  # Defaults (by OS):
-  #   Linux:   $XDG_STATE_HOME/crypto-sensor  (usually ~/.local/state/crypto-sensor)
-  #   macOS:   ~/Library/Application Support/CryptoSensorKeys
-  #   Windows: %APPDATA%\CryptoSensor
-  # keyPath: "/etc/crypto-sensor/keys"
+reportingIntervalSeconds: 30        # default 30
+# heartbeatIntervalSeconds: 60      # default 60
 
 capture:
+  # Interfaces to capture on. On Windows an entry may be the adapter's name
+  # ("Ethernet 2"), its description, or its Npcap device name
+  # ("\\Device\\NPF_{GUID}"); an empty list captures on every adapter that is
+  # up and has an address.
   interfaces: ["eth0"]
   activeProbing: true
+  networkDiscovery: true
+
   # thirdPartyTLSEnrichment: let the TLS enricher connect to THIRD-PARTY TLS
   # services this network talks to, to read their certificates. Default false.
   # Local value: applies only until the platform delivers its own setting,
   # which then wins (recorded in <dataPath>/platform-probe-consent.json).
   # thirdPartyTLSEnrichment: false
+
   # ownedNetworks: public CIDRs to treat as yours (air-gapped equivalent of
-  # registered network segments; IPv4 /8 or narrower, IPv6 /16 or narrower).
+  # platform-declared networks; IPv4 /8 or narrower, IPv6 /16 or narrower).
   # ownedNetworks: ["203.0.113.0/24"]
-  networkDiscovery: true
-  maxConnections: 1000
-  timeoutSeconds: 30
-  bufferSize: 1048576         # 1 MB
 
-  # dedupTTLMinutes: Minimum minutes before re-reporting the same passive
-  # observation (same dest IP, port, protocol). Also drives TLS enricher debounce.
-  # Default 60. Override with env DEDUP_TTL_MINUTES or tenant Sensor Configuration UI.
-  dedupTTLMinutes: 60
+  # maxConnections: 1000
+  # timeoutSeconds: 30
+  # bufferSize: 1048576               # bytes
 
-  # extraPortsToMonitor: Additional TCP ports the sensor captures AND decodes
+  # dedupTTLMinutes: minimum minutes before re-reporting the same passive
+  # observation (same destination address, port, protocol). Also drives the
+  # TLS enricher's debounce. Default 60. The DEDUP_TTL_MINUTES environment
+  # variable and the platform's setting override it.
+  # dedupTTLMinutes: 60
+
+  # extraPortsToMonitor: additional TCP ports the sensor captures AND decodes
   # as TLS, beyond its built-in ports (the TLS, SSH, SMB, RDP, Kerberos and
-  # STARTTLS ports, plus the OT ports you enable). Use this for TLS on a
-  # non-standard port without rebuilding the sensor. A listed port is always
+  # STARTTLS ports, plus the OT ports you enable). A listed port is always
   # treated as TLS; it never changes what a built-in or STARTTLS port means
   # (22 stays SSH, 445 stays SMB). Values outside 1-65535 are ignored.
-  # Managed from the console as "Additional TLS ports" (the sensor's Control
-  # tab, or Sensor defaults): this list is reported on the sensor's first
-  # check-in and kept as its own setting; after that the console's value wins
-  # and is written back here. Takes effect when the capture reopens (restart).
+  # Managed from the console as "Additional TLS ports": this list is reported
+  # on the sensor's first check-in and kept as its own setting; after that the
+  # console's value wins and is written back here. Takes effect when the
+  # capture reopens (restart).
   # extraPortsToMonitor: [8444, 9443]
 
-  # deepScan: When true, discovery jobs perform additional probe connections per
-  # target to enumerate all accepted TLS versions (1.0–1.3) and check for
-  # deprecated cipher suites. Increases network connections per target.
-  # Off by default. Enable on specific jobs via the job options field instead
-  # of enabling globally here.
-  deepScan: false
+  # starttlsPorts: ports decoded as STARTTLS.
+  # Default [25, 143, 110, 5432, 3306, 21, 5222, 389].
+  # starttlsPorts: [25, 143, 110, 5432, 3306, 21, 5222, 389]
+
+  # deepScan: when true, discovery jobs make additional probe connections per
+  # target to enumerate every accepted TLS version (1.0-1.3) and check for
+  # deprecated cipher suites. Off by default; prefer enabling it on a job.
+  # deepScan: false
+
+  # Protocol decoders, each on unless set to false.
+  # enableJA3: true
+  # enableSTARTTLS: true
+  # enableQUICDecrypt: true
+  # enableWireGuard: true
+  # enableSMB: true
+  # enableOpenVPN: true
+  # enableKerberos: true
+  # enableModbus: true
+  # enableMMS: true
+  # enableDNP3: true
+  # enableOPCUA: true
+  # enableENIP: true
+  # enableHARTIP: true
+
+  # Observation of this host's own connections: hostObservation is on unless
+  # set to false; hostObservationDNS is off unless set to true.
+  # hostObservation: true
+  # hostObservationWindowSeconds: 60
+  # hostObservationDNS: false
+
+storage:
+  # Where the sensor keeps its certificate (certs/), its state files and, on
+  # Windows, its log (logs/sensor.log). The installers set it to the data
+  # directory of the installation.
+  dataPath: "/opt/vista-sensor/data"
+
+# verbose: true                       # the installers run the sensor with --verbose
+# testMode: false                     # log discoveries to a file instead of the platform
+
+# security: written by the sensor after it registers (paths of its client
+# certificate, key and the platform CA under <dataPath>/certs, and of its
+# per-sensor secret). Do not write it by hand.
+# security:
+#   clientCertPath: "/opt/vista-sensor/data/certs/client.crt"
+#   clientKeyPath: "/opt/vista-sensor/data/certs/client.key"
+#   serverCACertPath: "/opt/vista-sensor/data/certs/ca.crt"
+#   useTLS: true

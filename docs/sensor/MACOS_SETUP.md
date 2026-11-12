@@ -2,9 +2,10 @@
 
 `install-sensor-macos.sh` installs the sensor as a launchd daemon: it starts at
 boot, restarts when it stops, and registers itself with the platform on first
-start. It runs on macOS 12 or later (what the Go release the agents are built with
-supports), on Apple silicon and Intel Macs, with the
-bash macOS ships.
+start. It runs on macOS 12 Monterey or later, on Apple silicon and Intel Macs,
+with the bash macOS ships. The minimum is the Go release the agents are built
+with: Go 1.26 runs on macOS 12 and later, and is the last Go release that does
+([Go 1.26 release notes](https://go.dev/doc/go1.26)).
 
 ## What you need
 
@@ -16,11 +17,28 @@ bash macOS ships.
   and the loose `install-sensor-macos.sh` also work, side by side in one
   directory: the installer accepts either name and needs no rename.
 - An administrator account (the installer runs with `sudo`).
-- A registration key and the address it was created for, from the console
-  (Discovery → Sensors & Agents → Register).
+- The commands from your console: in your Vista Platform console, open
+  Discovery → Sensors & Agents and choose **Register sensor or agent**. The
+  dialog creates a single-use registration key and prints the install commands
+  for macOS, with your platform's URL and, where needed, its CA fingerprint
+  (see "The platform URL and CA fingerprint" below). You also need the address
+  of this Mac the key was created for (`--ip`).
 - Nothing else: the sensor uses the libpcap that is part of macOS.
 
-Verify what you downloaded before you run it (`docs/verify-release.md`).
+Verify what you downloaded before you run it
+([verify-release.md](../verify-release.md)). Use the installer from the
+release, never a copy from this repository's source tree.
+
+## The platform URL and CA fingerprint
+
+There is no hosted platform and no default URL: `--url` is the address of your
+own Vista Platform console, the URL the registration dialog was opened at. The
+commands the dialog prints already carry it.
+
+If your platform's certificate is signed by a private CA that this Mac does not
+trust, the dialog shows a **Platform CA fingerprint** panel with a copy button,
+and its commands carry `--ca-fingerprint`. The value is the CA's SHA-256
+fingerprint, 64 hexadecimal digits (colons and a `sha256:` prefix are accepted).
 
 ## Install
 
@@ -29,7 +47,7 @@ tar -xzf vista-sensor_<version>_darwin_arm64.tar.gz
 cd vista-sensor_<version>_darwin_arm64
 bash install-sensor-macos.sh --check-dependencies      # no root, changes nothing
 printf '%s\n' "$KEY" | sudo bash install-sensor-macos.sh \
-    --url https://platform.example.com --key-stdin --ip 192.0.2.10
+    --url https://vista.example.com --key-stdin --ip 192.0.2.10
 ```
 
 The installer:
@@ -51,7 +69,7 @@ The installer:
 
 It never prints the key. Pass it on standard input (`--key-stdin`) or in
 `VISTA_REGISTRATION_KEY`; `--key KEY` works too but shows the key to other
-users in the process list.
+users in the process list. A registration key works once.
 
 ### A platform with a private CA
 
@@ -60,7 +78,7 @@ screen, so an unattended install against a platform whose certificate this Mac
 does not trust passes the CA's SHA-256 fingerprint:
 
 ```sh
-... --ca-fingerprint <SHA-256 of the platform CA, hex>
+... --ca-fingerprint <SHA-256 of the platform CA: 64 hex digits>
 ```
 
 The sensor pins that CA on first start only if it hashes to the fingerprint.
@@ -80,10 +98,7 @@ files are root's: `/usr/local/vista-sensor` (program, `etc/`, `data/`) and
 | Log | `tail -f /Library/Logs/Vista/sensor/sensor.log` (moves to `sensor.log.1` at 10 MiB) |
 | Restart | `sudo launchctl kickstart -k system/io.vistasecurity.sensor` |
 | Stop until the next boot | `sudo launchctl bootout system/io.vistasecurity.sensor` |
-| Upgrade | run the installer again with the new binary and the same key |
 | Uninstall | `sudo bash install-sensor-macos.sh --uninstall` |
-
-The sensor also keeps its own log under `/usr/local/vista-sensor/data/logs/`.
 
 launchd starts the sensor again whenever it stops, at most every 10 seconds,
 except when it exits with status 78: that means a person has to act (the
@@ -92,17 +107,39 @@ restarting would only repeat it. The job then stays stopped until the next boot
 or the next install. If the key is rejected during an install, the installer
 also disables the job; running the installer again with a new key enables it.
 
-Re-running the installer with the same key keeps the sensor's identity and
-replaces only the binary. A different key is a fresh registration: the sensor's
-certificate is discarded and it registers again.
+## Upgrade
+
+Download and verify the new release, then run its installer again from the
+directory holding the new files, with **no key**:
+
+```sh
+sudo bash install-sensor-macos.sh
+```
+
+It keeps the sensor's identity, configuration and certificate and replaces only
+the binary. `--url` and `--ip` are not needed either.
+
+A registration key cannot be used twice. Running the installer with a **new**
+key registers this Mac as a **second, new sensor**: the old certificate is
+discarded and the old sensor stays in the console until you remove it there.
+Do that only to replace the sensor's identity on purpose.
+
+## Uninstall
+
+```sh
+sudo bash install-sensor-macos.sh --uninstall
+```
+
+It stops the sensor and removes the job, the installation and the logs. The
+sensor stays listed in the console until you remove it there.
 
 ## Options
 
 | Option | |
 |---|---|
-| `--url URL` | Platform URL, as the console shows it |
+| `--url URL` | Your platform's URL, as the console shows it (required on a first install) |
 | `--key-stdin`, `--key KEY` | Registration key (or `VISTA_REGISTRATION_KEY`) |
-| `--ip ADDRESS` | The address the key was created for (required) |
+| `--ip ADDRESS` | The address the key was created for (required on a first install) |
 | `--name NAME` | Sensor name (default `sensor-<host name>-<date>`) |
 | `--interfaces LIST` | Interfaces to capture on, comma-separated |
 | `--ca-fingerprint SHA256` | Pin a private platform CA (see above) |
@@ -113,7 +150,7 @@ certificate is discarded and it registers again.
 `--profile` is accepted for parity with `install-sensor.sh` and is not applied
 yet. There is no interactive mode on macOS.
 
-## Not covered
+## Not notarized
 
 The macOS binaries are not notarized. The installer removes the quarantine flag
 from the copy it installs; Sigstore signatures (`docs/verify-release.md`) are how

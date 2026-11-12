@@ -10,9 +10,9 @@
 
     The installer does not register the agent: the agent enrolls itself on
     first start with the registration key in its configuration. Re-running the
-    installer with the same key keeps the agent's enrollment and replaces only
-    the binary, which is how to upgrade it. A different key is a fresh
-    enrollment.
+    installer with no key, or with the key it enrolled with, keeps the agent's
+    enrollment and replaces only the binary, which is how to upgrade it. A
+    different key is a fresh enrollment.
 
     Run it from the directory that holds the device agent: device-agent.exe
     from the release package, or the release file
@@ -22,7 +22,8 @@
     .\install-device-agent.ps1 -Url https://vista.example.com -KeyStdin
 
     Prompts for the registration key, so it does not appear on the command
-    line or in the process list.
+    line or in the process list. -Url is the address of your own Vista
+    Platform console, as shown in your browser.
 
 .EXAMPLE
     $env:VISTA_REGISTRATION_KEY = "REG-..."; .\install-device-agent.ps1 -Url https://vista.example.com
@@ -40,6 +41,17 @@
     Checks that the agent binary runs on this host, then exits. Needs neither
     Administrator rights nor a key.
 
+.EXAMPLE
+    .\install-device-agent.ps1
+
+    Upgrades an enrolled agent in place: no key or URL needed.
+
+.EXAMPLE
+    .\install-device-agent.ps1 -Uninstall
+
+    Stops and deletes the service and deletes the install directory, which
+    holds the configuration, certificates and private key.
+
 .NOTES
     Must be run from an elevated (Administrator) PowerShell session, except
     with -CheckDependencies.
@@ -47,7 +59,8 @@
 
 [CmdletBinding()]
 param(
-    # Platform URL, as shown in the console. Required.
+    # Address of your own Vista Platform console, as shown in your browser.
+    # Required on a first install; a re-run keeps the one in the config.
     [string]$Url = "",
 
     # Registration key minted in the console. A key on the command line is
@@ -67,12 +80,16 @@ param(
     [string]$InstallDir = "$env:ProgramFiles\VistaDeviceAgent",
 
     # Check that the agent binary runs on this host, then exit.
-    [switch]$CheckDependencies
+    [switch]$CheckDependencies,
+
+    # Stop and delete the service, and delete the install directory.
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
 $ServiceName = "VistaDeviceAgent"
 $ServiceDisplay = "Vista Platform Device Agent"
+$UrlHelp = "the address of your own Vista Platform console, as shown in your browser (for example -Url https://vista.example.com)"
 
 function Write-Info  { param($m) Write-Host "[INFO]  $m" -ForegroundColor Green }
 function Write-Warn  { param($m) Write-Host "[WARN]  $m" -ForegroundColor Yellow }
@@ -130,6 +147,21 @@ function Get-KeySha256([string]$value) {
 # True when the config at $path records that this host enrolled with $key:
 # the key itself (until the platform has issued the per-agent secret that
 # replaces it) or its SHA-256 fingerprint, which is all the agent keeps after.
+# True when the config at $path records an enrolled agent.
+function Test-Enrolled([string]$path) {
+    $uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    return ((Get-ConfigValue $path 'agent_id') -match $uuidPattern)
+}
+
+# The fingerprint as the agent compares it (shared/certificates): case, an
+# optional sha256: prefix and separators do not matter. $null unless exactly
+# 64 hexadecimal digits remain.
+function ConvertTo-CaFingerprint([string]$value) {
+    $normalized = ($value.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
+    if ($normalized -notmatch '^[0-9a-f]{64}$') { return $null }
+    return $normalized
+}
+
 function Test-EnrolledWithKey([string]$path, [string]$key) {
     $uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     if (-not ((Get-ConfigValue $path 'agent_id') -match $uuidPattern)) { return $false }
@@ -182,6 +214,76 @@ function Set-ServiceStartup {
 }
 #endregion service-config
 
+# --- Layout ----------------------------------------------------------------
+$DataDir    = Join-Path $InstallDir "data"
+$ConfigPath = Join-Path $InstallDir "device-agent.yaml"
+# The agent writes its log here when it runs as a service (stderr goes nowhere
+# under the Service Control Manager); it rotates at 10 MB to device-agent.log.1.
+$LogFile    = Join-Path $DataDir "logs\device-agent.log"
+$uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# True when the service exists. Get-Service exists on Windows only.
+function Test-ServiceInstalled([string]$name) {
+    try { return [bool](Get-Service -Name $name -ErrorAction SilentlyContinue) } catch { return $false }
+}
+
+function Assert-Administrator {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+        exit 1
+    }
+}
+
+#region uninstall
+# -Uninstall: stops and deletes the service, then deletes the install
+# directory, which holds the configuration, the certificates and the private
+# key. Needs Administrator and nothing else; on a host with nothing installed
+# it removes nothing and succeeds. A directory that holds no device agent
+# install is left in place, so a mistyped -InstallDir cannot delete it.
+function Invoke-Uninstall {
+    Assert-Administrator
+    $removed = 0
+    if (Test-ServiceInstalled $ServiceName) {
+        Write-Info "Stopping and removing the service '$ServiceName'..."
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $ServiceName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Could not delete the service $ServiceName (sc.exe delete exit $LASTEXITCODE). Nothing else was removed."
+            exit 1
+        }
+        Write-Info "Removed the service $ServiceName"
+        $removed++
+    }
+    if (Test-Path -LiteralPath $InstallDir) {
+        $ours = @($ConfigPath, (Join-Path $InstallDir $InstalledBinaryName)) | Where-Object { Test-Path -LiteralPath $_ }
+        $empty = -not (Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+        if ($ours -or $empty) {
+            # The stopped service may hold its binary for a moment longer.
+            for ($i = 1; $i -le 10; $i++) {
+                try { Remove-Item -LiteralPath $InstallDir -Recurse -Force; break }
+                catch {
+                    if ($i -eq 10) { Write-Err "Could not remove ${InstallDir}: $($_.Exception.Message)"; exit 1 }
+                    Start-Sleep -Seconds 1
+                }
+            }
+            Write-Info "Removed $InstallDir (configuration, certificates and private key)"
+            $removed++
+        } else {
+            Write-Warn "Left $InstallDir in place: it does not hold a device agent install. Remove it by hand if it is one."
+        }
+    }
+    if ($removed -eq 0) {
+        Write-Info "Nothing to remove: the device agent is not installed on this host."
+    } else {
+        Write-Info "The device agent is uninstalled. It still appears in the console until you delete it there (Discovery -> Sensors & Agents)."
+    }
+    exit 0
+}
+#endregion uninstall
+
+if ($Uninstall) { Invoke-Uninstall }
+
 # --- The binary runs on this host ------------------------------------------
 # Running it proves it is a build for this architecture. -version exits before
 # configuration or enrollment.
@@ -217,29 +319,44 @@ if ($KeyStdin) {
 }
 if ([string]::IsNullOrEmpty($Key) -and $env:VISTA_REGISTRATION_KEY) { $Key = $env:VISTA_REGISTRATION_KEY }
 if ($null -ne $Key) { $Key = $Key.Trim() }
-if ([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($Key)) {
-    Write-Err "-Url and a registration key are required (-Key, -KeyStdin, or VISTA_REGISTRATION_KEY in the environment)."
+# A host with an install may be enrolled already and need no key or URL;
+# whether it is enrolled is read as Administrator below.
+$existingInstall = (Test-Path -LiteralPath $ConfigPath) -or (Test-ServiceInstalled $ServiceName)
+if (([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($Key)) -and -not $existingInstall) {
+    Write-Err "-Url and a registration key are required (-Key, -KeyStdin, or VISTA_REGISTRATION_KEY in the environment). -Url is $UrlHelp."
     Write-Host "  Example: .\install-device-agent.ps1 -Url https://vista.example.com -KeyStdin"
     exit 1
 }
 if ($CaFingerprint) {
-    # The agent's own normalisation: case, an optional sha256: prefix and
-    # separators do not matter.
-    $normalized = ($CaFingerprint.Trim().ToLowerInvariant() -replace '^sha256:', '') -replace '[:\s-]', ''
-    if ($normalized -notmatch '^[0-9a-f]{64}$') {
-        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (colons allowed)."
+    $normalized = ConvertTo-CaFingerprint $CaFingerprint
+    if (-not $normalized) {
+        Write-Err "-CaFingerprint must be a SHA-256 fingerprint: 64 hexadecimal characters (upper or lower case; colons and a sha256: prefix allowed)."
         exit 1
     }
     $CaFingerprint = $normalized
 }
 
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Err "This installer must be run from an elevated (Administrator) PowerShell session."
+Assert-Administrator
+
+# A host this key already enrolled keeps its identity, and so does one re-run
+# with no key at all. Re-running the install (to upgrade the binary, or by
+# mistake) must not discard the certificate and agent ID and send it back to
+# enroll with a key it has already spent. A different key means a fresh
+# enrollment. Nothing has changed yet.
+$enrolled = Test-Enrolled $ConfigPath
+if ([string]::IsNullOrWhiteSpace($Key) -and -not $enrolled) {
+    Write-Err "-Url and a registration key are required: $ConfigPath does not record an enrolled agent."
+    exit 1
+}
+$keepEnrollment = ($enrolled -and [string]::IsNullOrWhiteSpace($Key)) -or (Test-EnrolledWithKey $ConfigPath $Key)
+# Without -Url, a host that has a config keeps the platform it names.
+if ([string]::IsNullOrWhiteSpace($Url)) { $Url = Get-ConfigValue $ConfigPath 'platform_url' }
+if ([string]::IsNullOrWhiteSpace($Url)) {
+    Write-Err "-Url is required: $ConfigPath does not record a platform. It is $UrlHelp."
     exit 1
 }
 
-$maskedKey = if ($Key.Length -le 4) { "****" } else { "****" + $Key.Substring($Key.Length - 4) }
+$maskedKey = if ([string]::IsNullOrEmpty($Key)) { "(none)" } elseif ($Key.Length -le 4) { "****" } else { "****" + $Key.Substring($Key.Length - 4) }
 
 Write-Host ""
 Write-Host "Vista Platform Device Agent Installer (Windows)" -ForegroundColor Cyan
@@ -251,21 +368,8 @@ Write-Info "Install dir   : $InstallDir"
 if ($CaFingerprint) { Write-Info "CA fingerprint: $CaFingerprint" }
 Write-Host ""
 
-# --- Layout ----------------------------------------------------------------
-$DataDir    = Join-Path $InstallDir "data"
-$ConfigPath = Join-Path $InstallDir "device-agent.yaml"
-# The agent writes its log here when it runs as a service (stderr goes nowhere
-# under the Service Control Manager); it rotates at 10 MB to device-agent.log.1.
-$LogFile    = Join-Path $DataDir "logs\device-agent.log"
-$uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-
-# A host this key already enrolled keeps its identity. Re-running the same
-# install command (to upgrade the binary, or by mistake) must not discard the
-# certificate and agent ID and send it back to enroll with a key it has
-# already spent. A different key means a fresh enrollment.
-$keepEnrollment = Test-EnrolledWithKey $ConfigPath $Key
 if ($keepEnrollment) {
-    Write-Info "This host is already enrolled with this key (agent $(Get-ConfigValue $ConfigPath 'agent_id')); keeping its identity and configuration."
+    Write-Info "This host is already enrolled (agent $(Get-ConfigValue $ConfigPath 'agent_id')); keeping its identity and configuration."
 }
 
 # Stop a previous install: its binary cannot be replaced while it runs, and it
@@ -453,6 +557,6 @@ Write-Host "  Status:    Get-Service $ServiceName"
 Write-Host "  Logs:      Get-Content -Tail 50 -Wait '$LogFile'"
 Write-Host "  Events:    Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'} -MaxEvents 20"
 Write-Host "  Restart:   Restart-Service $ServiceName"
-Write-Host "  Uninstall: Stop-Service $ServiceName; sc.exe delete $ServiceName"
+Write-Host "  Uninstall: & '$PSCommandPath' -Uninstall"
 Write-Host ""
 Write-Info "The agent polls for interrogation jobs. It appears under Discovery -> Sensors & Agents once its first heartbeat arrives."

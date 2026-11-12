@@ -9,10 +9,13 @@
 # re-run-to-upgrade behaviour.
 #
 # Usage: sudo bash install-device-agent.sh --url URL --key KEY [options]
+#        sudo bash install-device-agent.sh --uninstall
 
 set -e
 
+# There is no default platform URL: every customer runs their own Vista Platform.
 CONTROL_PLANE_URL=""
+URL_HELP="the address of your own Vista Platform console, as shown in your browser (for example --url https://vista.example.com)"
 # The key may come from the environment so it stays out of the process list.
 REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 CA_FINGERPRINT=""
@@ -30,6 +33,7 @@ LEGACY_BINARY="device-agent"
 MIGRATION_STEP=""
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 CHECK_DEPENDENCIES=false
+UNINSTALL=false
 REGISTRATION_TIMEOUT=${REGISTRATION_TIMEOUT:-90}
 
 RED='\033[0;31m'
@@ -74,10 +78,11 @@ Vista Platform Device Agent Installer
 =====================================
 
 Usage: $0 --url URL --key KEY [options]
+       $0 --uninstall
 
 Options:
-    -u, --url URL              Platform URL, as shown in the console (required unless
-                               this host is already enrolled)
+    -u, --url URL              Address of your own Vista Platform console, as shown in
+                               your browser (required unless this host is already enrolled)
     -k, --key KEY              Registration key (required unless this host is already
                                enrolled). A key on the command line is
                                visible to other users in the process list; prefer one of:
@@ -87,6 +92,9 @@ Options:
                                platform whose certificate this host does not already trust
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --check-dependencies       Check the agent binary runs on this host, then exit (no root needed)
+    --uninstall                Stop the agent and remove its service, its installation
+                               directory (configuration, certificates and private key)
+                               and its service account
     -h, --help                 Show this help
 
 Run it from the directory holding the downloaded agent: the contents of the
@@ -94,6 +102,11 @@ Run it from the directory holding the downloaded agent: the contents of the
 Re-running it keeps the agent's enrollment and replaces only the binary, which
 is how to upgrade it; a host installed under the old crypto-device-agent names
 moves to the vista-device-agent names on the way, with no new key.
+
+Examples:
+    $0 --url https://vista.example.com --key-stdin
+    $0                  # upgrade an enrolled agent in place (no key needed)
+    $0 --uninstall      # remove the agent from this host
 EOF
 }
 
@@ -105,6 +118,7 @@ while [[ $# -gt 0 ]]; do
         --ca-fingerprint) CA_FINGERPRINT="$2"; shift 2 ;;
         -d|--dir) INSTALL_DIR="$2"; DIR_GIVEN=true; shift 2 ;;
         --check-dependencies) CHECK_DEPENDENCIES=true; shift ;;
+        --uninstall) UNINSTALL=true; shift ;;
         -h|--help) show_usage; exit 0 ;;
         *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
     esac
@@ -145,7 +159,8 @@ create_service_user() {
 
 # --- shared Linux migration functions (begin) ---
 # This block is byte-identical in install-sensor.sh and install-device-agent.sh;
-# scripts/install-linux-migration.test.mjs holds them equal.
+# scripts/install-linux-migration.test.mjs holds them equal. It also carries the
+# root check, the CA fingerprint check and --uninstall.
 #
 # Earlier releases installed under the crypto-* names. Re-running the installer
 # moves such a host to the Vista names and keeps its enrollment. Each step checks
@@ -323,6 +338,114 @@ migrate_legacy_install() {
     fi
     MIGRATION_STEP="installing $SERVICE_NAME.service"
 }
+
+# Stops unless the installer runs as root.
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run as root (use sudo)"
+        exit 1
+    fi
+}
+
+# Prints --ca-fingerprint the way the agents compare fingerprints
+# (shared/certificates): lower case, without a sha256: prefix, colons, spaces or
+# dashes. Fails unless exactly 64 hexadecimal digits remain.
+normalize_ca_fingerprint() {
+    local f
+    f=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//')
+    f=${f#sha256:}
+    f=$(printf '%s' "$f" | tr -d ': \t\r\n-')
+    if [[ ! "$f" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+    printf '%s' "$f"
+}
+
+# True when user $1 is the account this installer creates: home directory $2
+# and the shell /bin/false. An account of the same name that someone else made
+# is not removed.
+installer_made_user() {
+    local entry home shell
+    entry=$(getent passwd "$1" 2>/dev/null) || return 1
+    home=$(printf '%s' "$entry" | cut -d: -f6)
+    shell=$(printf '%s' "$entry" | cut -d: -f7)
+    [[ "${home%/}" == "${2%/}" && "$shell" == "/bin/false" ]]
+}
+
+# True when directory $1 is safe to delete as an install directory: an absolute
+# path other than /, holding this installer's config or binary, or empty.
+# Anything else is left in place, so a mistyped --dir cannot delete it.
+removable_install_dir() {
+    local dir=${1%/}
+    [[ "$dir" == /* && "$dir" != "" && -d "$dir" ]] || return 1
+    [[ -f "$dir/$CONFIG_NAME" || -f "$dir/$INSTALLED_BINARY" || -f "$dir/$LEGACY_BINARY" || -z "$(ls -A "$dir")" ]]
+}
+
+# Removes this host's install, under the Vista names and the old crypto-*
+# ones: stops and removes the service, deletes the installation directory (its
+# configuration, certificates and private key) and the service account the
+# installer created. Needs no key and no binary. On a host with nothing
+# installed it removes nothing and succeeds.
+uninstall_install() {
+    local unit name dir user home removed=0 found
+    locate_install
+    for unit in "$NEW_UNIT" "$LEGACY_UNIT"; do
+        name=$(basename "$unit" .service)
+        if [[ ! -f "$unit" ]] && ! systemctl is-active --quiet "$name.service" 2>/dev/null; then
+            continue
+        fi
+        systemctl stop "$name.service" 2>/dev/null || true
+        if systemctl is-active --quiet "$name.service" 2>/dev/null; then
+            print_error "$name.service did not stop; nothing more was removed. Stop it, then run this again."
+            exit 1
+        fi
+        systemctl disable "$name.service" 2>/dev/null || true
+        rm -f "$unit"
+        rm -rf "$unit.d"
+        print_status "Removed the service $name.service ($unit)"
+        removed=$((removed + 1))
+    done
+    systemctl daemon-reload
+    for dir in "$INSTALL_DIR" "$LEGACY_DIR"; do
+        [[ -e "$dir" ]] || continue
+        if ! removable_install_dir "$dir"; then
+            print_warning "Left $dir in place: it does not hold a $SERVICE_NAME install. Remove it by hand if it is one."
+            continue
+        fi
+        rm -rf "$dir"
+        print_status "Removed $dir (configuration, certificates and private key)"
+        removed=$((removed + 1))
+    done
+    for user in "$SERVICE_USER" "$LEGACY_NAME"; do
+        id "$user" &>/dev/null || continue
+        home=$INSTALL_DIR
+        [[ "$user" == "$LEGACY_NAME" ]] && home=$LEGACY_DIR
+        if ! installer_made_user "$user" "$home"; then
+            print_warning "Left user $user in place: it is not the account this installer creates (home $home, shell /bin/false)."
+            continue
+        fi
+        found=0
+        pgrep -u "$user" >/dev/null 2>&1 || found=$?
+        if [[ "$found" -ne 1 ]]; then
+            print_warning "Left user $user in place: a process may still run as it. Remove it once none does: userdel $user"
+            continue
+        fi
+        if ! userdel "$user"; then
+            print_warning "Could not remove user $user. Remove it with: userdel $user"
+            continue
+        fi
+        if getent group "$user" >/dev/null 2>&1; then
+            groupdel "$user" 2>/dev/null || true
+        fi
+        print_status "Removed user $user"
+        removed=$((removed + 1))
+    done
+    if [[ "$removed" -eq 0 ]]; then
+        print_status "Nothing to remove: $SERVICE_NAME is not installed on this host."
+        return 0
+    fi
+    print_status "$SERVICE_NAME is uninstalled. It still appears in the console until you delete it there (Discovery → Sensors & Agents)."
+}
 # --- shared Linux migration functions (end) ---
 
 # Finds the binary to install and sets BINARY: ./$1 (its name in the release
@@ -383,6 +506,12 @@ if [[ $(uname -s) != Linux ]]; then
     exit 1
 fi
 
+if [[ "$UNINSTALL" == "true" ]]; then
+    require_root
+    uninstall_install
+    exit 0
+fi
+
 if [[ "$CHECK_DEPENDENCIES" == "true" ]]; then
     check_agent_binary
     exit $?
@@ -394,15 +523,17 @@ locate_install
 
 # An existing install may be enrolled already; that is checked as root below.
 if [[ ( -z "$CONTROL_PLANE_URL" || -z "$REGISTRATION_KEY" ) && ! -f "$EXISTING_CONFIG" ]]; then
-    print_error "--url and --key are required"
+    print_error "--url and --key are required (--url is $URL_HELP)"
     show_usage
     exit 1
 fi
 
-if [[ $EUID -ne 0 ]]; then
-    print_error "This script must be run as root (use sudo)"
+if [[ -n "$CA_FINGERPRINT" ]] && ! CA_FINGERPRINT=$(normalize_ca_fingerprint "$CA_FINGERPRINT"); then
+    print_error "--ca-fingerprint must be the SHA-256 fingerprint of the platform's CA: 64 hexadecimal digits (upper or lower case; colons and a sha256: prefix are allowed)."
     exit 1
 fi
+
+require_root
 
 # Nothing has changed yet. Without a key, only an enrolled host can go on, and it
 # keeps the platform it enrolled with.
@@ -415,7 +546,7 @@ if [[ -z "$CONTROL_PLANE_URL" ]]; then
     CONTROL_PLANE_URL=$(read_config_value platform_url "$EXISTING_CONFIG")
 fi
 if [[ -z "$CONTROL_PLANE_URL" ]]; then
-    print_error "--url is required: $EXISTING_CONFIG does not record a platform."
+    print_error "--url is required: $EXISTING_CONFIG does not record a platform. It is $URL_HELP."
     exit 1
 fi
 
@@ -606,7 +737,7 @@ echo "📋 Management Commands:"
 echo "  Status:     systemctl status $SERVICE_NAME"
 echo "  Logs:       journalctl -u $SERVICE_NAME -f"
 echo "  Restart:    systemctl restart $SERVICE_NAME"
-echo "  Uninstall:  systemctl stop $SERVICE_NAME && systemctl disable $SERVICE_NAME"
+echo "  Uninstall:  sudo bash $0 --uninstall"
 echo ""
 print_status "The agent is enrolled and polling for interrogation jobs."
 print_status "It appears under Discovery → Sensors & Agents once its first heartbeat arrives."

@@ -1,360 +1,156 @@
-# Device Agent Certificate Management
+# Device agent certificate management
 
-## Overview
+The Vista Platform device agent authenticates to your platform with a client
+certificate (mutual TLS). This page explains how it gets one, where it is kept,
+how it is renewed, and how to recover when it is lost.
 
-The crypto-inventory device agent uses mTLS (mutual TLS) certificates for secure authentication with the control plane. This document explains how certificates are managed throughout the agent lifecycle.
+## Enrollment
 
-## Certificate Lifecycle
+The agent enrolls itself on its first start; the installers never enroll on its
+behalf. With the single-use registration key in its configuration, it:
 
-### 1. Initial Registration
+1. generates a key pair on the host (the private key never leaves it);
+2. creates a certificate signing request (CSR) for the ID it proposes;
+3. sends the registration key, the CSR and its metadata (platform, the version
+   stamped into the binary, its capabilities);
+4. receives, once the platform has checked the key, its signed client
+   certificate, the platform CA and its agent ID;
+5. saves them and rewrites its configuration: `agent_id` is set, a `security:`
+   section records the certificate paths, and, once the platform has issued the
+   agent its own secret, the registration key is replaced by its SHA-256
+   (`registration_key_sha256`).
 
-When an agent first registers with the control plane:
+A registration key works once. After enrollment the agent never needs it again:
+on every start it loads its configuration and certificate from disk and
+connects with mutual TLS.
 
-1. **Agent generates a keypair** locally (private key never leaves the agent)
-2. **Agent creates a CSR** (Certificate Signing Request) with its proposed UUID as CN
-3. **Agent sends registration** request with:
-   - Registration key (from UI)
-   - CSR
-   - Agent metadata (platform, version, etc.)
-4. **Control plane validates** the registration key
-5. **Control plane signs** the CSR and returns:
-   - Signed client certificate
-   - Server CA certificate
-   - Agent ID (UUID)
+## Where the certificate is kept
 
-### 2. Certificate Persistence
+Under the data path (`data_path`):
 
-After successful registration, certificates are automatically saved to disk:
-
-```
-<DataPath>/
-├── certs/                    # Certificate directory (0700 permissions)
-│   ├── client.crt           # Signed client certificate (0644)
-│   ├── client.key           # Private key (0600 - owner only!)
-│   └── ca.crt               # Server CA certificate (0644)
-└── agent-config.yaml        # Updated with certificate paths
-```
-
-**Platform-Specific Data Paths:**
-- **Windows:** `%LOCALAPPDATA%\CryptoDeviceAgent\` (typically `C:\Users\<username>\AppData\Local\CryptoDeviceAgent\`)
-- **macOS:** `~/Library/Application Support/CryptoDeviceAgent/`
-- **Linux:** `/var/lib/vista-device-agent/` (`/var/lib/crypto-device-agent/` if only that exists); installed with `install-device-agent.sh`, `/opt/vista-device-agent/data/`
-
-### 3. Subsequent Startups
-
-On restart, the agent:
-
-1. **Loads config file** (contains agentId and certificate paths)
-2. **Reads certificates** from disk files
-3. **Enables mTLS** automatically (no re-registration needed)
-4. **Connects to platform** using mTLS
-5. **Checks certificate expiration** on startup
-
-**No registration key needed after initial registration!**
-
-### 4. Certificate Rotation
-
-Certificates can be rotated when:
-- Certificate expires within 30 days
-- Manual rotation requested via platform
-- Certificate revoked by admin
-
-The agent checks certificate expiration on startup.
-
-## Authentication Flow
-
-### Registration Endpoint (No mTLS)
-```
-POST /api/v1/device-interrogation-service/agents/register
-Authentication: Registration Key
-mTLS: Not required (agent doesn't have cert yet)
+```text
+<data_path>/
+└── certs/            # directory 0700
+    ├── client.crt    # the agent's certificate (0644)
+    ├── client.key    # its private key (0600)
+    └── ca.crt        # the platform CA (0644)
 ```
 
-### All Other Endpoints (mTLS Required)
-```
-GET  /api/v1/device-interrogation-service/agents/{agent_id}/jobs
-POST /api/v1/device-interrogation-service/agents/{agent_id}/results
-POST /api/v1/device-interrogation-service/agents/{agent_id}/heartbeat
-POST /api/v1/device-interrogation-service/agents/{agent_id}/certificates/rotate
+| System | Data path of an installed agent | Configuration file |
+|---|---|---|
+| Linux | `/opt/vista-device-agent/data` | `/opt/vista-device-agent/device-agent.yaml` |
+| macOS | `/usr/local/vista-device-agent/data` | `/usr/local/vista-device-agent/etc/device-agent.yaml` |
+| Windows | `%ProgramFiles%\VistaDeviceAgent\data` | `%ProgramFiles%\VistaDeviceAgent\device-agent.yaml` |
 
-Authentication: mTLS Certificate
-- Certificate CN must match agent_id
-- Certificate must not be expired
-- Certificate must not be revoked
-- Certificate chain must validate against tenant CA
-```
+What the Linux installer writes:
 
-## Configuration File Format
-
-### Before Registration
 ```yaml
-platform_url: "http://192.0.2.10:8080"
-registration_key: "REG-abc-123-xyz"
+# Vista Platform Device Agent configuration (generated by install-device-agent.sh)
+platform_url: "https://vista.example.com"
+registration_key: "REG-..."
 poll_interval: 30s
-data_path: "/var/lib/vista-device-agent"
+data_path: "/opt/vista-device-agent/data"
 ```
 
-### After Registration
+and after enrollment:
+
 ```yaml
-platform_url: "http://192.0.2.10:8080"
+platform_url: "https://vista.example.com"
 agent_id: "550e8400-e29b-41d4-a716-446655440000"
-registration_key: "REG-abc-123-xyz"
+registration_key_sha256: "..."
 poll_interval: 30s
-data_path: "/var/lib/vista-device-agent"
-
-# mTLS Certificate Configuration (auto-generated after registration)
+data_path: "/opt/vista-device-agent/data"
 security:
-  client_cert_path: "/var/lib/vista-device-agent/certs/client.crt"  # Unix/Linux/macOS
-  # OR on Windows:
-  # client_cert_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\client.crt"
-  client_key_path: "/var/lib/vista-device-agent/certs/client.key"
-  # OR on Windows:
-  # client_key_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\client.key"
-  server_ca_cert_path: "/var/lib/vista-device-agent/certs/ca.crt"
-  # OR on Windows:
-  # server_ca_cert_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\ca.crt"
+  client_cert_path: "/opt/vista-device-agent/data/certs/client.crt"
+  client_key_path: "/opt/vista-device-agent/data/certs/client.key"
+  server_ca_cert_path: "/opt/vista-device-agent/data/certs/ca.crt"
   use_tls: true
 ```
 
-**Note for Windows**: All paths are automatically quoted and escaped with double backslashes (`\\`) by the agent when writing the configuration file. This ensures proper YAML parsing on Windows systems.
+## File permissions
 
-## Security Considerations
+| File | Permissions | Why |
+|---|---|---|
+| `certs/` | `0700` | only the service account can reach the certificate files |
+| `client.key` | `0600` | the private key authenticates the agent |
+| `client.crt`, `ca.crt` | `0644` | certificates hold no secret |
+| `device-agent.yaml` | `0600` (Linux, macOS); Administrators and SYSTEM only (Windows) | it holds the registration key until the agent redeems it |
 
-### File Permissions
+## Renewal
 
-| File | Permissions | Reason |
-|------|-------------|--------|
-| `certs/` directory | `0700` (rwx------) | Only owner can access certificate directory |
-| `client.key` | `0600` (rw-------) | Private key readable/writable by owner only |
-| `client.crt` | `0644` (rw-r--r--) | Certificate can be read by others (contains no secrets) |
-| `ca.crt` | `0644` (rw-r--r--) | CA cert is public |
-| `agent-config.yaml` | `0644` (rw-r--r--) | Config contains paths only, not actual keys |
-
-### Best Practices
-
-1. **Never manually edit certificate files** - use the platform UI for certificate operations
-2. **Back up certificates** if running in production - losing them requires re-registration
-3. **Protect the private key** - it authenticates the agent
-4. **Don't share certificates** between agents - each agent must have unique credentials
-5. **Monitor certificate expiration** - check logs for rotation notifications
+The agent checks its certificate's expiry when it starts and every 24 hours.
+When the certificate expires within 30 days, it asks the platform for a new one
+and saves it; no key and no restart are needed.
 
 ## Troubleshooting
 
-### Problem: "Certificate has expired" Error
+### The certificate has expired, or the platform no longer accepts it
 
-**Symptoms:**
-```
-⚠️ Failed to poll for jobs: certificate has expired
-```
+An agent whose certificate has expired, been revoked or been lost cannot renew
+it itself, and its old registration key cannot be used again (keys are
+single-use, and the configuration keeps only the key's hash). The supported
+recovery is to enroll the host again:
 
-**Solution:**
-1. Certificate rotation should happen automatically within 30 days of expiration
-2. If auto-rotation fails, manually trigger via platform UI
-3. Or re-register the agent with a new registration key
+1. In the console, open Discovery → Sensors & Agents and choose **Register
+   sensor or agent** to create a **new** registration key for a device agent.
+2. Run the installer of the current release again with that key, as the
+   console's commands show. A different key is a fresh enrollment: the
+   installer discards the old certificate and the agent enrolls as a new agent.
+3. Remove the old agent from the console's Sensors & Agents page.
 
-### Problem: Agent Can't Connect After Restart
+Do not delete the certificate files by hand to "force" a re-enrollment: the
+agent would try to enroll with a key that has already been used, and the
+platform rejects it.
 
-**Symptoms:**
-```
-❌ Connection refused
-⚠️ mTLS handshake failed
-```
+### The agent cannot connect after a restart
 
-**Check:**
-1. Certificate files exist in `<DataPath>/certs/`
-2. `agent-config.yaml` has `security.client_cert_path` set
-3. Private key file has correct permissions (0600 on Unix/Linux/macOS)
-4. Certificate hasn't been revoked in platform UI
-5. **Windows**: Config file paths are properly quoted (automatic in v1.2.0+)
+Check, in the service log:
 
-**Solution:**
-```bash
-# Check certificate files
-ls -la <DataPath>/certs/
-# Windows: dir %LOCALAPPDATA%\CryptoDeviceAgent\certs
+1. that the certificate files exist under `<data_path>/certs/`;
+2. that `device-agent.yaml` has `security.client_cert_path` set;
+3. that `client.key` is `0600` and owned by the service account (Linux, macOS);
+4. that this host still reaches your platform's URL.
 
-# If files are missing or corrupted, delete and re-register:
-rm -rf <DataPath>/certs/
-# Windows: rmdir /s %LOCALAPPDATA%\CryptoDeviceAgent\certs
+If the files are missing or damaged, enroll again with a new key as above.
 
-# Run interactive setup
-device-agent -interactive
-```
+### "Registration was REJECTED"
 
-### Problem: "yaml: line X: did not find expected hexdecimal number" (Windows)
+The key in the configuration was already redeemed, has expired, or is invalid.
+Create a new key in the console and run the installer again with it. The
+installer stops and disables the service when the platform rejects a key, so it
+does not retry a key that can never work.
 
-**Cause:** Configuration file contains unquoted Windows paths with backslashes (fixed in v1.2.0+).
+## Running it by hand
 
-**Symptoms:**
-```
-⚠️ Failed to load config file: failed to parse config file: yaml: line X: did not find expected hexdecimal number
-```
+The installers run the agent as
+`vista-device-agent -config <device-agent.yaml> -interactive=false` (on Windows
+`device-agent.exe`). To watch it, read the service log (the setup guides list
+where) rather than starting a second copy. Running the binary by hand with a
+fresh key is not a supported way to set an agent up: it would enroll with a data
+path the service cannot use, and the key works only once.
 
-**Solution:**
-1. **Update to agent v1.2.0 or later** (recommended - automatically quotes all paths)
-2. **OR delete config and re-run interactive setup**:
-   ```cmd
-   del "%LOCALAPPDATA%\CryptoDeviceAgent\agent-config.yaml"
-   device-agent.exe -interactive
-   ```
-3. **OR manually fix config file** by quoting all Windows paths:
-   ```yaml
-   data_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent"
-   client_cert_path: "C:\\Users\\username\\AppData\\Local\\CryptoDeviceAgent\\certs\\client.crt"
-   ```
+Flags: `-config FILE`, `-verbose` (on by default; `-verbose=false` to quiet it),
+`-interactive=false` (skip the terminal dialogue), `-ca-fingerprint SHA256`,
+`-version`.
 
-## Command-Line Usage
+A few settings can also come from the environment, which overrides the file:
+`PLATFORM_URL` (an enrolled agent keeps the URL it enrolled with unless
+`PLATFORM_URL_OVERRIDE=1` is also set), `AGENT_ID`, `REGISTRATION_KEY`,
+`HEARTBEAT_INTERVAL`, `DATA_PATH`, `HOST_INVENTORY_ENABLED`,
+`HOST_INVENTORY_CONNECTIONS_ENABLED` and `HOST_INVENTORY_INTERVAL`.
 
-### Interactive Setup (Recommended for First-Time)
-```bash
-device-agent -interactive
-```
+## Best practices
 
-This will:
-- Prompt for platform URL and registration key
-- Register with the platform
-- Save certificates to disk
-- Create configuration file
-- Provide command to start the agent
+1. Do not edit the certificate files by hand.
+2. Do not copy certificates between agents: each agent has its own identity.
+3. Protect the private key; it authenticates the agent.
+4. Upgrade by running the new release's installer with no key: that keeps the
+   certificate.
 
-### Manual Registration
-```bash
-# Set environment variables
-export PLATFORM_URL="http://192.0.2.10:8080"
-export REGISTRATION_KEY="REG-abc-123-xyz"
+## For developers
 
-# Register
-device-agent -register -config agent-config.yaml
-```
-
-### Start Agent (After Registration)
-```bash
-device-agent -config /path/to/agent-config.yaml
-```
-
-The agent will:
-- Load configuration from file
-- Load certificates from paths specified in config
-- Connect to platform using mTLS
-- Begin polling for jobs
-
-### Verbose Mode
-```bash
-device-agent -config agent-config.yaml -verbose
-```
-
-Shows detailed logging including certificate loading and TLS handshake information.
-
-## Configuration Options
-
-### Environment Variables
-
-All configuration can be set via environment variables:
-
-```bash
-# Required for first registration
-export PLATFORM_URL="http://192.0.2.10:8080"
-export REGISTRATION_KEY="REG-abc-123-xyz"
-
-# Optional
-export DATA_PATH="/custom/path"
-export POLL_INTERVAL="60s"
-export VERBOSE="true"
-
-# Certificate paths (if not using config file)
-export CLIENT_CERT_PATH="/path/to/client.crt"
-export CLIENT_KEY_PATH="/path/to/client.key"
-export SERVER_CA_CERT_PATH="/path/to/ca.crt"
-```
-
-### Config File
-
-Preferred method - all settings in one YAML file:
-
-```yaml
-agent_id: "550e8400-e29b-41d4-a716-446655440000"
-platform_url: "http://192.0.2.10:8080"
-poll_interval: 30s
-data_path: "/var/lib/vista-device-agent"
-verbose: false
-
-security:
-  client_cert_path: "/var/lib/vista-device-agent/certs/client.crt"
-  client_key_path: "/var/lib/vista-device-agent/certs/client.key"
-  server_ca_cert_path: "/var/lib/vista-device-agent/certs/ca.crt"
-  use_tls: true
-```
-
-## Platform Integration
-
-### Registration in Platform UI
-
-1. Navigate to **Device Agent Management**
-2. Click **Register New Agent**
-3. Enter agent name and description
-4. Click **Generate Registration Key**
-5. Copy the registration key
-6. Use key with `device-agent -interactive` or `device-agent -register`
-
-### Monitoring Agent Status
-
-The platform UI shows:
-- Agent online/offline status
-- Certificate expiration date
-- Last heartbeat time
-- Job execution history
-
-### Certificate Rotation
-
-Automatic rotation occurs when certificate expires within 30 days. Manual rotation can be triggered from the platform UI:
-
-1. Navigate to agent details
-2. Click **Certificates** tab
-3. Click **Rotate Certificate**
-4. Agent will receive new certificate on next heartbeat
-
-## Security Architecture
-
-### Why mTLS?
-
-- **Mutual authentication**: Both agent and platform verify each other's identity
-- **No shared secrets**: Each agent has unique certificate
-- **Certificate-based**: More secure than API keys
-- **Automatic rotation**: Certificates can be rotated without downtime
-
-### Private Key Security
-
-- Generated on agent (never transmitted)
-- Stored with `0600` permissions
-- Used only for TLS handshake
-- Never leaves the agent filesystem
-
-### Certificate Chain
-
-```
-Root CA (Platform)
-  └─ Tenant CA
-      └─ Agent Certificate (signed by Tenant CA)
-```
-
-Each tenant has its own CA, ensuring tenant isolation.
-
-## Troubleshooting Checklist
-
-- [ ] Certificate files exist in `<DataPath>/certs/`
-- [ ] Private key has `0600` permissions (Unix/Linux/macOS)
-- [ ] Config file has certificate paths set
-- [ ] Certificate not expired (check expiration date)
-- [ ] Certificate not revoked in platform UI
-- [ ] Platform URL is correct and reachable
-- [ ] Agent ID matches certificate CN
-- [ ] Windows paths properly quoted in config (v1.2.0+)
-
-## Version History
-
-- **v1.2.0** (2026-01-29): Added certificate persistence, Windows path handling, interactive mode
-- **v1.0.0** (2026-01-20): Initial release with CSR-based registration
-
----
-
-For additional support, consult the platform documentation or contact support.
+The configuration's `security` block maps to `config.SecurityConfig` in
+`internal/deviceagent/config/config.go`, which holds both the PEM data (loaded
+from the files) and the file paths. `config.LoadFromFile` loads the
+certificates from the paths; `config.SaveCertificatesToFiles` writes them with
+the permissions above and records the paths.

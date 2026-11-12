@@ -1,14 +1,17 @@
 #!/bin/bash
 
 # Vista Platform Sensor installer (Linux, systemd).
-# Usage: sudo bash install-sensor.sh --key KEY --ip ADDRESS [options]
+# Usage: sudo bash install-sensor.sh --url URL --key KEY --ip ADDRESS [options]
+#        sudo bash install-sensor.sh --uninstall
 
 set -e
 
 UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-# Default values
-CONTROL_PLANE_URL="https://app.vistasecurity.io"
+# Default values. There is no default platform URL: every customer runs their
+# own Vista Platform, and the sensor reports to that.
+CONTROL_PLANE_URL=""
+URL_HELP="the address of your own Vista Platform console, as shown in your browser (for example --url https://vista.example.com)"
 # The key may come from the environment so it stays out of the process list.
 REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 SENSOR_NAME=""
@@ -31,6 +34,7 @@ EXPECTED_IP=""
 CA_FINGERPRINT=""
 INTERACTIVE=false
 CHECK_DEPENDENCIES=false
+UNINSTALL=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -80,10 +84,12 @@ show_usage() {
 Vista Platform Sensor Installer
 ===============================
 
-Usage: $0 [options]
+Usage: $0 --url URL --key KEY --ip ADDRESS [options]
+       $0 --uninstall
 
 Options:
-    -u, --url URL              Control plane URL (default: $CONTROL_PLANE_URL)
+    -u, --url URL              Address of your own Vista Platform console, as shown in
+                               your browser (required unless this host is already enrolled)
     -k, --key KEY              Registration key (required unless this host is already
                                enrolled). A key on the command line is
                                visible to other users in the process list; prefer one of:
@@ -91,8 +97,8 @@ Options:
                                (VISTA_REGISTRATION_KEY=... in the environment also works)
     -n, --name NAME            Sensor name (default: auto-detect)
     -i, --interfaces IFACES    Network interfaces (default: auto-detect)
-    -p, --profile PROFILE      Deployment profile (default: $PROFILE; not yet applied —
-                               the sensor registers as datacenter_host)
+    -p, --profile PROFILE      Accepted but currently ignored: every sensor registers
+                               and reports the datacenter_host profile
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --ip IP_ADDRESS            Expected IP address for validation (required on a first
                                install; a re-run reuses the address in the service)
@@ -100,6 +106,9 @@ Options:
                                platform whose certificate this host does not already trust
     --interactive              Run in interactive mode (ask for all settings)
     --check-dependencies       Check the sensor binary can load, then exit (no root needed)
+    --uninstall                Stop the sensor and remove its service, its installation
+                               directory (configuration, certificates and private key)
+                               and its service account
     --verbose                  Enable verbose output
     -h, --help                 Show this help
 
@@ -114,27 +123,22 @@ Examples:
     $0 --interactive
 
     # Basic installation with arguments
-    $0 --key REG-550e8400-20241215-A7B3C9 --ip 192.0.2.10
+    $0 --url https://vista.example.com --key REG-550e8400-20241215-A7B3C9 --ip 192.0.2.10
 
     # Custom configuration
-    $0 --key REG-550e8400-20241215-A7B3C9 \\
+    $0 --url https://vista.example.com \\
+       --key REG-550e8400-20241215-A7B3C9 \\
        --ip 192.0.2.10 \\
        --name sensor-dc01 \\
-       --interfaces "eth0,eth1" \\
-       --profile datacenter_host
+       --interfaces "eth0,eth1"
 
-    # Air-gapped installation
-    $0 --key REG-550e8400-20241215-A7B3C9 \\
-       --ip 10.0.1.50 \\
-       --profile air_gapped \\
-       --interfaces "eth0"
+    # Upgrade an enrolled sensor in place (no key needed)
+    $0
 
-Profiles:
-    - end_user_machine    : Minimal footprint, single interface
-    - datacenter_host     : Full features, multiple interfaces
-    - cloud_instance      : Cloud-optimized, periodic reporting
-    - air_gapped         : Offline mode, export files
+    # Remove the sensor from this host
+    $0 --uninstall
 
+The capture interfaces default to the interface of the default route.
 EOF
 }
 
@@ -184,6 +188,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --check-dependencies)
             CHECK_DEPENDENCIES=true
+            shift
+            ;;
+        --uninstall)
+            UNINSTALL=true
             shift
             ;;
         --verbose)
@@ -240,7 +248,8 @@ create_service_user() {
 
 # --- shared Linux migration functions (begin) ---
 # This block is byte-identical in install-sensor.sh and install-device-agent.sh;
-# scripts/install-linux-migration.test.mjs holds them equal.
+# scripts/install-linux-migration.test.mjs holds them equal. It also carries the
+# root check, the CA fingerprint check and --uninstall.
 #
 # Earlier releases installed under the crypto-* names. Re-running the installer
 # moves such a host to the Vista names and keeps its enrollment. Each step checks
@@ -418,6 +427,114 @@ migrate_legacy_install() {
     fi
     MIGRATION_STEP="installing $SERVICE_NAME.service"
 }
+
+# Stops unless the installer runs as root.
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run as root (use sudo)"
+        exit 1
+    fi
+}
+
+# Prints --ca-fingerprint the way the agents compare fingerprints
+# (shared/certificates): lower case, without a sha256: prefix, colons, spaces or
+# dashes. Fails unless exactly 64 hexadecimal digits remain.
+normalize_ca_fingerprint() {
+    local f
+    f=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//')
+    f=${f#sha256:}
+    f=$(printf '%s' "$f" | tr -d ': \t\r\n-')
+    if [[ ! "$f" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+    printf '%s' "$f"
+}
+
+# True when user $1 is the account this installer creates: home directory $2
+# and the shell /bin/false. An account of the same name that someone else made
+# is not removed.
+installer_made_user() {
+    local entry home shell
+    entry=$(getent passwd "$1" 2>/dev/null) || return 1
+    home=$(printf '%s' "$entry" | cut -d: -f6)
+    shell=$(printf '%s' "$entry" | cut -d: -f7)
+    [[ "${home%/}" == "${2%/}" && "$shell" == "/bin/false" ]]
+}
+
+# True when directory $1 is safe to delete as an install directory: an absolute
+# path other than /, holding this installer's config or binary, or empty.
+# Anything else is left in place, so a mistyped --dir cannot delete it.
+removable_install_dir() {
+    local dir=${1%/}
+    [[ "$dir" == /* && "$dir" != "" && -d "$dir" ]] || return 1
+    [[ -f "$dir/$CONFIG_NAME" || -f "$dir/$INSTALLED_BINARY" || -f "$dir/$LEGACY_BINARY" || -z "$(ls -A "$dir")" ]]
+}
+
+# Removes this host's install, under the Vista names and the old crypto-*
+# ones: stops and removes the service, deletes the installation directory (its
+# configuration, certificates and private key) and the service account the
+# installer created. Needs no key and no binary. On a host with nothing
+# installed it removes nothing and succeeds.
+uninstall_install() {
+    local unit name dir user home removed=0 found
+    locate_install
+    for unit in "$NEW_UNIT" "$LEGACY_UNIT"; do
+        name=$(basename "$unit" .service)
+        if [[ ! -f "$unit" ]] && ! systemctl is-active --quiet "$name.service" 2>/dev/null; then
+            continue
+        fi
+        systemctl stop "$name.service" 2>/dev/null || true
+        if systemctl is-active --quiet "$name.service" 2>/dev/null; then
+            print_error "$name.service did not stop; nothing more was removed. Stop it, then run this again."
+            exit 1
+        fi
+        systemctl disable "$name.service" 2>/dev/null || true
+        rm -f "$unit"
+        rm -rf "$unit.d"
+        print_status "Removed the service $name.service ($unit)"
+        removed=$((removed + 1))
+    done
+    systemctl daemon-reload
+    for dir in "$INSTALL_DIR" "$LEGACY_DIR"; do
+        [[ -e "$dir" ]] || continue
+        if ! removable_install_dir "$dir"; then
+            print_warning "Left $dir in place: it does not hold a $SERVICE_NAME install. Remove it by hand if it is one."
+            continue
+        fi
+        rm -rf "$dir"
+        print_status "Removed $dir (configuration, certificates and private key)"
+        removed=$((removed + 1))
+    done
+    for user in "$SERVICE_USER" "$LEGACY_NAME"; do
+        id "$user" &>/dev/null || continue
+        home=$INSTALL_DIR
+        [[ "$user" == "$LEGACY_NAME" ]] && home=$LEGACY_DIR
+        if ! installer_made_user "$user" "$home"; then
+            print_warning "Left user $user in place: it is not the account this installer creates (home $home, shell /bin/false)."
+            continue
+        fi
+        found=0
+        pgrep -u "$user" >/dev/null 2>&1 || found=$?
+        if [[ "$found" -ne 1 ]]; then
+            print_warning "Left user $user in place: a process may still run as it. Remove it once none does: userdel $user"
+            continue
+        fi
+        if ! userdel "$user"; then
+            print_warning "Could not remove user $user. Remove it with: userdel $user"
+            continue
+        fi
+        if getent group "$user" >/dev/null 2>&1; then
+            groupdel "$user" 2>/dev/null || true
+        fi
+        print_status "Removed user $user"
+        removed=$((removed + 1))
+    done
+    if [[ "$removed" -eq 0 ]]; then
+        print_status "Nothing to remove: $SERVICE_NAME is not installed on this host."
+        return 0
+    fi
+    print_status "$SERVICE_NAME is uninstalled. It still appears in the console until you delete it there (Discovery → Sensors & Agents)."
+}
 # --- shared Linux migration functions (end) ---
 
 # Finds the binary to install and sets BINARY: ./$1 (its name in the release
@@ -481,7 +598,7 @@ check_sensor_dependencies() {
     echo "  Arch / Manjaro:                     sudo pacman -S libpcap"
     echo "  For offline hosts, provide the distribution's libpcap package and its dependencies from an approved local repository."
     print_error "If libpcap is installed, check that the binary matches this host's architecture and libc; installing libpcap alone cannot fix an incompatible build."
-    echo "  Retry: bash scripts/install-sensor.sh --check-dependencies"
+    echo "  Retry: bash install-sensor.sh --check-dependencies"
     return 1
 }
 
@@ -489,6 +606,12 @@ check_sensor_dependencies() {
 if [[ $(uname -s) != Linux ]]; then
     print_error "This installer requires Linux with systemd. On macOS use install-sensor-macos.sh; on Windows use install-sensor.ps1."
     exit 1
+fi
+
+if [[ "$UNINSTALL" == "true" ]]; then
+    require_root
+    uninstall_install
+    exit 0
 fi
 
 if [[ "$CHECK_DEPENDENCIES" == "true" ]]; then
@@ -540,44 +663,21 @@ run_interactive_mode() {
         SENSOR_NAME="$SENSOR_NAME_INPUT"
     fi
 
-    # Get control plane URL
-    read -p "Enter control plane URL (default: $CONTROL_PLANE_URL): " CONTROL_PLANE_URL_INPUT
-    if [[ -n "$CONTROL_PLANE_URL_INPUT" ]]; then
-        CONTROL_PLANE_URL="$CONTROL_PLANE_URL_INPUT"
+    # Get the platform URL. There is no default: it is the customer's own
+    # Vista Platform. An enrolled host keeps the one in its config.
+    if [[ -n "$CONTROL_PLANE_URL" ]]; then
+        read -p "Enter Vista Platform URL (default: $CONTROL_PLANE_URL): " CONTROL_PLANE_URL_INPUT
+        if [[ -n "$CONTROL_PLANE_URL_INPUT" ]]; then
+            CONTROL_PLANE_URL="$CONTROL_PLANE_URL_INPUT"
+        fi
+    elif [[ -f "$EXISTING_CONFIG" ]]; then
+        read -p "Enter Vista Platform URL (leave empty to keep the one this host uses): " CONTROL_PLANE_URL
     fi
-
-    # Get profile
-    echo ""
-    print_status "Available profiles:"
-    echo "  1) datacenter_host - Full features, multiple interfaces"
-    echo "  2) cloud_instance - Cloud-optimized, periodic reporting"
-    echo "  3) end_user_machine - Minimal footprint, single interface"
-    echo "  4) air_gapped - Offline mode, export files"
-    echo ""
-    
-    while true; do
-        read -p "Select profile (1-4, default: 1): " PROFILE_CHOICE
-        case $PROFILE_CHOICE in
-            1|"")
-                PROFILE="datacenter_host"
-                break
-                ;;
-            2)
-                PROFILE="cloud_instance"
-                break
-                ;;
-            3)
-                PROFILE="end_user_machine"
-                break
-                ;;
-            4)
-                PROFILE="air_gapped"
-                break
-                ;;
-            *)
-                print_error "Invalid choice. Please select 1-4."
-                ;;
-        esac
+    while [[ -z "$CONTROL_PLANE_URL" && ! -f "$EXISTING_CONFIG" ]]; do
+        read -p "Enter Vista Platform URL, $URL_HELP: " CONTROL_PLANE_URL
+        if [[ -z "$CONTROL_PLANE_URL" ]]; then
+            print_error "The Vista Platform URL is required"
+        fi
     done
 
     # Get network interfaces
@@ -604,9 +704,8 @@ run_interactive_mode() {
     echo "Registration Key: $(mask_key "$REGISTRATION_KEY")"
     echo "IP Address: $EXPECTED_IP"
     echo "Sensor Name: $SENSOR_NAME"
-    echo "Control Plane: $CONTROL_PLANE_URL"
-    echo "Profile: $PROFILE"
-    echo "Interfaces: $INTERFACES"
+    echo "Control Plane: ${CONTROL_PLANE_URL:-(the one in the existing configuration)}"
+    echo "Interfaces: ${INTERFACES:-auto-detect}"
     echo "Install Directory: $INSTALL_DIR"
     echo ""
 
@@ -656,6 +755,12 @@ if [[ "$INTERACTIVE" != "true" ]]; then
         exit 1
     fi
 
+    if [[ -z "$CONTROL_PLANE_URL" && ! -f "$EXISTING_CONFIG" ]]; then
+        print_error "--url is required: $URL_HELP."
+        show_usage
+        exit 1
+    fi
+
     if [[ -z "$EXPECTED_IP" ]]; then
         print_error "Expected IP address is required for validation"
         show_usage
@@ -663,11 +768,12 @@ if [[ "$INTERACTIVE" != "true" ]]; then
     fi
 fi
 
-# Check if running as root
-if [[ $EUID -ne 0 ]]; then
-    print_error "This script must be run as root (use sudo)"
+if [[ -n "$CA_FINGERPRINT" ]] && ! CA_FINGERPRINT=$(normalize_ca_fingerprint "$CA_FINGERPRINT"); then
+    print_error "--ca-fingerprint must be the SHA-256 fingerprint of the platform's CA: 64 hexadecimal digits (upper or lower case; colons and a sha256: prefix are allowed)."
     exit 1
 fi
+
+require_root
 
 # Nothing has changed yet. Without a key, only an enrolled host can go on.
 if [[ -z "$REGISTRATION_KEY" ]] \
@@ -675,14 +781,17 @@ if [[ -z "$REGISTRATION_KEY" ]] \
     print_error "Registration key is required: $EXISTING_CONFIG does not record an enrolled sensor."
     exit 1
 fi
-
-# The version the platform will show is the one stamped into this binary — the
-# sensor reports it itself at registration and on every heartbeat.
-if [[ -n "$CA_FINGERPRINT" && ! "$CA_FINGERPRINT" =~ ^[0-9A-Fa-f:]+$ ]]; then
-    print_error "--ca-fingerprint must be the SHA-256 fingerprint in hexadecimal (colons allowed)"
+# Without --url, a host that has a config keeps the platform it names.
+if [[ -z "$CONTROL_PLANE_URL" ]]; then
+    CONTROL_PLANE_URL=$(read_config_value controlPlaneUrl "$EXISTING_CONFIG")
+fi
+if [[ -z "$CONTROL_PLANE_URL" ]]; then
+    print_error "--url is required: $EXISTING_CONFIG does not record a platform. It is $URL_HELP."
     exit 1
 fi
 
+# The version the platform will show is the one stamped into this binary — the
+# sensor reports it itself at registration and on every heartbeat.
 SENSOR_VERSION=$("$BINARY" --version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
 
 print_header "🚀 Vista Platform Sensor Installer"
@@ -695,12 +804,25 @@ print_status "Detecting environment..."
 PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
-# Detect network interfaces if not specified
+# Detect network interfaces if not specified: the interface of the default
+# route, else the usual names of wired and wireless interfaces. Nothing found
+# fails rather than write an interface the sensor cannot open, unless the host
+# is enrolled and keeps the configuration that already names them.
 if [[ -z "$INTERFACES" ]]; then
     print_status "Auto-detecting network interfaces..."
-    INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(eth|ens|enp|wl)' | head -5 | tr '\n' ',' | sed 's/,$//')
+    INTERFACES=$(ip -o route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
     if [[ -z "$INTERFACES" ]]; then
-        INTERFACES="eth0"
+        INTERFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -E '^(eth|ens|enp|eno|wl)' | head -5 | tr '\n' ',' | sed 's/,$//' || true)
+    fi
+    if [[ -z "$INTERFACES" ]]; then
+        if [[ -f "$EXISTING_CONFIG" && "$(read_config_value sensorId "$EXISTING_CONFIG")" =~ $UUID_RE ]] \
+            && { [[ -z "$REGISTRATION_KEY" ]] || enrolled_with_key "$EXISTING_CONFIG" "$REGISTRATION_KEY"; }; then
+            INTERFACES="(as configured)"
+        else
+            print_error "No network interface to capture on was found: this host has no default route and no eth*, ens*, enp*, eno* or wl* interface."
+            print_error "Name the interfaces with --interfaces (for example --interfaces eth0,eth1; see: ip -o link show). Nothing was changed."
+            exit 1
+        fi
     fi
 fi
 
@@ -975,7 +1097,7 @@ echo "  Status:     systemctl status $SERVICE_NAME"
 echo "  Logs:       journalctl -u $SERVICE_NAME -f"
 echo "  Restart:    systemctl restart $SERVICE_NAME"
 echo "  Stop:       systemctl stop $SERVICE_NAME"
-echo "  Uninstall:  systemctl stop $SERVICE_NAME && systemctl disable $SERVICE_NAME"
+echo "  Uninstall:  sudo bash $0 --uninstall"
 echo ""
 print_status "Sensor is registered and monitoring network traffic on: $INTERFACES"
 print_status "It appears under Discovery → Sensors & Agents once its first heartbeat arrives."

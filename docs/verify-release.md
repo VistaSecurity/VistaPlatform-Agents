@@ -20,7 +20,7 @@ before and after publishing.
 | `THIRD_PARTY_LICENSES` | the licence text of every third-party component linked into the binaries |
 | `agents-release.json` | the release metadata (schema `schemas/release/v1/release.schema.json`): every file above with its digest, size, signature bundle, provenance, which targets were executed in the release run, and what the host must provide |
 | `compatibility-agents-<version>-c<n>.json` | compatibility records (schema `schemas/compatibility/v1/record.schema.json`): which platform versions were tested with these exact bytes. The first (`c1`) ships with the release and says `pending` for every claim |
-| `SHA256SUMS` | the digest of every asset above |
+| `SHA256SUMS` | the digest of every asset the release run published (everything in this table except the `.sigstore.json` bundles and `SHA256SUMS` itself). Compatibility records added after the release (`c2` and on) are not in it: they are checked by their own signature and the `agents-release.json` digest they name |
 | `<asset>.sigstore.json` | the Sigstore signature bundle of each binary, package, installer, `agents-release.json`, compatibility record and `SHA256SUMS` |
 | `provenance.intoto.jsonl` | the SLSA v1 build-provenance attestation naming every binary, package and installer |
 
@@ -76,8 +76,9 @@ Needs `bash`, `jq`, `tar`, `unzip`, `sha256sum` (or `shasum`), `cosign` v3 and
 v2.4 and later read it when given `--new-bundle-format`.)
 
 ```sh
-git clone --depth 1 --branch v5.3.0 https://github.com/VistaSecurity/VistaPlatform-Agents
-VistaPlatform-Agents/scripts/verify-release.sh --repo VistaSecurity/VistaPlatform-Agents --tag v5.3.0
+TAG=v5.4.0     # example: the tag of the release you downloaded
+git clone --depth 1 --branch "$TAG" https://github.com/VistaSecurity/VistaPlatform-Agents
+VistaPlatform-Agents/scripts/verify-release.sh --repo VistaSecurity/VistaPlatform-Agents --tag "$TAG"
 ```
 
 It downloads the release into a new temporary directory (or checks one you
@@ -97,7 +98,8 @@ it to check a download.
 
 ## Step by step
 
-The commands below use `v5.3.0`; substitute your tag, and for a nightly the
+The commands below use `v5.4.0` and version `5.4.0` as an example; substitute
+your `<tag>` and `<version>`, and for a nightly the
 nightly identity above. Every nightly shares that identity, so for a nightly
 also pin the commit: add `--certificate-github-workflow-sha <commit>` to each
 `cosign verify-blob`, where `<commit>` is `release.source_sha` in
@@ -108,7 +110,7 @@ every release.)
 **1. Download** the files you need, plus `SHA256SUMS` and its bundle:
 
 ```sh
-TAG=v5.3.0
+TAG=v5.4.0     # example: your <tag>
 gh release download "$TAG" --repo VistaSecurity/VistaPlatform-Agents --dir "$TAG"
 cd "$TAG"
 ```
@@ -129,7 +131,7 @@ sha256sum --ignore-missing -c SHA256SUMS     # macOS, with every asset downloade
 has a bundle):
 
 ```sh
-F=vista-sensor_5.3.0_linux_amd64
+F=vista-sensor_5.4.0_linux_amd64     # example: vista-sensor_<version>_<os>_<arch>
 cosign verify-blob --bundle "$F.sigstore.json" \
   --certificate-identity "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/$TAG" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -189,7 +191,7 @@ jq --arg f "$F" '.agents[].artifacts[] | select(.file == $f)
 **6. Check a compatibility record** before relying on a support claim:
 
 ```sh
-R=compatibility-agents-5.3.0-c2.json
+R=compatibility-agents-5.4.0-c2.json     # example: compatibility-agents-<version>-c<n>.json
 cosign verify-blob --bundle "$R.sigstore.json" \
   --certificate-identity https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/compatibility.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com "$R"
@@ -207,7 +209,7 @@ both stay published, and records are never edited.
 With `cosign.exe` and PowerShell:
 
 ```powershell
-$Tag = "v5.3.0"; $F = "vista-sensor_5.3.0_windows_amd64.exe"
+$Tag = "v5.4.0"; $F = "vista-sensor_5.4.0_windows_amd64.exe"   # example: your <tag> and file
 cosign verify-blob --bundle "$F.sigstore.json" `
   --certificate-identity "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/$Tag" `
   --certificate-oidc-issuer https://token.actions.githubusercontent.com $F

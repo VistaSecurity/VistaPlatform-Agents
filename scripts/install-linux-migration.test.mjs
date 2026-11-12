@@ -9,6 +9,9 @@
 // root check are rewritten on the way in, and that rewrite asserts it
 // matched, so a renamed line fails here rather than touching the real /opt.
 //
+// --uninstall, the required platform URL, the CA fingerprint check and the
+// sensor's choice of capture interface run through the same harness.
+//
 // The last section breaks each guard in the installer's text and confirms a
 // scenario goes red, so the scenarios are known to be able to fail.
 //
@@ -100,14 +103,23 @@ esac
 exit 0
 `,
   journalctl: '#!/bin/sh\nexit 0\n',
-  useradd: '#!/bin/bash\nfor n; do :; done\necho "useradd $n" >> "$FAKE_STATE/calls.log"\n: > "$FAKE_STATE/users/$n"\n',
+  // A user is a passwd line in users/<name>, which getent prints.
+  useradd: '#!/bin/bash\nhome=""; shell=""\nwhile [ $# -gt 1 ]; do case "$1" in -d) home=$2; shift 2 ;; -s) shell=$2; shift 2 ;; *) shift ;; esac; done\nn=$1\necho "useradd $n" >> "$FAKE_STATE/calls.log"\necho "$n:x:999:999::$home:$shell" > "$FAKE_STATE/users/$n"\n',
   userdel: '#!/bin/bash\necho "userdel $*" >> "$FAKE_STATE/calls.log"\nrm -f "$FAKE_STATE/users/$1"\n',
   groupdel: '#!/bin/bash\necho "groupdel $*" >> "$FAKE_STATE/calls.log"\n',
-  getent: '#!/bin/bash\n[ -f "$FAKE_STATE/users/$2" ]\n',
+  getent: '#!/bin/bash\n[ -f "$FAKE_STATE/users/$2" ] || exit 2\n[ "$1" = passwd ] && cat "$FAKE_STATE/users/$2"\nexit 0\n',
   id: '#!/bin/bash\n[ -f "$FAKE_STATE/users/$1" ]\n',
   chown: '#!/bin/bash\n[ -n "$FAKE_CHOWN_FAILS" ] && exit 1\necho "chown $*" >> "$FAKE_STATE/calls.log"\n',
   pgrep: '#!/bin/bash\n[ -n "$FAKE_PROCESSES" ] && exit 0\nexit 1\n',
-  ip: '#!/bin/sh\necho "    inet 192.0.2.10/24 scope global eth0"\n',
+  // The default route names ens3; FAKE_NO_ROUTE and FAKE_NO_LINKS take away
+  // the route and the usual interface names.
+  ip: `#!/bin/sh
+case "$*" in
+  "-o route show default") [ -n "$FAKE_NO_ROUTE" ] || echo "default via 192.0.2.1 dev ens3 proto dhcp src 192.0.2.10 metric 100" ;;
+  "-o link show") echo "1: lo: <LOOPBACK,UP> mtu 65536"; [ -n "$FAKE_NO_LINKS" ] || printf '2: ens3: <BROADCAST,UP> mtu 1500\\n3: eth1@if7: <BROADCAST,UP> mtu 1500\\n' ;;
+  *) echo "    inet 192.0.2.10/24 scope global ens3" ;;
+esac
+`,
   // The cross-filesystem path, forced: two different paths, two devices.
   stat: '#!/bin/bash\nif [ -n "$FAKE_CROSS_FS" ]; then echo "$3"; exit 0; fi\nexec "$REAL_STAT" "$@"\n',
   cp: '#!/bin/bash\nif [ "$1" = -a ] && [ -n "$FAKE_CP_FAILS" ]; then mkdir -p "$3/partial"; exit 1; fi\nexec "$REAL_CP" "$@"\n',
@@ -178,7 +190,7 @@ function host(t, kind, { mutate } = {}) {
       writeFileSync(join(at, 'data/queue/pending.json'), '{"held":"data"}\n');
       writeFileSync(join(at, k.oldBinary), '#!/bin/sh\n', { mode: 0o755 });
       writeFileSync(join(at, k.config), config, { mode: 0o600 });
-      writeFileSync(join(state, 'users', k.legacy), '');
+      writeFileSync(join(state, 'users', k.legacy), `${k.legacy}:x:998:998::${at}:/bin/false\n`);
       if (unit) {
         writeFileSync(h.legacyUnit, `[Service]\nUser=${k.legacy}\nWorkingDirectory=${at}\nEnvironment=SENSOR_IP_ADDRESS=192.0.2.10\nExecStart=${at}/${k.oldBinary}\n`);
         if (running) writeFileSync(join(state, `active-${k.legacy}.service`), '');
@@ -359,6 +371,97 @@ const scenarios = {
     assert.ok(!existsSync(h.legacyDir), 'the original was left behind');
     assert.ok(!existsSync(`${h.newDir}.migrating`), 'the staging directory was left behind');
   },
+
+  'a first install without --url fails and says what the URL is': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    const r = h.run([...h.k.args, '--key', KEY]);
+    assert.equal(r.status, 1, r.output);
+    assert.match(r.output, /--url (is|and --key are) required/);
+    assert.match(r.output, /address of your own Vista Platform console, as shown in your browser/);
+    assert.ok(!existsSync(h.newUnit), 'installed with no platform to enrol with');
+    assert.doesNotMatch(r.output, /vistasecurity\.io/);
+  },
+
+  'a keyless re-run of an enrolled host upgrades the binary and keeps its identity': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    assert.equal(h.run([...h.k.firstArgs, '--key', KEY]).status, 0);
+    const config = readFileSync(join(h.newDir, h.k.config), 'utf8');
+    writeFileSync(join(h.work, h.k.download), '#!/bin/sh\necho "Vista v10.0.0"\n', { mode: 0o755 });
+    h.clearCalls();
+    const r = h.run([]);
+    assert.equal(r.status, 0, r.output);
+    assert.match(r.output, /already enrolled/);
+    assert.doesNotMatch(h.calls(), /ENROLLED/, 'the host enrolled again');
+    assert.equal(readFileSync(join(h.newDir, h.k.config), 'utf8'), config, 'the config changed');
+    assert.match(readFileSync(join(h.newDir, h.k.service), 'utf8'), /v10\.0\.0/, 'the binary was not replaced');
+    assert.match(h.calls(), new RegExp(`systemctl restart ${h.k.service}\\.service`));
+  },
+
+  'uninstall removes the service, the directory and the account, and a second run finds nothing': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    assert.equal(h.run([...h.k.firstArgs, '--key', KEY]).status, 0);
+    mkdirSync(`${h.newUnit}.d`);
+    writeFileSync(join(`${h.newUnit}.d`, 'override.conf'), '[Service]\nNice=5\n');
+    h.clearCalls();
+    const r = h.run(['--uninstall']);
+    assert.equal(r.status, 0, r.output);
+    assert.ok(!existsSync(h.newUnit), 'the unit is still there');
+    assert.ok(!existsSync(`${h.newUnit}.d`), 'the unit overrides are still there');
+    assert.ok(!existsSync(h.newDir), 'the install directory (config, private key) is still there');
+    assert.ok(!h.user(h.k.service), 'the service account is still there');
+    const calls = h.calls();
+    const at = (x) => { const i = calls.indexOf(x); assert.ok(i >= 0, `no ${x} in:\n${calls}`); return i; };
+    assert.ok(at(`systemctl stop ${h.k.service}.service`) < at(`systemctl disable ${h.k.service}.service`));
+    assert.ok(at(`systemctl disable ${h.k.service}.service`) < at('systemctl daemon-reload'));
+    assert.match(calls, new RegExp(`^userdel ${h.k.service}$`, 'm'), 'userdel -r, or no userdel');
+    assert.ok(!existsSync(join(h.state, `active-${h.k.service}.service`)), 'the service is still running');
+    assert.match(r.output, new RegExp(`Removed the service ${h.k.service}\\.service`));
+    assert.match(r.output, new RegExp(`Removed ${h.newDir} `));
+    assert.match(r.output, new RegExp(`Removed user ${h.k.service}`));
+    const again = h.run(['--uninstall']);
+    assert.equal(again.status, 0, again.output);
+    assert.match(again.output, /Nothing to remove/);
+  },
+
+  'uninstall removes an install still under the old names': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    h.legacy();
+    const r = h.run(['--uninstall']);
+    assert.equal(r.status, 0, r.output);
+    assert.ok(!existsSync(h.legacyUnit), 'the legacy unit is still there');
+    assert.ok(!existsSync(h.legacyDir), 'the legacy directory is still there');
+    assert.ok(!h.user(h.k.legacy), 'the legacy account is still there');
+    assert.ok(!existsSync(h.newDir), 'uninstall created the new directory');
+  },
+
+  'uninstall leaves an account and a directory the installer did not make': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    const dir = join(h.root, 'srv/theirs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'their-file'), 'x');
+    writeFileSync(join(h.state, 'users', h.k.service), `${h.k.service}:x:1001:1001::/home/${h.k.service}:/bin/bash\n`);
+    const r = h.run(['--uninstall', '--dir', dir]);
+    assert.equal(r.status, 0, r.output);
+    assert.ok(existsSync(join(dir, 'their-file')), 'a directory that holds no install was deleted');
+    assert.ok(h.user(h.k.service), 'an account the installer did not create was deleted');
+    assert.match(r.output, /Left .*theirs in place/);
+    assert.match(r.output, new RegExp(`Left user ${h.k.service} in place`));
+  },
+
+  'a CA fingerprint is normalised, and anything but 64 hex digits is refused': (t, kind, opts) => {
+    const h = host(t, kind, opts);
+    const hex = 'ab'.repeat(32);
+    for (const bad of ['abc', `${hex}00`, `${'zz'.repeat(32)}`]) {
+      const r = h.run([...h.k.firstArgs, '--key', KEY, '--ca-fingerprint', bad]);
+      assert.equal(r.status, 1, r.output);
+      assert.match(r.output, /64 hexadecimal digits/);
+      assert.ok(!existsSync(h.newUnit), `installed with fingerprint ${bad}`);
+    }
+    const pretty = `SHA256:${hex.toUpperCase().match(/../g).join(':')}`;
+    const r = h.run([...h.k.firstArgs, '--key', KEY, '--ca-fingerprint', pretty]);
+    assert.equal(r.status, 0, r.output);
+    assert.match(readFileSync(h.newUnit, 'utf8'), new RegExp(`^ExecStart=.* -ca-fingerprint ${hex}$`, 'm'));
+  },
 };
 
 for (const kind of Object.keys(KINDS)) {
@@ -486,11 +589,42 @@ test('sensor: the address comes from the unit of an existing install, and an unk
   assert.match(r.output, /Expected IP address is required/);
 });
 
+// The capture interface: the default route's, else the usual names, else a
+// clear failure, unless an enrolled host keeps the config that names them.
+const sensorScenarios = {
+  'the default route chooses the capture interface': (t, opts) => {
+    const h = host(t, 'sensor', opts);
+    assert.equal(h.run([...h.k.firstArgs, '--key', KEY]).status, 0);
+    assert.match(readFileSync(join(h.newDir, h.k.config), 'utf8'), /^ {2}interfaces: \["ens3"\]$/m);
+    const none = host(t, 'sensor', opts);
+    assert.equal(none.run([...none.k.firstArgs, '--key', KEY], { FAKE_NO_ROUTE: '1' }).status, 0);
+    assert.match(readFileSync(join(none.newDir, none.k.config), 'utf8'), /^ {2}interfaces: \["ens3", "eth1"\]$/m);
+  },
+  'no interface found fails naming --interfaces, unless the host keeps its config': (t, opts) => {
+    const h = host(t, 'sensor', opts);
+    const env = { FAKE_NO_ROUTE: '1', FAKE_NO_LINKS: '1' };
+    const r = h.run([...h.k.firstArgs, '--key', KEY], env);
+    assert.equal(r.status, 1, r.output);
+    assert.match(r.output, /No network interface to capture on/);
+    assert.match(r.output, /--interfaces/);
+    assert.ok(!existsSync(h.newUnit), 'installed with an interface that does not exist');
+    assert.ok(!existsSync(h.newDir));
+    const kept = host(t, 'sensor', opts);
+    assert.equal(kept.run([...kept.k.firstArgs, '--key', KEY]).status, 0);
+    const again = kept.run([], env);
+    assert.equal(again.status, 0, again.output);
+    assert.match(readFileSync(join(kept.newDir, kept.k.config), 'utf8'), /^ {2}interfaces: \["ens3"\]$/m);
+  },
+};
+for (const [name, scenario] of Object.entries(sensorScenarios)) {
+  test(`sensor: ${name}`, { skip }, (t) => scenario(t));
+}
+
 test('sensor: --interactive does not insist on a key for an enrolled host', { skip }, (t) => {
   const h = host(t, 'sensor');
   h.legacy();
-  // key, name, url, profile, interfaces, directory, confirm.
-  h.assertMoved(h.newDir, h.run(['--interactive'], {}, '\n\n\n\n\n\ny\n'));
+  // key, name, url, interfaces, directory, confirm.
+  h.assertMoved(h.newDir, h.run(['--interactive'], {}, '\n\n\n\n\ny\n'));
 });
 
 test('sensor: an enrolled install shows the platform in its config, not the default', { skip }, (t) => {
@@ -565,7 +699,56 @@ const mutations = [
   ['the cross-filesystem path copies under the final name',
     'across filesystems the original goes only after a whole copy',
     replacing('cp -a "$LEGACY_DIR" "$staging"', 'cp -a "$LEGACY_DIR" "$INSTALL_DIR"')],
+  ['a default platform URL is back',
+    'a first install without --url fails and says what the URL is',
+    replacing('CONTROL_PLANE_URL=""\n', 'CONTROL_PLANE_URL="https://vista.example.com"\n')],
+  ['a keyless re-run does not keep the enrolment',
+    'a keyless re-run of an enrolled host upgrades the binary and keeps its identity',
+    (s) => s.replace(/\{ \[\[ -z "\$REGISTRATION_KEY" \]\] \|\| enrolled_with_key "\$CONFIG_FILE"/, '{ false || enrolled_with_key "$CONFIG_FILE"')],
+  ['uninstall leaves the install directory',
+    'uninstall removes the service, the directory and the account, and a second run finds nothing',
+    replacing('        rm -rf "$dir"\n', '        :\n')],
+  ['uninstall leaves the unit',
+    'uninstall removes the service, the directory and the account, and a second run finds nothing',
+    replacing('        rm -f "$unit"\n', '        :\n')],
+  ['uninstall leaves the account',
+    'uninstall removes the service, the directory and the account, and a second run finds nothing',
+    replacing('        if ! userdel "$user"; then', '        if false; then')],
+  ['uninstall ignores the old names',
+    'uninstall removes an install still under the old names',
+    replacing('for unit in "$NEW_UNIT" "$LEGACY_UNIT"; do', 'for unit in "$NEW_UNIT"; do')],
+  ['uninstall removes any directory',
+    'uninstall leaves an account and a directory the installer did not make',
+    replacing('    [[ -f "$dir/$CONFIG_NAME" ||', '    true || [[ -f "$dir/$CONFIG_NAME" ||')],
+  ['uninstall removes any account of that name',
+    'uninstall leaves an account and a directory the installer did not make',
+    replacing('    [[ "${home%/}" == "${2%/}" && "$shell" == "/bin/false" ]]', '    true')],
+  ['a short CA fingerprint is accepted',
+    'a CA fingerprint is normalised, and anything but 64 hex digits is refused',
+    replacing('^[0-9a-f]{64}$', '^[0-9a-f]+$')],
+  ['the CA fingerprint is passed on as typed',
+    'a CA fingerprint is normalised, and anything but 64 hex digits is refused',
+    replacing('    printf \'%s\' "$f"\n}', '    printf \'%s\' "$1"\n}')],
 ];
+
+const sensorMutations = [
+  ['the default route is not consulted',
+    'the default route chooses the capture interface',
+    replacing("INTERFACES=$(ip -o route show default", "INTERFACES=$(false")],
+  ['eth0 is written when nothing is found',
+    'no interface found fails naming --interfaces, unless the host keeps its config',
+    replacing('            print_error "No network interface to capture on was found', '            INTERFACES=eth0; : "')],
+  ['an enrolled host cannot be upgraded without an interface',
+    'no interface found fails naming --interfaces, unless the host keeps its config',
+    replacing('            INTERFACES="(as configured)"', '            exit 1')],
+];
+for (const [what, scenario, mutate] of sensorMutations) {
+  test(`sensor: red when ${what}`, { skip }, (t) => {
+    const before = readFileSync(here(KINDS.sensor.script), 'utf8');
+    assert.notEqual(mutate(before), before, 'the mutation changed nothing');
+    assert.throws(() => sensorScenarios[scenario](t, { mutate }), (e) => !(e instanceof TypeError));
+  });
+}
 
 for (const kind of Object.keys(KINDS)) {
   for (const [what, scenario, mutate] of mutations) {

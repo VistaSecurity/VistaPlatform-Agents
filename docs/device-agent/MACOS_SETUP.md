@@ -2,8 +2,10 @@
 
 `install-device-agent-macos.sh` installs the device agent as a launchd daemon:
 it starts at boot, restarts when it stops, and enrolls itself with the platform
-on first start. It runs on macOS 13 or later, on Apple silicon and Intel Macs,
-with the bash macOS ships.
+on first start. It runs on macOS 12 Monterey or later, on Apple silicon and
+Intel Macs, with the bash macOS ships. The minimum is the Go release the agents
+are built with: Go 1.26 runs on macOS 12 and later, and is the last Go release
+that does ([Go 1.26 release notes](https://go.dev/doc/go1.26)).
 
 ## What you need
 
@@ -15,10 +17,27 @@ with the bash macOS ships.
   `vista-device-agent_<version>_darwin_<arch>` and the loose
   `install-device-agent-macos.sh` also work, side by side in one directory.
 - An administrator account (the installer runs with `sudo`).
-- A registration key from the console (Discovery → Sensors & Agents →
-  Register → Device agent).
+- The commands from your console: in your Vista Platform console, open
+  Discovery → Sensors & Agents and choose **Register sensor or agent**, then
+  the device agent. The dialog creates a single-use registration key and
+  prints the install commands for macOS, with your platform's URL and, where
+  needed, its CA fingerprint (see "The platform URL and CA fingerprint"
+  below).
 
-Verify what you downloaded before you run it (`docs/verify-release.md`).
+Verify what you downloaded before you run it
+([verify-release.md](../verify-release.md)). Use the installer from the
+release, never a copy from this repository's source tree.
+
+## The platform URL and CA fingerprint
+
+There is no hosted platform and no default URL: `--url` is the address of your
+own Vista Platform console, the URL the registration dialog was opened at. The
+commands the dialog prints already carry it.
+
+If your platform's certificate is signed by a private CA that this Mac does not
+trust, the dialog shows a **Platform CA fingerprint** panel with a copy button,
+and its commands carry `--ca-fingerprint`. The value is the CA's SHA-256
+fingerprint, 64 hexadecimal digits (colons and a `sha256:` prefix are accepted).
 
 ## Install
 
@@ -27,7 +46,7 @@ tar -xzf vista-device-agent_<version>_darwin_arm64.tar.gz
 cd vista-device-agent_<version>_darwin_arm64
 bash install-device-agent-macos.sh --check-dependencies      # no root, changes nothing
 printf '%s\n' "$KEY" | sudo bash install-device-agent-macos.sh \
-    --url https://platform.example.com --key-stdin
+    --url https://vista.example.com --key-stdin
 ```
 
 The installer:
@@ -48,7 +67,7 @@ The installer:
 
 It never prints the key. Pass it on standard input (`--key-stdin`) or in
 `VISTA_REGISTRATION_KEY`; `--key KEY` works too but shows the key to other
-users in the process list.
+users in the process list. A registration key works once.
 
 For a platform whose certificate this Mac does not trust, pass
 `--ca-fingerprint <SHA-256 of the platform CA>`: macOS does not let a script
@@ -86,7 +105,6 @@ treat them as closed.
 | Log | `sudo tail -f /Library/Logs/Vista/device-agent/device-agent.log` (moves to `.1` at 10 MiB) |
 | Restart | `sudo launchctl kickstart -k system/io.vistasecurity.device-agent` |
 | Stop until the next boot | `sudo launchctl bootout system/io.vistasecurity.device-agent` |
-| Upgrade | run the installer again with the new binary and the same key |
 | Uninstall | `sudo bash install-device-agent-macos.sh --uninstall` (also removes the account) |
 
 launchd starts the agent again whenever it stops, at most every 10 seconds,
@@ -96,10 +114,34 @@ needs a person. The job then stays stopped until the next boot or the next
 install; after a rejected key during an install the installer also disables it,
 and running the installer again with a new key enables it.
 
-Re-running the installer with the same key keeps the agent's identity and
-replaces only the binary. A different key is a fresh enrollment.
+## Upgrade
 
-## Not covered
+Download and verify the new release, then run its installer again from the
+directory holding the new files, with **no key**:
+
+```sh
+sudo bash install-device-agent-macos.sh
+```
+
+It keeps the agent's identity, configuration and certificate and replaces only
+the binary. `--url` is not needed either.
+
+A registration key cannot be used twice. Running the installer with a **new**
+key enrolls this Mac as a **second, new agent**: the old certificate is
+discarded and the old agent stays in the console until you remove it there.
+Do that only to replace the agent's identity on purpose.
+
+## Uninstall
+
+```sh
+sudo bash install-device-agent-macos.sh --uninstall
+```
+
+It stops the agent and removes the job, the installation, the logs and the
+`_vistadeviceagent` account. The agent stays listed in the console until you
+remove it there.
+
+## Not notarized
 
 The macOS binaries are not notarized. The installer removes the quarantine flag
 from the copy it installs; Sigstore signatures (`docs/verify-release.md`) are how
