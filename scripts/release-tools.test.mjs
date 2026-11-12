@@ -273,7 +273,7 @@ for (const uname of ['MINGW64_NT-10.0-26100', 'MSYS_NT-10.0-26100']) {
     const calls = readFileSync(win.log, 'utf8').trim().split('\n');
     assert.equal(calls.length, 2, calls.join('\n'));
     assert.match(calls.find((c) => c.includes('install-device-agent.ps1')), /-ExecutionPolicy Bypass -File \S+install-device-agent\.ps1 -CheckDependencies$/);
-    assert.match(calls.find((c) => c.includes('install-sensor.ps1')), /install-sensor\.ps1 -IP 192\.0\.2\.1 -Key REG-SMOKE-NEVER-SENT$/);
+    assert.match(calls.find((c) => c.includes('install-sensor.ps1')), /install-sensor\.ps1 -Url https:\/\/vista\.example\.com -IP 192\.0\.2\.1 -Key REG-SMOKE-NEVER-SENT$/);
   });
 }
 
