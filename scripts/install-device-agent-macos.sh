@@ -9,13 +9,16 @@
 # re-run-to-upgrade behaviour.
 #
 # Usage: sudo bash install-device-agent-macos.sh --url URL --key-stdin [options]
+#        sudo bash install-device-agent-macos.sh --uninstall
 #
 # Written for the bash macOS ships (3.2): no associative arrays, no ${v,,}, no
 # GNU-only tools. scripts/install-macos.test.mjs holds it to that.
 
 set -e
 
+# There is no default platform URL: every customer runs their own Vista Platform.
 CONTROL_PLANE_URL=""
+URL_HELP="the address of your own Vista Platform console, as shown in your browser (for example --url https://vista.example.com)"
 # The key may come from the environment so it stays out of the process list.
 REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 CA_FINGERPRINT=""
@@ -375,6 +378,20 @@ show_log_tail() {
         printf '%s\n' "$text" | tail -20
     fi
 }
+
+# Prints --ca-fingerprint the way the agents compare fingerprints
+# (shared/certificates): lower case, without a sha256: prefix, colons, spaces or
+# dashes. Fails unless exactly 64 hexadecimal digits remain.
+normalize_ca_fingerprint() {
+    local f
+    f=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//')
+    f=${f#sha256:}
+    f=$(printf '%s' "$f" | tr -d ': \t\r\n-')
+    if [[ ! "$f" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+    printf '%s' "$f"
+}
 # --- shared macOS installer functions (end) ---
 
 show_usage() {
@@ -385,8 +402,10 @@ Vista Platform Device Agent Installer for macOS
 Usage: sudo bash $0 --url URL --key-stdin [options]
 
 Options:
-    -u, --url URL              Platform URL, as shown in the console (required)
-    -k, --key KEY              Registration key (required). A key on the command line is
+    -u, --url URL              Address of your own Vista Platform console, as shown in
+                               your browser (required unless this Mac is already enrolled)
+    -k, --key KEY              Registration key (required unless this Mac is already
+                               enrolled). A key on the command line is
                                visible to other users in the process list; prefer one of:
     --key-stdin                Read the key from the first line of standard input
                                (VISTA_REGISTRATION_KEY=... in the environment also works)
@@ -400,8 +419,14 @@ Options:
 
 Run it from the directory holding the downloaded agent: the contents of the
 macOS .tar.gz archive, or the loose ${RELEASE_PREFIX}_<version>_darwin_<arch> file.
-Re-running it with the same key keeps the agent's enrollment and replaces only
-the binary, which is how to upgrade it.
+Re-running it with no key, or with the key it enrolled with, keeps the agent's
+enrollment and replaces only the binary, which is how to upgrade it. A
+different key enrolls it afresh.
+
+Examples:
+    sudo bash $0 --url https://vista.example.com --key-stdin
+    sudo bash $0                # upgrade an enrolled agent in place
+    sudo bash $0 --uninstall    # remove the agent from this Mac
 
 The agent runs as the hidden system account $SERVICE_USER, not as root.
 EOF
@@ -515,16 +540,52 @@ main() {
         exit 0
     fi
 
-    if [[ -z "$CONTROL_PLANE_URL" || -z "$REGISTRATION_KEY" ]]; then
-        print_error "--url and --key are required"
+    local plist="$LAUNCHD_DIR/$LABEL.plist"
+    local CONFIG_FILE="$INSTALL_DIR/etc/device-agent.yaml"
+    local wrapper="$INSTALL_DIR/service.sh"
+    local log_file="$LOG_DIR/device-agent.log"
+    local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+    # An existing install may be enrolled already and need no key or URL;
+    # that is checked as root below (etc/ is the service account's only).
+    if [[ ( -z "$CONTROL_PLANE_URL" || -z "$REGISTRATION_KEY" ) && ! -f "$plist" && ! -f "$CONFIG_FILE" ]]; then
+        print_error "--url and --key are required (--url is $URL_HELP)"
         show_usage
         exit 1
     fi
-    if [[ -n "$CA_FINGERPRINT" && ! "$CA_FINGERPRINT" =~ ^[0-9A-Fa-f:]+$ ]]; then
-        print_error "--ca-fingerprint must be the SHA-256 fingerprint in hexadecimal (colons allowed)"
+    if [[ -n "$CA_FINGERPRINT" ]] && ! CA_FINGERPRINT=$(normalize_ca_fingerprint "$CA_FINGERPRINT"); then
+        print_error "--ca-fingerprint must be the SHA-256 fingerprint of the platform's CA: 64 hexadecimal digits (upper or lower case; colons and a sha256: prefix are allowed)."
         exit 1
     fi
     require_root
+
+    # A Mac this key already enrolled keeps its identity, and so does one
+    # re-run with no key at all. Re-running the install (to upgrade the
+    # binary, or by mistake) must not discard the certificate and agent ID and
+    # send it back to register with a key it has already spent. A different
+    # key means a fresh enrollment. The config keeps the key itself until the
+    # platform issues the agent its own secret, then only the key's SHA-256.
+    # Nothing has changed yet.
+    local keep_enrollment=false current_id
+    current_id=$(read_config_value agent_id "$CONFIG_FILE")
+    if [[ -z "$REGISTRATION_KEY" ]] && ! [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]]; then
+        print_error "--url and --key are required: $CONFIG_FILE does not record an enrolled agent."
+        exit 1
+    fi
+    if [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]] \
+        && { [[ -z "$REGISTRATION_KEY" ]] \
+            || [[ "$(read_config_value registration_key "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]] \
+            || [[ "$(read_config_value registration_key_sha256 "$CONFIG_FILE")" == "$(sha256_of "$REGISTRATION_KEY")" ]]; }; then
+        keep_enrollment=true
+    fi
+    # Without --url, a Mac that has a config keeps the platform it names.
+    if [[ -z "$CONTROL_PLANE_URL" ]]; then
+        CONTROL_PLANE_URL=$(read_config_value platform_url "$CONFIG_FILE")
+    fi
+    if [[ -z "$CONTROL_PLANE_URL" ]]; then
+        print_error "--url is required: $CONFIG_FILE does not record a platform. It is $URL_HELP."
+        exit 1
+    fi
 
     local version=$AGENT_VERSION
     print_header "🚀 Vista Platform Device Agent Installer (macOS)"
@@ -532,26 +593,8 @@ main() {
     echo "  Agent Version: ${version:-unknown}"
     echo "  Platform: $CONTROL_PLANE_URL"
     echo "  Install Directory: $INSTALL_DIR"
-
-    local plist="$LAUNCHD_DIR/$LABEL.plist"
-    local CONFIG_FILE="$INSTALL_DIR/etc/device-agent.yaml"
-    local wrapper="$INSTALL_DIR/service.sh"
-    local log_file="$LOG_DIR/device-agent.log"
-    local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-
-    # A Mac this key already enrolled keeps its identity. Re-running the same
-    # install command (to upgrade the binary, or by mistake) must not discard
-    # the certificate and agent ID and send it back to register with a key it
-    # has already spent. A different key means a fresh enrollment. The config
-    # keeps the key itself until the platform issues the agent its own secret,
-    # then only the key's SHA-256.
-    local keep_enrollment=false current_id
-    current_id=$(read_config_value agent_id "$CONFIG_FILE")
-    if [[ -f "$CONFIG_FILE" && "$current_id" =~ $uuid_re ]] \
-        && { [[ "$(read_config_value registration_key "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]] \
-            || [[ "$(read_config_value registration_key_sha256 "$CONFIG_FILE")" == "$(sha256_of "$REGISTRATION_KEY")" ]]; }; then
-        keep_enrollment=true
-        print_status "This Mac is already enrolled with this key (agent $current_id); keeping its identity and configuration."
+    if [[ "$keep_enrollment" == "true" ]]; then
+        print_status "This Mac is already enrolled (agent $current_id); keeping its identity and configuration."
     fi
 
     ensure_service_account

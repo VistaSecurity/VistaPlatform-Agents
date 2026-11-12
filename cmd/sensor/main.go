@@ -2313,11 +2313,19 @@ func runInteractiveMode(caFingerprint string, verbose bool) {
 	var tlsUnverified bool
 urlLoop:
 	for {
-		fmt.Print("Enter Control Plane URL (default: https://app.vistasecurity.io): ")
-		controlPlaneURL, _ = reader.ReadString('\n')
-		controlPlaneURL = strings.TrimSpace(controlPlaneURL)
+		fmt.Print("Enter the Vista Platform URL (the address of your own Vista Platform console, as shown in your browser, for example https://vista.example.com): ")
+		line, readErr := reader.ReadString('\n')
+		controlPlaneURL = strings.TrimSpace(line)
 		if controlPlaneURL == "" {
-			controlPlaneURL = "https://app.vistasecurity.io"
+			// There is no default: every customer runs their own platform.
+			if readErr != nil {
+				fmt.Println()
+				fmt.Println("Setup cancelled: no Vista Platform URL given.")
+				return
+			}
+			fmt.Println("   ❌ The Vista Platform URL is required: it is the address of your own Vista Platform console, as shown in your browser.")
+			fmt.Println()
+			continue
 		}
 
 		fmt.Printf("\n🔌 Testing connectivity to %s ...\n", controlPlaneURL)
