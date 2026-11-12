@@ -96,7 +96,7 @@ any workflow asks for a runner GitHub does not host, uses an action that is not
 pinned to a commit SHA, asks for write permissions on a pull request, or (in
 the release workflows) holds a write permission outside the publishing job and
 its environment, restores a cache or names a secret. The
-same commands run locally with `GOWORK=off`, Go 1.26.10 and, for the sensor,
+same commands run locally with `GOWORK=off`, Go 1.26.11 and, for the sensor,
 `libpcap-dev`.
 
 ## License

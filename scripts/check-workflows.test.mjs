@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
       - uses: ${SETUP_GO}
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache: false
       - run: go test ./...
 `;

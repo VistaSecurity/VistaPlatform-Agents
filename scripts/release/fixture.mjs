@@ -69,7 +69,7 @@ export function fixtureRoot(dir, { license = true, notice = 'NOTICE\nlists githu
   mkdirSync(path.join(root, 'scripts'), { recursive: true });
   cpSync(path.join(REPO_ROOT, 'release'), path.join(root, 'release'), { recursive: true });
   cpSync(path.join(REPO_ROOT, 'schemas'), path.join(root, 'schemas'), { recursive: true });
-  writeFileSync(path.join(root, 'go.mod'), `module ${MODULE}\n\ngo 1.26.10\n`);
+  writeFileSync(path.join(root, 'go.mod'), `module ${MODULE}\n\ngo 1.26.11\n`);
   // Every installer the surface names, so a new one needs no fixture change.
   for (const f of new Set(loadSurface(root).agents.flatMap((a) => Object.values(a.installers || {})))) {
     writeFileSync(path.join(root, 'scripts', f), `#!/bin/bash\n# fixture installer ${f}\n`);
@@ -93,7 +93,7 @@ export function fixtureModules(dir, mods) {
 
 export function buildInfoFor(agent, target, version, { sha = SHA, deps = [{ Path: 'github.com/example/mit', Version: 'v1.2.3', Sum: 'h1:abc=' }] } = {}) {
   return {
-    GoVersion: 'go1.26.10',
+    GoVersion: 'go1.26.11',
     Path: `${MODULE}/${agent.command}`,
     Main: { Path: MODULE, Version: '(devel)' },
     Deps: deps,

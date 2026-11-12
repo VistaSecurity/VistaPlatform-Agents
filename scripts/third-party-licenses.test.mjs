@@ -50,7 +50,7 @@ function notices(mods, { notice = null, requireNotice = false } = {}) {
   return buildNotices({
     modules: Object.keys(mods).map((p) => ({ path: p, version: 'v1.0.0', usedBy: ['sensor linux/amd64'] })),
     resolve,
-    stdlib: { version: 'go1.26.10', dir: goroot },
+    stdlib: { version: 'go1.26.11', dir: goroot },
     notice,
     requireNotice,
   });
@@ -59,7 +59,7 @@ function notices(mods, { notice = null, requireNotice = false } = {}) {
 test('only allowlisted licences: passes, with every text in the bundle', () => {
   const r = notices({ 'github.com/a/mit': MIT, 'github.com/b/apache': APACHE, 'github.com/c/bsd': BSD3 });
   assert.deepEqual(r.errors, []);
-  for (const m of ['github.com/a/mit v1.0.0', 'github.com/b/apache v1.0.0', 'github.com/c/bsd v1.0.0', 'The Go standard library (go1.26.10)']) {
+  for (const m of ['github.com/a/mit v1.0.0', 'github.com/b/apache v1.0.0', 'github.com/c/bsd v1.0.0', 'The Go standard library (go1.26.11)']) {
     assert.ok(r.text.includes(m), m);
   }
   assert.ok(r.text.includes('Permission is hereby granted'));
