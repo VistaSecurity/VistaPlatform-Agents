@@ -120,7 +120,9 @@ while IFS=$'\t' read -r kind prefix exe installer requires; do
       (cd "$dir" && bash "./$installer" --check-dependencies) || { echo "smoke.sh: $installer --check-dependencies failed" >&2; exit 1; }
       checks+=("$kind: $installer --check-dependencies")
     elif [ "$requires" = npcap ]; then
-      if refusal=$(powershell_file -IP 192.0.2.1 -Key REG-SMOKE-NEVER-SENT); then
+      # -Url and -IP are reserved example values (RFC 2606, RFC 5737) the installer
+      # requires before it reaches the Npcap check; nothing is ever sent to either.
+      if refusal=$(powershell_file -Url https://vista.example.com -IP 192.0.2.1 -Key REG-SMOKE-NEVER-SENT); then
         echo "$refusal" >&2; echo "smoke.sh: $installer did not refuse a host without Npcap" >&2; exit 1
       fi
       echo "$refusal"
