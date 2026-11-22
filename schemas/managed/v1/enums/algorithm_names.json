@@ -120,6 +120,7 @@
     "RSA-SHA256",
     "RSA-SHA384",
     "RSA-SHA512",
+    "RSASSA",
     "S7-NO-SECURITY",
     "SHA-512/224",
     "SHA-512/256",
