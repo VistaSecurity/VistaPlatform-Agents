@@ -86,6 +86,13 @@ type certificateRotator interface {
 }
 
 func main() {
+	// Standalone subcommands (collect, host-inventory) run before the managed
+	// flags are parsed and exit on their own; anything else, including no
+	// arguments at all, is the managed agent exactly as before.
+	if code, ok := runStandalone(os.Args[1:], standaloneEnv{}); ok {
+		os.Exit(code)
+	}
+
 	var (
 		version    = flag.Bool("version", false, "Show version information")
 		configFile = flag.String("config", "", "Path to configuration file (optional)")
