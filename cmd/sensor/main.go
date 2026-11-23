@@ -410,6 +410,14 @@ func (s *Sensor) retryRegistrationUntilSuccess(stop <-chan struct{}) {
 }
 
 func main() {
+	// `crypto-sensor capture` and `crypto-sensor scan` are standalone mode
+	// (standalone.go): their own flags, no configuration, no platform. They
+	// are dispatched before anything else so the managed sensor's flags,
+	// installer and service start-up never run for them.
+	if standaloneCommand(os.Args[1:]) {
+		os.Exit(runStandaloneMain(os.Args[1:]))
+	}
+
 	// Command line flags
 	var (
 		version    = flag.Bool("version", false, "Show version information")
