@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/output/v1/record.schema.json",
+  "title": "Standalone output record",
+  "description": "One record of a standalone run's output (docs/design/standalone-mode.md): a line of JSON Lines output, or the run, an element of records, or the summary of a JSON document. data follows the managed protocol's field names for the same observation; the envelope, the run, error and summary data are held here.",
+  "type": "object",
+  "required": ["schema", "kind", "agent", "agent_version", "run_id", "observed_at", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "vista.agent-output/v1" },
+    "kind": {
+      "enum": ["run", "passive_observation", "scan_host", "device_interrogation", "host_inventory", "error", "summary"]
+    },
+    "agent": { "enum": ["crypto-sensor", "device-agent"] },
+    "agent_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "data": {}
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "run" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/run" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "error" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/error" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "summary" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/summary" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "enum": ["passive_observation", "scan_host", "device_interrogation", "host_inventory"] } } },
+      "then": { "properties": { "data": { "type": "object" } } }
+    }
+  ],
+  "$defs": {
+    "run": {
+      "type": "object",
+      "required": ["command", "started_at"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "flags": { "type": "object", "additionalProperties": { "type": "string" } },
+        "targets": { "type": "array", "items": { "type": "string" } },
+        "resolved": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+        "hostname": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "target": { "type": "string" },
+        "stage": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["records", "endpoints", "errors", "partial", "duration_seconds", "finished_at"],
+      "properties": {
+        "records": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "endpoints": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "partial": { "type": "boolean" },
+        "duration_seconds": { "type": "number", "minimum": 0 },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "scope": { "type": "string" }
+      }
+    }
+  }
+}
