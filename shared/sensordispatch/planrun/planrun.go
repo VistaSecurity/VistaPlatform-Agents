@@ -69,6 +69,12 @@ type Config struct {
 	// for a plan carrying VerifyCertificate, which is refused without it — a
 	// verification is judged on address AND port (SensorEndpointRule).
 	AllowEndpoint func(netip.AddrPort) error
+	// OutboundGuard, when set, judges every fetch a scanned server's own data
+	// asks for (the OCSP responder its certificate names) before it is made.
+	// nil leaves those fetches unguarded, as the managed sensor has always
+	// run; the standalone scan sets it to its own rule, so a run touches
+	// only the named targets.
+	OutboundGuard discovery.AddressGuard
 	// Dialer is the network the engine dials (default: the system's). Every
 	// dial passes Allow first, whatever Dialer is.
 	Dialer discovery.Dialer
@@ -167,7 +173,7 @@ func Run(ctx context.Context, plan sensordispatch.PlanPayload, cfg Config) (Summ
 		// verification registered as an endpoint.
 		dialer = GuardedEndpointDialer(cfg.Dialer, cfg.AllowEndpoint)
 	}
-	engine, err := discovery.NewUnitEngine(plan.Pace, plan.OTProbeProtocols, nil, discovery.WithDialer(dialer))
+	engine, err := discovery.NewUnitEngine(plan.Pace, plan.OTProbeProtocols, cfg.OutboundGuard, discovery.WithDialer(dialer))
 	if err != nil {
 		return Summary{}, fmt.Errorf("scan engine: %w", err)
 	}
