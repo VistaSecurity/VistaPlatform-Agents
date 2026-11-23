@@ -307,6 +307,7 @@ func (w *Writer) emit(rec Record) error {
 }
 
 // Write records one observation, with the endpoints it shows for the CSV.
+// Verdicts the shared decoders attach are removed first (see VerdictKeys).
 func (w *Writer) Write(kind Kind, data any, endpoints ...Endpoint) error {
 	if kind == KindRun || kind == KindSummary || kind == KindError {
 		return fmt.Errorf("agentoutput: %s records are written by Open, Close and Error", kind)
@@ -316,7 +317,11 @@ func (w *Writer) Write(kind Kind, data any, endpoints ...Endpoint) error {
 	if w.closed {
 		return errors.New("agentoutput: write after close")
 	}
-	if err := w.emit(w.record(kind, data)); err != nil {
+	clean, err := withoutVerdicts(data)
+	if err != nil {
+		return fmt.Errorf("cannot encode a %s record: %w", kind, err)
+	}
+	if err := w.emit(w.record(kind, clean)); err != nil {
 		return err
 	}
 	return w.writeEndpoints(kind, endpoints)

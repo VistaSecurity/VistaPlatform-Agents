@@ -87,7 +87,8 @@ A few capture settings worth knowing:
 ## Running and troubleshooting
 
 [USAGE_GUIDE.md](USAGE_GUIDE.md) covers the installed service, its logs, and
-running the binary by hand in the foreground to diagnose a problem.
+running the binary by hand in the foreground to diagnose a problem. To capture
+or scan without a platform, see [standalone mode](../standalone.md).
 [CERTIFICATE_MANAGEMENT.md](CERTIFICATE_MANAGEMENT.md) covers registration and
 the sensor's certificate.
 

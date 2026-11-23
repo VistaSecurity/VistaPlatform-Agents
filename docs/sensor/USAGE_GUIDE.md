@@ -63,6 +63,11 @@ platform's URL in `controlPlaneUrl`.
 
 ### Test mode, without a platform
 
+To use the sensor without a platform at all, use standalone mode instead:
+`crypto-sensor capture` and `crypto-sensor scan` need no configuration file
+and write a documented output format ([`../standalone.md`](../standalone.md)).
+Test mode is for checking a managed sensor's configuration.
+
 Test mode captures and decodes traffic and writes what it found to a local file;
 nothing is sent anywhere and no key is used. Give it a scratch configuration and
 data directory so it does not touch an installed sensor:

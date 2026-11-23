@@ -29,7 +29,9 @@ device-agent collect --type fortigate --target 192.0.2.10 --credentials creds.ya
 device-agent host-inventory --format json --out host.json
 ```
 
-See [`docs/standalone.md`](docs/standalone.md).
+How to run them: [`docs/standalone.md`](docs/standalone.md). Every field of
+the output, with `jq` recipes: [`docs/standalone-output.md`](docs/standalone-output.md).
+All the documentation: [`docs/README.md`](docs/README.md).
 
 ## Releases
 

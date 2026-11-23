@@ -1,6 +1,9 @@
 # Standalone mode
 
-Status: built (#41, #42, #43; tracking issue #40).
+Status: built (#41, #42, #43; tracking issue #40). Using it:
+[`../standalone.md`](../standalone.md); the output field by field:
+[`../standalone-output.md`](../standalone-output.md); the code:
+[`../development/standalone.md`](../development/standalone.md).
 
 ## What it is
 
@@ -155,6 +158,19 @@ Every record has the same envelope:
 against standalone output also reads what the managed agents report. The
 envelope is held by `schemas/output/v1/record.schema.json`.
 
+### No verdicts in the output
+
+Some decoders and collectors shared with managed mode label what they saw for
+the platform: an IEC 62351 compliance result on passive TLS, a "weak"
+certificate signature or key from the active TLS probe, a "weak" OT security
+mechanism, a risk score from the database collector. Those are assessments, so
+the output writer removes them from every standalone record
+(`shared/agentoutput/verdicts.go`, which names each key) and keeps the facts
+they were derived from. Measurements that are not opinions stay: whether a
+certificate chain verified against the local trust store, whether a server
+accepted a hybrid post-quantum group. A new judgement a decoder learns to make
+is added to that list in the same change.
+
 ### Formats
 
 - `jsonl` (default): one record per line, in the order above. On standard
@@ -193,7 +209,7 @@ not find the network safe. The summary says how much was looked at.
 ## What standalone mode will not do
 
 - Upload, phone home, check for updates or send telemetry.
-- Assess, score or rate anything.
+- Assess, score or rate anything, or pass on a decoder's assessment.
 - Run as a service, schedule, or remember anything between runs.
 - Probe anything the operator did not name; scan public addresses without
   `--allow-public`; run OT probes.
