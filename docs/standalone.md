@@ -25,7 +25,7 @@ design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode
 ## Get the binary
 
 1. Open the [releases page](https://github.com/VistaSecurity/VistaPlatform-Agents/releases)
-   and pick a release (below says which have standalone mode). Download the
+   and pick `v6.1.0-rc.1` or a later release (see below). Download the
    archive for your agent and system (the README's
    ["Which file do I need"](../README.md#which-file-do-i-need) table names it)
    and `SHA256SUMS`.
@@ -47,10 +47,14 @@ design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode
 - The device agent is `device-agent` (`device-agent.exe`). It needs nothing
   else.
 
-Standalone mode is in the nightly builds from 2026-11-23 on and in every
-release tagged after that date. An older binary has no subcommands: it would
-start as a managed agent instead, so check the release date first. A binary
-that has it lists the standalone commands at the top of `--help`.
+The first release with standalone mode is
+[`v6.1.0-rc.1`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0-rc.1),
+a release candidate, and every release after it has it too; so do the nightly
+builds from 2026-11-23 on. GitHub's "Latest" label stays on the newest stable
+release, which until v6.1.0 ships is v6.0.0, and **v6.0.0 has no standalone
+mode**: an older binary has no subcommands and would start as a managed agent
+instead. A binary that has it lists the standalone commands at the top of
+`--help`.
 
 ### macOS: before the first run
 
