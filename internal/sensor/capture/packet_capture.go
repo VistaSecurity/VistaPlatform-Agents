@@ -82,14 +82,36 @@ type PacketCapture struct {
 	dropCount    int64    // atomic counter
 }
 
+// liveDiscoveryBuffer is the discoveries channel's depth for live capture.
+const liveDiscoveryBuffer = 1000
+
+// fileDiscoveryBuffer is its depth when reading a capture file. Every decoder
+// hands a discovery off without blocking and drops it when the channel is
+// full, which is right for live traffic and wrong for a file: a file must
+// decode the same every run. RunFile keeps the channel at most half full
+// while it reads, but the final flush emits one discovery per open flow (and
+// one per coalesced host) at once, so the channel must hold that burst.
+const fileDiscoveryBuffer = 1 << 16
+
 // NewPacketCapture creates a new packet capture instance
 func NewPacketCapture(cfg *config.Config) *PacketCapture {
+	return newPacketCapture(cfg, liveDiscoveryBuffer)
+}
+
+// NewFileCapture is NewPacketCapture for reading a capture file with RunFile:
+// the same decoders, with a discoveries channel deep enough for the flush at
+// the end of the file.
+func NewFileCapture(cfg *config.Config) *PacketCapture {
+	return newPacketCapture(cfg, fileDiscoveryBuffer)
+}
+
+func newPacketCapture(cfg *config.Config, discoveryBuffer int) *PacketCapture {
 	ctx, cancel := context.WithCancel(context.Background())
 	workerCount := runtime.NumCPU()
 
 	dedupTTL := time.Duration(cfg.Capture.DedupTTLMinutes) * time.Minute
 
-	discoveries := make(chan *models.CryptoDiscovery, 1000)
+	discoveries := make(chan *models.CryptoDiscovery, discoveryBuffer)
 	connCache := cache.NewConnectionCache(dedupTTL, 100000)
 
 	// STARTTLS ports (defaults when unset) — used for BPF, routing, STARTTLS factory, and TLS factory
@@ -285,11 +307,7 @@ func (pc *PacketCapture) Start() error {
 			strings.Join(openErrs, "; "), openPermissionHint())
 	}
 
-	if pc.hostObs != nil {
-		pc.hostObs.Start(pc.ctx)
-		log.Printf("Passive host observation enabled (coalescing window %s, DNS decoder %s)",
-			pc.hostObs.window, enabledWord(pc.hostObs.decoders.DNS))
-	}
+	pc.startDecoders()
 
 	// Start bounded worker goroutines — these consume from the workers channel
 	// and are NOT tracked by wg (they exit via ctx.Done, not interface close)
@@ -316,6 +334,17 @@ func (pc *PacketCapture) Start() error {
 	return nil
 }
 
+// startDecoders starts what decodes packets besides the assemblers, which
+// need no goroutine: the host-observation pipeline. Shared by Start and
+// RunFile so a file is decoded by exactly what decodes live traffic.
+func (pc *PacketCapture) startDecoders() {
+	if pc.hostObs != nil {
+		pc.hostObs.Start(pc.ctx)
+		log.Printf("Passive host observation enabled (coalescing window %s, DNS decoder %s)",
+			pc.hostObs.window, enabledWord(pc.hostObs.decoders.DNS))
+	}
+}
+
 // assemblerMaxIdle is how long a TCP flow may sit idle before its assembler
 // state and its factory session are evicted.
 const assemblerMaxIdle = 30 * time.Second
@@ -326,18 +355,7 @@ const assemblerMaxIdle = 30 * time.Second
 // FlushOlderThan closes it, so both have to run. The assemblers are not safe
 // for concurrent use, hence assemblerMu.
 func (pc *PacketCapture) flushStale(maxAge time.Duration) {
-	cutoff := time.Now().Add(-maxAge)
-	pc.assemblerMu.Lock()
-	for _, a := range []*tcpassembly.Assembler{
-		pc.assembler, pc.sshAssembler, pc.starttlsAssembler, pc.smbAssembler,
-		pc.krbTCPAssembler, pc.modbusAssembler, pc.mmsAssembler, pc.dnp3Assembler,
-		pc.opcuaAssembler, pc.enipAssembler, pc.hartipAssembler,
-	} {
-		if a != nil {
-			a.FlushOlderThan(cutoff)
-		}
-	}
-	pc.assemblerMu.Unlock()
+	pc.flushAssemblersOlderThan(time.Now().Add(-maxAge))
 
 	pc.streamFactory.FlushOldSessions(maxAge)
 	pc.sshStreamFactory.FlushOldSessions(maxAge)
@@ -370,6 +388,23 @@ func (pc *PacketCapture) flushStale(maxAge time.Duration) {
 	}
 }
 
+// flushAssemblersOlderThan closes every TCP flow whose last packet is older
+// than cutoff, in packet time: the assemblers keep each connection's last
+// timestamp from the packets themselves.
+func (pc *PacketCapture) flushAssemblersOlderThan(cutoff time.Time) {
+	pc.assemblerMu.Lock()
+	defer pc.assemblerMu.Unlock()
+	for _, a := range []*tcpassembly.Assembler{
+		pc.assembler, pc.sshAssembler, pc.starttlsAssembler, pc.smbAssembler,
+		pc.krbTCPAssembler, pc.modbusAssembler, pc.mmsAssembler, pc.dnp3Assembler,
+		pc.opcuaAssembler, pc.enipAssembler, pc.hartipAssembler,
+	} {
+		if a != nil {
+			a.FlushOlderThan(cutoff)
+		}
+	}
+}
+
 // Stop stops packet capture
 func (pc *PacketCapture) Stop() {
 	log.Println("Stopping packet capture...")
@@ -378,6 +413,9 @@ func (pc *PacketCapture) Stop() {
 	pc.sshAssembler.FlushAll()
 	if pc.starttlsAssembler != nil {
 		pc.starttlsAssembler.FlushAll()
+	}
+	if pc.smbAssembler != nil {
+		pc.smbAssembler.FlushAll()
 	}
 	if pc.krbTCPAssembler != nil {
 		pc.krbTCPAssembler.FlushAll()
