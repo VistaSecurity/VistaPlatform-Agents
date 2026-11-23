@@ -9,11 +9,27 @@ Bugs and requests go to this repository's issues (see
 ## What lives here
 
 - `cmd/sensor`, `cmd/device-agent`: the two executables, built and released
-  separately, used by Vista Platform in managed mode.
+  separately, used by Vista Platform in managed mode and usable on their own in
+  standalone mode.
 - `internal/`, `shared/`: the code they are built from, maintained here.
 - `scripts/`: the installers, the build script and the release tooling.
 - Nightly and tagged builds, installers and compatibility metadata, published
   as this repository's releases. Every artefact carries a Sigstore signature.
+
+## Running without a platform
+
+Both agents also run on their own, with no account and nothing uploaded: name
+what to look at and they write what they observed to a file (JSON Lines, JSON
+or CSV) for your own scripts. They collect; they do not assess.
+
+```bash
+crypto-sensor capture --pcap traffic.pcap --out traffic.jsonl
+crypto-sensor scan --target 10.20.0.0/24 --format csv --out scan.csv
+device-agent collect --type fortigate --target 192.0.2.10 --credentials creds.yaml --out fw.jsonl
+device-agent host-inventory --format json --out host.json
+```
+
+See [`docs/standalone.md`](docs/standalone.md).
 
 ## Releases
 
