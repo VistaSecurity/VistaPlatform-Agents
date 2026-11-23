@@ -439,7 +439,6 @@ func (w *Writer) abort() {
 }
 
 func (w *Writer) printSummary(sum Summary, writeErr error) {
-	out := w.opts.Stderr
 	var kinds []string
 	for k, n := range sum.Records {
 		if k == KindRun || k == KindSummary {
@@ -451,24 +450,28 @@ func (w *Writer) printSummary(sum Summary, writeErr error) {
 	if len(kinds) == 0 {
 		kinds = []string{"no observations"}
 	}
-	fmt.Fprintf(out, "%s: %s; %d endpoint(s); %d error(s); %.1fs\n",
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %s; %d endpoint(s); %d error(s); %.1fs\n",
 		w.opts.Agent, strings.Join(kinds, ", "), sum.Endpoints, sum.Errors, sum.DurationSeconds)
 	if sum.Scope != "" {
-		fmt.Fprintf(out, "  looked at: %s\n", sum.Scope)
+		fmt.Fprintf(&b, "  looked at: %s\n", sum.Scope)
 	}
 	for _, warn := range sum.Warnings {
-		fmt.Fprintf(out, "  warning: %s\n", warn)
+		fmt.Fprintf(&b, "  warning: %s\n", warn)
 	}
 	switch {
 	case writeErr != nil:
-		fmt.Fprintf(out, "  output NOT written: %v\n", writeErr)
+		fmt.Fprintf(&b, "  output NOT written: %v\n", writeErr)
 	case w.file != nil:
-		fmt.Fprintf(out, "  output: %s (%s)\n", w.opts.Path, w.opts.Format)
+		fmt.Fprintf(&b, "  output: %s (%s)\n", w.opts.Path, w.opts.Format)
 	}
 	if sum.Partial {
-		fmt.Fprintln(out, "  the result is partial: see the error records")
+		b.WriteString("  the result is partial: see the error records\n")
 	}
-	fmt.Fprintln(out, "  observations only; nothing was assessed or uploaded")
+	b.WriteString("  observations only; nothing was assessed or uploaded\n")
+	// The summary is advisory: a closed standard error must not fail a run
+	// whose output was written.
+	_, _ = io.WriteString(w.opts.Stderr, b.String())
 }
 
 // ExitCode maps a run's outcome onto the standalone exit status: 0 complete,
