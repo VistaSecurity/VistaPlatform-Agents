@@ -134,6 +134,9 @@ func runCapture(env standaloneEnv, args []string) int {
 		w.Warn("an observation could not be written: %v", err)
 		partial = true
 	}
+	if nothingWorked {
+		w.Fail()
+	}
 	sum, err := w.Close(partial, scope)
 	return agentoutput.ExitCode(sum, err, nothingWorked)
 }

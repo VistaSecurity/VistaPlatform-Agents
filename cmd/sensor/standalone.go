@@ -26,6 +26,15 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/discovery"
 )
 
+// standaloneUsageHint opens the managed sensor's --help, so a person who runs
+// `crypto-sensor --help` learns the standalone commands exist.
+const standaloneUsageHint = `Standalone commands (no Vista Platform, nothing uploaded; see docs/standalone.md):
+  capture   decode a capture file, or one interface for a set time (passive)
+  scan      scan addresses you name
+Run "crypto-sensor <command> --help" for a command's flags.
+
+`
+
 // standaloneAgent names the sensor in every standalone record.
 const standaloneAgent = "crypto-sensor"
 
@@ -95,7 +104,7 @@ type outputFlags struct {
 func (o *outputFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&o.out, "out", "-", "write the output to `PATH` (created 0600, renamed into place when the run ends); - is standard output")
 	fs.StringVar(&o.format, "format", "jsonl", "output format: jsonl, json or csv (csv has one row per endpoint)")
-	fs.BoolVar(&o.quiet, "quiet", false, "do not print the summary on standard error")
+	fs.BoolVar(&o.quiet, "quiet", false, "do not print progress or the summary on standard error")
 	fs.BoolVar(&o.verbose, "verbose", false, "log the decoders' and the scan engine's diagnostics on standard error")
 }
 

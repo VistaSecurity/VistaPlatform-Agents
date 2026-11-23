@@ -120,6 +120,13 @@ func main() {
 		hostInventoryOnce = flag.Bool("host-inventory-once", false,
 			"Collect this host's inventory once, print it as JSON, and exit. Sends nothing to the platform.")
 	)
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		_, _ = fmt.Fprintf(out, "Usage: %s [flags]\n\n", os.Args[0])
+		_, _ = fmt.Fprint(out, standaloneUsageHint)
+		_, _ = fmt.Fprint(out, "Managed agent flags (reporting to a Vista Platform):\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if *hostInventoryOnce {
@@ -244,6 +251,8 @@ func runDeviceAgent(flags agentFlags, host agentHost) agentservice.Outcome {
 	// platform with no identity while reporting success (#1787).
 	if configPath != "" {
 		log.Printf("📁 Loading configuration from file: %s", configPath)
+	} else {
+		log.Printf("ℹ️  No configuration file. To use the agent without a Vista Platform: %s collect --help, %s host-inventory --help", os.Args[0], os.Args[0])
 	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {

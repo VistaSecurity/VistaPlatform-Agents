@@ -127,8 +127,11 @@ func noDevicesError() error {
 
 // openPermissionHint says what usually stops a listed device from opening.
 func openPermissionHint() string {
-	if targetsGOOS == "windows" {
+	switch targetsGOOS {
+	case "windows":
 		return " (if Npcap restricts its driver to administrators, run the sensor as an administrator or as LocalSystem, as the service does)"
+	case "darwin":
+		return " (capture needs root: run it with sudo)"
 	}
 	return " (capture needs root, or CAP_NET_RAW and CAP_NET_ADMIN)"
 }

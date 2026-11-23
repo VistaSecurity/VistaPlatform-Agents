@@ -24,11 +24,22 @@ design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode
 
 ## Get the binary
 
-Download the archive for your system from the
-[latest release](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/latest)
-(the README's "Which file do I need" table names it) and verify it
-([`verify-release.md`](verify-release.md)). Unpack it; you do not need to run
-the installer for standalone use.
+1. Open the [releases page](https://github.com/VistaSecurity/VistaPlatform-Agents/releases)
+   and pick a release (below says which have standalone mode). Download the
+   archive for your agent and system (the README's
+   ["Which file do I need"](../README.md#which-file-do-i-need) table names it)
+   and `SHA256SUMS`.
+2. Verify the archive **before you unpack it**
+   ([`verify-release.md`](verify-release.md)). `SHA256SUMS` also lists the
+   loose binaries, whose names are the same as the directories the archives
+   unpack to, so checking it after unpacking reports those as `FAILED`.
+
+   ```bash
+   sha256sum --ignore-missing -c SHA256SUMS        # Linux
+   shasum -a 256 --ignore-missing -c SHA256SUMS    # macOS
+   ```
+
+3. Unpack it. You do not need to run the installer for standalone use.
 
 - The sensor is `crypto-sensor` (`crypto-sensor.exe` on Windows). It needs
   libpcap on Linux and macOS, which the system usually has, and
@@ -38,7 +49,32 @@ the installer for standalone use.
 
 Standalone mode is in the nightly builds from 2026-11-23 on and in every
 release tagged after that date. An older binary has no subcommands: it would
-start as a managed agent instead, so check the release date first.
+start as a managed agent instead, so check the release date first. A binary
+that has it lists the standalone commands at the top of `--help`.
+
+### macOS: before the first run
+
+The macOS binaries are not notarized, so Gatekeeper refuses to open one that a
+browser downloaded ("cannot be opened because Apple cannot check it"). Remove
+the download's quarantine flag from the unpacked directory **before you run
+anything in it**:
+
+```bash
+xattr -dr com.apple.quarantine vista-sensor_<version>_darwin_arm64
+```
+
+If you ran it first and macOS refused, removing the flag afterwards is not
+enough: macOS remembers that file. Approve it in **System Settings → Privacy &
+Security → Open Anyway**, or unpack the archive again into a new directory and
+remove the flag there first. (The installers remove the flag themselves; this
+step is only for running the binary directly.)
+
+### Windows
+
+Run the `.exe` from PowerShell or a command prompt; these are command-line
+tools, and double-clicking one opens and closes a window. Windows binaries are
+not Authenticode-signed: SmartScreen may warn about a file Explorer unpacked
+from a downloaded archive. Verify the archive first, as above.
 
 ## Read a capture file
 
@@ -64,7 +100,7 @@ sudo crypto-sensor capture --interface eth0 --duration 15m --out eth0.jsonl
 
 `--duration` is required, so a run always ends; Ctrl-C ends it early and still
 writes what was seen. Capture is passive: the sensor never connects to what it
-sees.
+sees. Run with `sudo`, the output file still belongs to you.
 
 - Linux: run as root, or give the binary the capture capability once:
   `sudo setcap cap_net_raw=eip ./crypto-sensor` (the installed service runs
@@ -104,6 +140,15 @@ A target is an address (`10.20.0.5`), a CIDR range (`10.20.0.0/24`), a range
   `standard`).
 - `--pace polite|normal|fast` sets concurrency and timeouts (default `polite`,
   the gentlest).
+- **How long it takes.** The defaults are gentle and thorough, so they are
+  slow: on a lab network one host took about a minute and a half at
+  `standard` depth and `polite` pace, about a second with `--depth quick`, and
+  about 13 seconds at `standard` with `--pace normal`. Start with
+  `--depth quick` to see what is there, then scan what matters at `standard`.
+  A long scan prints how many addresses it has done every 15 seconds.
+- The scan identifies cryptographic protocols (TLS, SSH, SMB, …). An open port
+  that speaks something else, plain HTTP for example, is listed as open with
+  no protocol.
 - `--timeout 30m` stops the whole scan after that long and writes what
   finished; the rest is reported as not scanned, and the result is partial.
 - `--verbose` prints the scan engine's log on standard error.
@@ -171,14 +216,16 @@ Every command takes the same output flags:
 
 - `--out PATH` names the file (default `-`, standard output). A file is
   readable only by you and appears under its name only when the run ends, so a
-  file that exists is complete.
+  file that exists is complete. A path that is not a regular file, such as
+  `/dev/null` or a named pipe, is written to directly.
 - `--format jsonl|json|csv`:
   - `jsonl` (default): one record per line; on standard output it streams;
   - `json`: one document with `run`, `records` and `summary`;
   - `csv`: one row per host, port and protocol seen, with the TLS and
     certificate columns. Interfaces, neighbours and host inventory are not in
     the CSV; use `json` or `jsonl` for those.
-- `--quiet` turns off the summary printed to standard error.
+- `--quiet` turns off the summary (and a scan's progress lines) on standard
+  error.
 
 Every record has the same envelope:
 

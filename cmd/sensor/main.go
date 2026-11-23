@@ -439,6 +439,13 @@ func main() {
 			"Expected SHA-256 fingerprint of the control plane's CA certificate. Required for unattended "+
 				"enrollment against a control plane whose certificate is signed by a private CA this host does not trust.")
 	)
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		_, _ = fmt.Fprintf(out, "Usage: %s [flags]\n\n", os.Args[0])
+		_, _ = fmt.Fprint(out, standaloneUsageHint)
+		_, _ = fmt.Fprint(out, "Managed sensor flags (reporting to a Vista Platform):\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	// Show version and exit
@@ -567,6 +574,7 @@ func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
 		log.Printf("📁 Loading configuration from file: %s", *configFile)
 	} else {
 		log.Printf("⚠️  No valid config file found, falling back to environment variables and defaults")
+		log.Printf("ℹ️  To use the sensor without a Vista Platform: %s capture --help, %s scan --help", os.Args[0], os.Args[0])
 	}
 	cfg, err := loadConfig(*configFile)
 	if err != nil {

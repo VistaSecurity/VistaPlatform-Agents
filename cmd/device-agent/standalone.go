@@ -30,6 +30,15 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
 
+// standaloneUsageHint opens the managed agent's --help, so a person who runs
+// `device-agent --help` learns the standalone commands exist.
+const standaloneUsageHint = `Standalone commands (no Vista Platform, nothing uploaded; see docs/standalone.md):
+  collect          interrogate one device you name
+  host-inventory   inventory this machine
+Run "device-agent <command> --help" for a command's flags.
+
+`
+
 // standaloneAgent names this binary in every output record.
 const standaloneAgent = "device-agent"
 
@@ -317,11 +326,13 @@ func runCollect(args []string, env standaloneEnv) int {
 			_, _ = fmt.Fprintf(env.stderr, "%s collect: %v\n", standaloneAgent, werr)
 		}
 		// Nothing was collected, so the run failed whatever Close reports.
+		w.Fail()
 		_, _ = w.Close(true, scope)
 		return 1
 	}
 
 	if err := w.Write(agentoutput.KindDeviceInterrogation, result, endpointsOf(result, f.deviceType)...); err != nil {
+		w.Fail()
 		_, _ = w.Close(true, scope)
 		_, _ = fmt.Fprintf(env.stderr, "%s collect: %v\n", standaloneAgent, err)
 		return 1
@@ -584,10 +595,12 @@ func runHostInventory(args []string, env standaloneEnv) int {
 	report, observations, err := env.collectHost(ctx)
 	if err != nil {
 		_ = w.Error("", "host_inventory", redact.Text("host inventory failed: "+err.Error()))
+		w.Fail()
 		_, _ = w.Close(true, scope)
 		return 1
 	}
 	if err := w.Write(agentoutput.KindHostInventory, map[string]any{"report": report, "observations": observations}); err != nil {
+		w.Fail()
 		_, _ = w.Close(true, scope)
 		_, _ = fmt.Fprintf(env.stderr, "%s host-inventory: %v\n", standaloneAgent, err)
 		return 1

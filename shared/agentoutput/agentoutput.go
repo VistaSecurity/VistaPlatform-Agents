@@ -200,6 +200,13 @@ type Writer struct {
 	errors    int
 	warnings  []string
 	seenRows  map[string]bool
+	// special is an existing output path that is not a regular file
+	// (/dev/null, a named pipe, /dev/stdout): written in place, with no
+	// temporary file and no rename, which such a path cannot take.
+	special *os.File
+	// failed marks a run that did no useful work (exit status 1), so the
+	// summary does not call it partial.
+	failed bool
 }
 
 // Open starts a run: it opens the output and writes the run record.
@@ -228,6 +235,16 @@ func Open(opts Options, run Run) (*Writer, error) {
 	}
 	if opts.Path == "" || opts.Path == "-" {
 		w.out = opts.Stdout
+	} else if info, err := os.Stat(opts.Path); err == nil && !info.Mode().IsRegular() {
+		if info.IsDir() {
+			return nil, fmt.Errorf("the output path %s is a directory; name a file in it", opts.Path)
+		}
+		f, err := os.OpenFile(opts.Path, os.O_WRONLY, 0)
+		if err != nil {
+			return nil, fmt.Errorf("cannot open the output %s: %w", opts.Path, err)
+		}
+		w.special = f
+		w.out = f
 	} else {
 		dir, base := filepath.Split(opts.Path)
 		if dir == "" {
@@ -361,6 +378,15 @@ func (w *Writer) Error(target, stage, reason string) error {
 	return w.emit(w.record(KindError, ErrorData{Target: target, Stage: stage, Reason: reason}))
 }
 
+// Fail marks the run as failed: nothing useful was collected and the command
+// will exit 1. The summary record still says partial; the printed summary
+// says the run failed instead of calling the result partial.
+func (w *Writer) Fail() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.failed = true
+}
+
 // Warn adds a line to the summary's warnings without failing anything.
 func (w *Writer) Warn(format string, args ...any) {
 	w.mu.Lock()
@@ -423,10 +449,20 @@ func (w *Writer) Close(partial bool, scope string) (Summary, error) {
 			err = cerr
 		}
 		if err == nil {
+			// Before the rename, so the file never appears under its name
+			// owned by root when the user ran the command with sudo.
+			if cerr := giveToSudoUser(w.file.Name()); cerr != nil {
+				sum.Warnings = append(sum.Warnings, fmt.Sprintf("the output is owned by root: %v", cerr))
+			}
 			err = os.Rename(w.file.Name(), w.opts.Path)
 		}
 		if err != nil {
 			_ = os.Remove(w.file.Name())
+		}
+	}
+	if w.special != nil {
+		if cerr := w.special.Close(); err == nil {
+			err = cerr
 		}
 	}
 	if !w.opts.Quiet {
@@ -440,6 +476,9 @@ func (w *Writer) abort() {
 	if w.file != nil {
 		_ = w.file.Close()
 		_ = os.Remove(w.file.Name())
+	}
+	if w.special != nil {
+		_ = w.special.Close()
 	}
 }
 
@@ -467,10 +506,13 @@ func (w *Writer) printSummary(sum Summary, writeErr error) {
 	switch {
 	case writeErr != nil:
 		fmt.Fprintf(&b, "  output NOT written: %v\n", writeErr)
-	case w.file != nil:
+	case w.file != nil, w.special != nil:
 		fmt.Fprintf(&b, "  output: %s (%s)\n", w.opts.Path, w.opts.Format)
 	}
-	if sum.Partial {
+	switch {
+	case w.failed:
+		b.WriteString("  the run failed: see the error records\n")
+	case sum.Partial:
 		b.WriteString("  the result is partial: see the error records\n")
 	}
 	b.WriteString("  observations only; nothing was assessed or uploaded\n")
