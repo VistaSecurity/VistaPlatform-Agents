@@ -127,7 +127,10 @@ The installers run the agent as
 `device-agent.exe`). To watch it, read the service log (the setup guides list
 where) rather than starting a second copy. Running the binary by hand with a
 fresh key is not a supported way to set an agent up: it would enroll with a data
-path the service cannot use, and the key works only once.
+path the service cannot use, and the key works only once. To interrogate a
+device or inventory a machine once without a platform, use standalone mode
+(`device-agent collect`, `device-agent host-inventory`:
+[`../standalone.md`](../standalone.md)).
 
 Flags: `-config FILE`, `-verbose` (on by default; `-verbose=false` to quiet it),
 `-interactive=false` (skip the terminal dialogue), `-ca-fingerprint SHA256`,

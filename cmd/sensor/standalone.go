@@ -133,7 +133,7 @@ func newFlagSet(env standaloneEnv, name, synopsis, about string) *flag.FlagSet {
 		_, _ = fmt.Fprintf(w, "Usage: %s %s %s\n\n%s\n\n", standaloneAgent, name, synopsis, about)
 		_, _ = fmt.Fprintln(w, "Standalone mode: this command contacts no Vista Platform. It registers nothing,")
 		_, _ = fmt.Fprintln(w, "uploads nothing, reads no sensor configuration file and assesses nothing: it")
-		_, _ = fmt.Fprintln(w, "writes what it observed, in the format docs/design/standalone-mode.md describes.")
+		_, _ = fmt.Fprintln(w, "writes what it observed, in the format docs/standalone-output.md describes.")
 		_, _ = fmt.Fprintln(w, "\nFlags:")
 		fs.PrintDefaults()
 		_, _ = fmt.Fprintln(w, "\nExit status: 0 complete, 1 the run could not do its work, 2 a partial result.")
