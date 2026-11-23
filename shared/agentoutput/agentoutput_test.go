@@ -227,3 +227,49 @@ func TestOpenRefusesUnknownFormat(t *testing.T) {
 		t.Error("Open accepted an unknown format")
 	}
 }
+
+// A path that exists and is not a regular file (/dev/null, a pipe) cannot
+// take a temporary file beside it or a rename: it is written in place.
+func TestOutputToDevNullIsWrittenInPlace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/null on Windows")
+	}
+	w, _, stderr := open(t, Options{Path: os.DevNull})
+	if err := w.Write(KindScanHost, map[string]any{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Close(false, ""); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "output: "+os.DevNull) {
+		t.Errorf("summary = %q", stderr.String())
+	}
+	if info, err := os.Stat(os.DevNull); err != nil || info.Mode().IsRegular() {
+		t.Fatalf("%s was replaced: %v %v", os.DevNull, info, err)
+	}
+}
+
+func TestOutputToADirectoryIsRefused(t *testing.T) {
+	_, err := Open(Options{Path: t.TempDir(), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}, Run{})
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("Open(dir) = %v; want a directory refusal", err)
+	}
+}
+
+// A run that did no useful work exits 1; its summary must not call the
+// result partial (which means exit 2).
+func TestFailedRunSummarySaysFailedNotPartial(t *testing.T) {
+	w, _, stderr := open(t, Options{})
+	_ = w.Error("en0", "capture", "permission denied")
+	w.Fail()
+	sum, err := w.Close(true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.Partial || ExitCode(sum, nil, true) != 1 {
+		t.Fatalf("summary %+v", sum)
+	}
+	if s := stderr.String(); !strings.Contains(s, "the run failed") || strings.Contains(s, "partial") {
+		t.Errorf("summary text = %q", s)
+	}
+}

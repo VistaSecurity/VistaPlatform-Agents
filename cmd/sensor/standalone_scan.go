@@ -204,7 +204,11 @@ func runScan(env standaloneEnv, args []string) int {
 	}
 
 	payload := sensordispatch.PlanPayload{Version: sensordispatch.PlanPayloadVersion, Attempt: 1, Pace: spec.Pace}
-	rep := &scanReporter{w: w, names: map[string]string{}}
+	rep := &scanReporter{w: w, names: map[string]string{}, now: time.Now}
+	rep.lastShown = rep.now()
+	if !output.quiet {
+		rep.progress = env.stderr
+	}
 	var addresses int
 	for _, pt := range plan.Targets {
 		t := byInput[pt.Target]
@@ -218,6 +222,7 @@ func runScan(env standaloneEnv, args []string) int {
 		rep.names[work.TargetID] = pt.Target
 		payload.Targets = append(payload.Targets, work)
 	}
+	rep.total = addresses
 
 	nothingWorked := len(payload.Targets) == 0
 	partial := false
@@ -258,6 +263,9 @@ func runScan(env standaloneEnv, args []string) int {
 		nothingWorked = sum.Done == 0
 	}
 	scope := fmt.Sprintf("%s in %s, depth %s, pace %s", plural(int64(addresses), "address"), plural(int64(len(inputs)), "target"), spec.Depth, spec.Pace)
+	if nothingWorked {
+		w.Fail()
+	}
 	sum, err := w.Close(partial, scope)
 	return agentoutput.ExitCode(sum, err, nothingWorked)
 }
@@ -458,7 +466,18 @@ type scanReporter struct {
 	w     *agentoutput.Writer
 	mu    sync.Mutex
 	names map[string]string // target id -> the target as named
+
+	// Progress on standard error, so a long scan is not silent until its
+	// summary: at most one line per scanProgressEvery, none with --quiet.
+	progress  io.Writer
+	total     int
+	done      int
+	lastShown time.Time
+	now       func() time.Time
 }
+
+// scanProgressEvery is how often a long scan says how far it has got.
+const scanProgressEvery = 15 * time.Second
 
 // scanHostData is a scan_host record's data: the managed protocol's unit
 // result, with the target as the operator named it.
@@ -480,6 +499,13 @@ func (r *scanReporter) Report(_ context.Context, units []sensordispatch.UnitResu
 		}
 		if err := r.w.Write(agentoutput.KindScanHost, scanHostData{Target: target, UnitResult: u}, scanEndpoints(target, u)...); err != nil {
 			return err
+		}
+	}
+	r.done += len(units)
+	if r.progress != nil && r.done < r.total {
+		if now := r.now(); now.Sub(r.lastShown) >= scanProgressEvery {
+			r.lastShown = now
+			_, _ = fmt.Fprintf(r.progress, "%s scan: %d of %d addresses done\n", standaloneAgent, r.done, r.total)
 		}
 	}
 	return nil
