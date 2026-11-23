@@ -1,37 +1,67 @@
 # Vista Platform agents
 
-The public home of the two customer-deployed agents of Vista Platform: the
-passive network sensor and the device interrogation agent. Source, builds,
-signed releases, installers and compatibility records are published here.
-Bugs and requests go to this repository's issues (see
-[`CONTRIBUTING.md`](CONTRIBUTING.md)).
+**Find the cryptography your network actually uses.** Two open-source
+(Apache-2.0) command-line agents that record TLS and SSH versions, cipher
+suites, key-exchange groups, certificates, and which servers already accept
+post-quantum hybrid key exchange, from traffic, from a scan of addresses you
+name, or from a device's own configuration. Linux, macOS and Windows.
+
+No account, no server, nothing uploaded: they write what they observed to a
+file (JSON Lines, JSON or CSV, with a published JSON Schema). They collect;
+they do not score or judge.
+
+## Quick start
+
+Standalone mode is in
+[`v6.1.0-rc.1`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0-rc.1)
+and later (not in v6.0.0, which GitHub labels "Latest" until v6.1.0 ships).
+Download the archive for your system ("[Which file do I need](#which-file-do-i-need)"),
+verify it ([`docs/verify-release.md`](docs/verify-release.md)), unpack it, then:
+
+```bash
+# Passive: decode a capture file; sends nothing
+crypto-sensor capture --pcap traffic.pcap --out traffic.jsonl
+
+# Active: scan only the addresses you name (public ones need --allow-public)
+crypto-sensor scan --target 10.20.0.0/24 --depth quick --format csv --out scan.csv
+
+# Ask the device: read-only login, posture only, never keys or passwords
+device-agent collect --type fortigate --target 192.0.2.10 --credentials creds.yaml --out fw.jsonl
+```
+
+`crypto-sensor capture --interface eth0 --duration 15m` watches an interface
+instead of a file, and `device-agent host-inventory` inventories the machine
+it runs on. `collect` reads Fortinet, Cisco (IOS, ASA), Palo Alto, F5 BIG-IP,
+UniFi, PostgreSQL, MySQL, SNMP and generic HTTPS devices.
+
+- How to run them, macOS and Windows notes, troubleshooting:
+  [`docs/standalone.md`](docs/standalone.md)
+- Every field of the output, with `jq` recipes:
+  [`docs/standalone-output.md`](docs/standalone-output.md)
+- All the documentation: [`docs/README.md`](docs/README.md)
+
+The macOS binaries are not notarized and the Windows ones are not
+Authenticode-signed; every file carries a Sigstore signature you can verify.
+
+## With Vista Platform
+
+The same two agents are the collectors of Vista Platform, which turns their
+observations into an assessed inventory with history, maps and post-quantum
+readiness tracking. Vista Platform is proprietary; its Core edition is free of
+charge. In that managed mode the agents run as a service and report to your
+own platform: see "[Installing](#installing)" below.
 
 ## What lives here
 
 - `cmd/sensor`, `cmd/device-agent`: the two executables, built and released
-  separately, used by Vista Platform in managed mode and usable on their own in
-  standalone mode.
+  separately.
 - `internal/`, `shared/`: the code they are built from, maintained here.
 - `scripts/`: the installers, the build script and the release tooling.
 - Nightly and tagged builds, installers and compatibility metadata, published
   as this repository's releases. Every artefact carries a Sigstore signature.
 
-## Running without a platform
-
-Both agents also run on their own, with no account and nothing uploaded: name
-what to look at and they write what they observed to a file (JSON Lines, JSON
-or CSV) for your own scripts. They collect; they do not assess.
-
-```bash
-crypto-sensor capture --pcap traffic.pcap --out traffic.jsonl
-crypto-sensor scan --target 10.20.0.0/24 --format csv --out scan.csv
-device-agent collect --type fortigate --target 192.0.2.10 --credentials creds.yaml --out fw.jsonl
-device-agent host-inventory --format json --out host.json
-```
-
-How to run them: [`docs/standalone.md`](docs/standalone.md). Every field of
-the output, with `jq` recipes: [`docs/standalone-output.md`](docs/standalone-output.md).
-All the documentation: [`docs/README.md`](docs/README.md).
+Bugs and requests go to this repository's issues (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 ## Releases
 
