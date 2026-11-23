@@ -1,7 +1,6 @@
 # Standalone mode
 
-Status: accepted 2026-11-23; built in the pull requests linked from the
-tracking issue.
+Status: built (#41, #42, #43; tracking issue #40).
 
 ## What it is
 
@@ -38,6 +37,7 @@ device-agent  collect  --type TYPE --target HOST [--port N]
 device-agent  host-inventory [output flags]
 
 output flags: [--out PATH|-] [--format jsonl|json|csv] [--quiet]
+sensor only:  [--verbose]   (decoder and engine logs on standard error)
 ```
 
 Every subcommand prints `--help` with its flags, exits when its work is done,
@@ -59,6 +59,9 @@ and the same host-observation traffic (ARP, DHCP, mDNS, NetBIOS, LLDP, CDP).
   needs (root or the capture capabilities on Linux, Npcap on Windows).
 - The managed sensor's active TLS enrichment (connecting back to a server it
   saw passively) is **off**: `capture` sends no packets.
+- TLS is decoded on the sensor's known TLS and STARTTLS ports, as in managed
+  mode; a TLS service on another port is not recognised passively (`scan`
+  finds it).
 
 ### `crypto-sensor scan`
 
@@ -76,6 +79,12 @@ managed sensor runs for a platform job.
   states that the operator owns or is authorised to scan them. Without it a
   public target is a usage error before any packet is sent, never a silent
   skip. Private address space needs no flag.
+- Fetches a scanned server's own data asks for (the OCSP responder its
+  certificate names) are held to the same rule, so an OCSP status is reported
+  only when the responder is itself a named target.
+- A public target is scanned at `standard` depth at most, the engine's rule
+  for addresses outside the operator's own networks; the run record says when
+  a depth was lowered.
 - Size limits are the engine's: a target or a run above the engine's address
   limits is refused before any packet (`discovery.CheckTargetSizes`).
 - `--depth` picks the port preset (default `standard`), `--pace` the
@@ -91,8 +100,9 @@ registry as a managed job, so the same projection and redaction apply: the
 output carries posture, never key material, pre-shared keys or command
 transcripts.
 
-- `--type` is a registry device type (`fortinet`, `cisco`, `paloalto`, `f5`,
-  `unifi`, `snmp`, `database`, `http`, …); `--help` lists them.
+- `--type` is a registry device type (`fortigate`, `cisco`, `palo_alto`,
+  `f5_bigip`, `unifi`, `generic_snmp`, `postgresql`, `mysql`, `generic_http`,
+  …); `--help` lists them.
 - Credentials come from `--credentials FILE` (YAML or JSON: `username`,
   `password`, `api_key`, `token`, plus vendor-specific keys) or from the
   environment (`VISTA_DEVICE_USERNAME`, `VISTA_DEVICE_PASSWORD`,
@@ -171,7 +181,9 @@ a `kind`'s meaning; new fields and new kinds are additive within `v1`.
 
 - `0`: the run finished and nothing failed.
 - `1`: the run could not do its work (bad flags, a refused target, a capture
-  file that will not open, every host failed).
+  file that will not open, every host failed). A bad invocation is reported on
+  standard error and writes no output at all: `error` records are for failures
+  after the run started.
 - `2`: a partial result: some hosts, sections or collectors failed; the output
   is written and says which.
 
