@@ -42,7 +42,10 @@ type PacketCapture struct {
 	handles            []*pcap.Handle
 	ctx                context.Context
 	cancel             context.CancelFunc
-	wg                 sync.WaitGroup
+	wg                 sync.WaitGroup // captureInterface goroutines
+	workerWg           sync.WaitGroup // runWorker goroutines
+	flushWg            sync.WaitGroup // the periodic stale-flush goroutine
+	stopOnce           sync.Once
 	discoveries        chan *models.CryptoDiscovery
 	errors             chan error
 	cache              *cache.ConnectionCache // Connection deduplication cache
@@ -74,7 +77,10 @@ type PacketCapture struct {
 	// hostObs decodes ARP/DHCP/mDNS/NetBIOS/DNS/LLDP/CDP into host
 	// observations on its own goroutine. nil when the feature is off, which
 	// is the only condition the capture path checks — see Offer.
-	hostObs      *hostObsPipeline
+	hostObs *hostObsPipeline
+	// stopHostObs ends the host-observation pipeline. It has its own context
+	// so Stop can end it after the workers, which still Offer it frames.
+	stopHostObs  context.CancelFunc
 	assemblerMu  sync.Mutex // protects assemblers (not concurrent-safe)
 	failedMu     sync.Mutex
 	failedIfaces []string // interfaces that failed to open, failed their BPF filter, or lost their packet source
@@ -309,15 +315,13 @@ func (pc *PacketCapture) Start() error {
 
 	pc.startDecoders()
 
-	// Start bounded worker goroutines — these consume from the workers channel
-	// and are NOT tracked by wg (they exit via ctx.Done, not interface close)
 	workerCount := runtime.NumCPU()
-	for i := 0; i < workerCount; i++ {
-		go pc.runWorker()
-	}
+	pc.startWorkers(workerCount)
 
 	// Periodically flush stale assembler streams
+	pc.flushWg.Add(1)
 	go func() {
+		defer pc.flushWg.Done()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -339,7 +343,9 @@ func (pc *PacketCapture) Start() error {
 // RunFile so a file is decoded by exactly what decodes live traffic.
 func (pc *PacketCapture) startDecoders() {
 	if pc.hostObs != nil {
-		pc.hostObs.Start(pc.ctx)
+		ctx, cancel := context.WithCancel(context.Background())
+		pc.stopHostObs = cancel
+		pc.hostObs.Start(ctx)
 		log.Printf("Passive host observation enabled (coalescing window %s, DNS decoder %s)",
 			pc.hostObs.window, enabledWord(pc.hostObs.decoders.DNS))
 	}
@@ -405,9 +411,51 @@ func (pc *PacketCapture) flushAssemblersOlderThan(cutoff time.Time) {
 	}
 }
 
-// Stop stops packet capture
+// startWorkers starts the bounded worker pool that drains pc.workers. The
+// workers exit when Stop closes that channel, and Stop waits for them.
+func (pc *PacketCapture) startWorkers(n int) {
+	for i := 0; i < n; i++ {
+		pc.workerWg.Add(1)
+		go func() {
+			defer pc.workerWg.Done()
+			pc.runWorker()
+		}()
+	}
+}
+
+// Stop stops packet capture. The order matters, because everything below
+// writes to pc.discoveries and closing it under a writer panics the sensor
+// (send on a closed channel):
+//
+//  1. cancel and close the handles, then wait for the capture goroutines, so
+//     nothing new enters the worker queue;
+//  2. close the queue and wait for the workers to finish the packets already
+//     in it (they feed the assemblers and emit UDP discoveries);
+//  3. wait for the periodic flush, which also emits;
+//  4. flush every assembler, now that no worker can add to one, so the
+//     packets that were still queued are included;
+//  5. let the host-observation pipeline drain its last window;
+//  6. only then close the channels.
+//
+// Stop is safe to call more than once.
 func (pc *PacketCapture) Stop() {
+	pc.stopOnce.Do(pc.stop)
+}
+
+func (pc *PacketCapture) stop() {
 	log.Println("Stopping packet capture...")
+	pc.cancel()
+
+	// Close all handles — unblocks captureInterface goroutines blocked on Packets()
+	for _, handle := range pc.handles {
+		handle.Close()
+	}
+	pc.wg.Wait()
+
+	close(pc.workers)
+	pc.workerWg.Wait()
+	pc.flushWg.Wait()
+
 	pc.assemblerMu.Lock()
 	pc.assembler.FlushAll()
 	pc.sshAssembler.FlushAll()
@@ -439,20 +487,12 @@ func (pc *PacketCapture) Stop() {
 		pc.hartipAssembler.FlushAll()
 	}
 	pc.assemblerMu.Unlock()
-	pc.cancel()
 
-	// Close all handles — unblocks captureInterface goroutines blocked on Packets()
-	for _, handle := range pc.handles {
-		handle.Close()
-	}
-
-	// Wait for all captureInterface goroutines to exit before closing channels
-	pc.wg.Wait()
-	close(pc.workers)
 	// The host-observation pipeline writes to pc.discoveries, so it has to
 	// finish its shutdown drain before that channel is closed — otherwise the
 	// final window's observations are a send on a closed channel.
-	if pc.hostObs != nil {
+	if pc.stopHostObs != nil {
+		pc.stopHostObs()
 		pc.hostObs.Stop()
 	}
 	close(pc.discoveries)
@@ -721,7 +761,8 @@ func (pc *PacketCapture) pumpPackets(packets <-chan gopacket.Packet, iface strin
 }
 
 // runWorker is a fixed worker goroutine that processes packets from the bounded pool.
-// Workers exit when the workers channel is closed (after all captureInterface goroutines finish).
+// Workers exit when Stop closes the workers channel, after every captureInterface
+// goroutine has finished; Stop waits for them before closing pc.discoveries.
 func (pc *PacketCapture) runWorker() {
 	for cp := range pc.workers {
 		pc.analyzePacket(cp.pkt, cp.iface)
