@@ -120,7 +120,7 @@ func writeHandshakePcap(t *testing.T, servers ...string) string {
 			eth := &layers.Ethernet{SrcMAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, DstMAC: net.HardwareAddr{2, 0, 0, 0, 0, 2}, EthernetType: layers.EthernetTypeIPv4}
 			ip := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP, SrcIP: net.ParseIP(src), DstIP: net.ParseIP(dst)}
 			tcp := &layers.TCP{SrcPort: layers.TCPPort(sport), DstPort: layers.TCPPort(dport), Seq: seq, Ack: ack, SYN: syn, FIN: fin,
-				ACK: !(syn && fromClient), PSH: len(payload) > 0, Window: 65535}
+				ACK: !syn || !fromClient, PSH: len(payload) > 0, Window: 65535}
 			if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
 				t.Fatal(err)
 			}
@@ -368,6 +368,7 @@ func TestStandaloneCaptureUnopenableFileIsAnErrorRecord(t *testing.T) {
 func TestStandaloneHelpListsEveryFlagAndSaysNoPlatform(t *testing.T) {
 	for cmd, flags := range map[string][]string{
 		"capture": {"-pcap", "-interface", "-duration", "-out", "-format", "-quiet"},
+		"scan":    {"-target", "-targets-file", "-depth", "-pace", "-allow-public", "-timeout", "-out", "-format", "-quiet"},
 	} {
 		code, _, stderr := runCmd(t, standaloneEnv{}, cmd, "--help")
 		if code != 0 {
@@ -386,7 +387,7 @@ func TestStandaloneHelpListsEveryFlagAndSaysNoPlatform(t *testing.T) {
 
 func TestStandaloneCommandDispatch(t *testing.T) {
 	for args, want := range map[string]bool{
-		"capture": true, "": false, "-version": false, "-config x": false, "collect": false,
+		"capture": true, "scan": true, "": false, "-version": false, "-config x": false, "collect": false,
 	} {
 		if got := standaloneCommand(strings.Fields(args)); got != want {
 			t.Errorf("standaloneCommand(%q) = %v, want %v", args, got, want)
@@ -407,5 +408,23 @@ func TestEndpointsOfHostObservationHasNone(t *testing.T) {
 	got := endpointsOf(&models.CryptoDiscovery{DestIP: "10.0.0.9", Port: 500, Protocol: "IKE", DiscoveryMethod: "passive"})
 	if len(got) != 1 || got[0].Transport != "udp" || got[0].Port != 500 {
 		t.Errorf("IKE endpoint = %+v", got)
+	}
+}
+
+// A live capture that cannot open its interface is a run that did no work:
+// exit 1 with an error record, and the run still ends.
+func TestStandaloneCaptureMissingInterface(t *testing.T) {
+	code, stdout, _ := runCmd(t, standaloneEnv{}, "capture", "--interface", "nosuchif0", "--duration", "1s", "--quiet")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", code, stdout)
+	}
+	var sawError bool
+	for _, r := range records(t, []byte(stdout)) {
+		if r.Kind == "error" && strings.Contains(string(r.Data), "nosuchif0") {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("no error record naming the interface:\n%s", stdout)
 	}
 }

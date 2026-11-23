@@ -49,7 +49,7 @@ func standaloneCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "capture":
+	case "capture", "scan":
 		return true
 	}
 	return false
@@ -77,6 +77,8 @@ func runStandalone(env standaloneEnv, args []string) int {
 	switch args[0] {
 	case "capture":
 		return runCapture(env, args[1:])
+	case "scan":
+		return runScan(env, args[1:])
 	}
 	_, _ = fmt.Fprintf(env.stderr, "%s: unknown command %q\n", standaloneAgent, args[0])
 	return 1
