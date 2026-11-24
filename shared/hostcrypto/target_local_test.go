@@ -2,8 +2,6 @@ package hostcrypto
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -318,26 +316,6 @@ func TestLocalTargetIdentify(t *testing.T) {
 			t.Errorf("%s: %d magic bytes", tc.rel, len(id.Magic))
 		}
 	}
-}
-
-// tgtLeaks reports whether any 16-byte window of secret appears in out raw,
-// hex-encoded or base64-encoded.
-func tgtLeaks(out, secret []byte) bool {
-	s := string(out)
-	for i := 0; i+16 <= len(secret); i++ {
-		w := secret[i : i+16]
-		if strings.Contains(s, string(w)) || strings.Contains(strings.ToLower(s), hex.EncodeToString(w)) {
-			return true
-		}
-		// Base64 of a window at each of the three alignments.
-		for off := 0; off < 3 && i+off+15 <= len(secret); off++ {
-			chunk := secret[i+off : i+off+15]
-			if strings.Contains(s, base64.StdEncoding.EncodeToString(chunk)) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // TestIdentifyProjection: what Identify returns for a private key file, PEM

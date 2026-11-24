@@ -17,12 +17,13 @@ import (
 //   - Paths are slash-separated and absolute. Parents are created on demand.
 //   - Identify classifies the stored bytes exactly as the real targets do
 //     (identityFrom over inspect of the read-bound window).
-//   - A REMOTE fake (local=false) refuses ReadFile of anything not public with
-//     ErrNotPublic, as RemoteUnixTarget and RemoteWindowsTarget do, so a pass
-//     tested on it meets the same guard it meets in production. Both kinds
-//     refuse a file over the read bound with ErrFileTooLarge.
-//   - ReadText refuses a file that is not text and redacts with RedactText,
-//     the rule every real target applies.
+//   - A REMOTE fake (local=false) answers ReadFile as the real remote targets
+//     do: ErrNotPublic for anything not identified as public, otherwise the
+//     file's public content only (publicContent), so a pass tested on it meets
+//     the same guard and the same narrowed bytes it meets in production. Both
+//     kinds refuse a file over the read bound with ErrFileTooLarge.
+//   - ReadText applies filterConfig with the caller's keep words, the rule
+//     every real target applies, and records the keep words it was given.
 //   - A FIFO (fifo) is not a regular file: Identify and the reads return
 //     errNotRegular, as the real targets do, and List skips it.
 //   - List honours MaxDepth, MaxFiles, MaxSizeBytes, Exclude and Names, never
@@ -42,6 +43,7 @@ type tgtFakeTarget struct {
 	nodes map[string]*tgtNode
 	runs  map[string]tgtResult
 	calls []string
+	keeps [][]string // the keep words of every ReadText, in order
 }
 
 // tgtNode is one path in the fake tree.
@@ -243,27 +245,34 @@ func (t *tgtFakeTarget) ReadFile(_ context.Context, p string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if int64(len(n.content)) > t.maxBytes {
+		return nil, fmt.Errorf("%s: %w", p, ErrFileTooLarge)
+	}
 	if !t.local {
 		id, err := t.identifyLocked(p)
 		if err != nil {
 			return nil, err
 		}
-		if !id.Public() {
+		pub, ok := publicContent(n.content)
+		if !id.Public() || !ok {
 			t.record("read-refused", p)
 			return nil, fmt.Errorf("%s: %w", p, ErrNotPublic)
 		}
-	}
-	if int64(len(n.content)) > t.maxBytes {
-		return nil, fmt.Errorf("%s: %w", p, ErrFileTooLarge)
+		t.record("read", p)
+		return pub, nil
 	}
 	t.record("read", p)
 	return append([]byte(nil), n.content...), nil
 }
 
-func (t *tgtFakeTarget) ReadText(_ context.Context, p string) ([]byte, int, error) {
+func (t *tgtFakeTarget) ReadText(_ context.Context, p string, keep []string) ([]byte, int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.record("readtext", p)
+	t.keeps = append(t.keeps, append([]string(nil), keep...))
+	if len(newKeepSet(keep).words) == 0 {
+		return nil, 0, fmt.Errorf("%s: %w (no keep words)", p, ErrNotPublic)
+	}
 	n, err := t.regularLocked(p)
 	if err != nil {
 		return nil, 0, err
@@ -271,11 +280,7 @@ func (t *tgtFakeTarget) ReadText(_ context.Context, p string) ([]byte, int, erro
 	if int64(len(n.content)) > t.maxBytes {
 		return nil, 0, fmt.Errorf("%s: %w", p, ErrFileTooLarge)
 	}
-	if textRefused(n.content) {
-		return nil, 0, fmt.Errorf("%s: %w (not text)", p, ErrNotPublic)
-	}
-	out, k := RedactText(n.content)
-	return out, k, nil
+	return configResult(p, n.content, keep)
 }
 
 func (t *tgtFakeTarget) infoLocked(p string, n *tgtNode) FileInfo {

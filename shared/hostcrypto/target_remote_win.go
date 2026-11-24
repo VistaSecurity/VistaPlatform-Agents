@@ -5,6 +5,7 @@
 package hostcrypto
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -66,6 +67,12 @@ type RemoteWindowsTarget struct {
 // ErrFileTooLarge, decided on the host before anything is printed.
 const remoteWindowsReadMax = 6000000
 
+// remoteWindowsListBudget is how long one Windows listing may run on the
+// host before it stops and reports Truncated with what it has: below the
+// runner's 90-second command timeout, so a long walk is a partial answer
+// rather than a lost one.
+var remoteWindowsListBudget = 60 * time.Second
+
 // cmdLineLimit is the longest command this target sends without
 // InputRunner: cmd.exe stops at 8,191 characters.
 const cmdLineLimit = 8000
@@ -105,6 +112,25 @@ func psQuoteList(items []string) string {
 	return "@(" + strings.Join(q, ",") + ")"
 }
 
+// sshKeyTypeNames lists the SSH key type names, for -ccontains.
+func sshKeyTypeNames() []string {
+	n := make([]string, len(sshKeyTypes))
+	for i, k := range sshKeyTypes {
+		n[i] = k.name
+	}
+	return n
+}
+
+// psSSHTable renders sshKeyTypes as a PowerShell array of
+// @(name, min, max, prefix). Names and base64 prefixes hold no quote.
+func psSSHTable() string {
+	rows := make([]string, len(sshKeyTypes))
+	for i, k := range sshKeyTypes {
+		rows[i] = "@('" + k.name + "'," + strconv.Itoa(k.minLen) + "," + strconv.Itoa(k.maxLen) + ",'" + k.prefix + "')"
+	}
+	return "@(" + strings.Join(rows, ",") + ")"
+}
+
 // psPrelude decodes the arguments and defines the helpers every script uses.
 // psErr turns an exception into "not_found", "denied" or "other"; psAcl
 // projects Get-Acl onto the owner and ONE boolean worked out on the host
@@ -121,7 +147,7 @@ function psErr($e) {
   if ($e -is [System.UnauthorizedAccessException] -or $e -is [System.Security.SecurityException]) { return 'denied' }
   return 'other'
 }
-function psOut($o) { [Console]::Out.Write((ConvertTo-Json -Compress -Depth 4 -InputObject $o)) }
+function psOut($o) { [Console]::Out.Write('J:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 4 -InputObject $o)))) }
 function psAcl([string]$p) {
   try {
     $acl = Get-Acl -LiteralPath $p
@@ -169,23 +195,123 @@ function vParse([string]$s) {
   return $l
 }
 function vStrip([string]$s) { if ($s.EndsWith([string][char]13, [StringComparison]::Ordinal)) { return $s.Substring(0, $s.Length - 1) }; return $s }
-function vSsh([string]$s) {
-  $i = $s.IndexOf(' ')
-  if ($i -lt 1) { return $false }
-  $t = $s.Substring(0, $i)
-  if (-not ($t.StartsWith('ssh-', [StringComparison]::Ordinal) -or $t.StartsWith('ecdsa-sha2-', [StringComparison]::Ordinal) -or $t.StartsWith('sk-', [StringComparison]::Ordinal))) { return $false }
-  if (-not [regex]::IsMatch($t, '^[a-z0-9@.-]+\z')) { return $false }
-  $r = $s.Substring($i + 1); $j = $r.IndexOf(' ')
-  if ($j -lt 0) { $b = $r; $c = '' } else { $b = $r.Substring(0, $j); $c = $r.Substring($j + 1) }
-  if (-not [regex]::IsMatch($b, '^[A-Za-z0-9+/]+=*\z')) { return $false }
-  return (-not [regex]::IsMatch($c, $vRun))
+$vKTNames = ` + psQuoteList(sshKeyTypeNames()) + `
+$vKT = @{}
+foreach ($e in ` + psSSHTable() + `) { $vKT[$e[0]] = $e }
+function vSshKey([string]$s) {
+  $tok = @($s -split '[ \t]+' | Where-Object { $_ -ne '' })
+  for ($i = 0; $i -lt $tok.Count - 1; $i++) {
+    $t = $tok[$i]
+    if (-not ($vKTNames -ccontains $t)) { continue }
+    $e = $vKT[$t]; $b = $tok[$i + 1]
+    if ([regex]::IsMatch($b, '^[A-Za-z0-9+/]+=*\z') -and $b.Length -ge $e[1] -and $b.Length -le $e[2] -and $b.StartsWith($e[3], [StringComparison]::Ordinal)) { return ($t + ' ' + $b) }
+    return ''
+  }
+  return ''
+}
+$vBOM = [string][char]0xEF + [char]0xBB + [char]0xBF
+function vPemLines([string]$t) {
+  if ($t.StartsWith($vBOM, [StringComparison]::Ordinal)) { $t = $t.Substring(3) }
+  $parts = $t.Split([char]10)
+  $out = New-Object System.Collections.Generic.List[string]
+  for ($i = 0; $i -lt $parts.Length; $i++) {
+    if ($i -eq $parts.Length - 1 -and $parts[$i].Length -eq 0) { break }
+    $out.Add((vStrip $parts[$i]))
+  }
+  return ,$out.ToArray()
+}
+function vPublic([byte[]]$b, [int]$n) {
+  if ([Array]::IndexOf($b, [byte]0, 0, $n) -ge 0) { return $null }
+  $out = New-Object System.Collections.Generic.List[string]
+  $block = New-Object System.Collections.Generic.List[string]
+  $inb = $false; $bok = $false; $endl = ''
+  foreach ($s in (vPemLines ($vL1.GetString($b, 0, $n)))) {
+    if (vIsBegin $s) {
+      $inb = $false
+      $l = vParse $s
+      if ($null -eq $l -or -not ($vAllow -ccontains $l)) { return $null }
+      $inb = $true; $bok = $true; $block.Clear(); $block.Add($s)
+      if ($s.StartsWith('-----', [StringComparison]::Ordinal)) { $endl = '-----END ' + $l + '-----' } else { $endl = '---- END ' + $l + ' ----' }
+      continue
+    }
+    if ($inb) {
+      if ($s -ceq $endl) { $block.Add($s); if ($bok) { $out.AddRange($block) }; $inb = $false; continue }
+      if (vIsEnd $s) { $inb = $false; continue }
+      if ($s.Length -lt 1 -or $s.Length -gt ` + strconv.Itoa(maxPEMBodyLine) + ` -or -not [regex]::IsMatch($s, '^[A-Za-z0-9+/=]+\z')) { $bok = $false }
+      $block.Add($s)
+      continue
+    }
+    $k = vSshKey $s
+    if ($k -ne '') { $out.Add($k) }
+  }
+  if ($out.Count -eq 0) { return $null }
+  return (($out.ToArray() -join [string][char]10) + [char]10)
+}
+function vFirstWord([string]$t) {
+  if ($t.StartsWith('<', [StringComparison]::Ordinal)) { $t = $t.Substring(1) }
+  if ($t.StartsWith('-D', [StringComparison]::Ordinal)) { $t = $t.Substring(2) }
+  $i = $t.IndexOfAny([char[]]@(' ', [char]9, '=', ':', ';', '{', '}'))
+  if ($i -ge 0) { $t = $t.Substring(0, $i) }
+  if ($t.EndsWith('>', [StringComparison]::Ordinal)) { $t = $t.Substring(0, $t.Length - 1) }
+  return [regex]::Replace($t, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
+}
+function vBslash([string]$s) { return $s.TrimEnd(' ', [char]9).EndsWith('\', [StringComparison]::Ordinal) }
+function vFilter([byte[]]$b, [int]$n, [string[]]$keep) {
+  $K = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+  $S = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+  foreach ($w in $keep) {
+    $w = [regex]::Replace([string]$w, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
+    $semi = $w.EndsWith(';', [StringComparison]::Ordinal)
+    if ($semi) { $w = $w.Substring(0, $w.Length - 1) }
+    if ($w -ne '') { [void]$K.Add($w); if ($semi) { [void]$S.Add($w) } }
+  }
+  if ($K.Count -eq 0) { return @{ Status = 'not_public' } }
+  if ([Array]::IndexOf($b, [byte]0, 0, $n) -ge 0 -or [Array]::IndexOf($b, [byte]1, 0, $n) -ge 0 -or (vKeystore $b $n)) { return @{ Status = 'not_public' } }
+  $t = $vL1.GetString($b, 0, $n)
+  if ($t.StartsWith($vBOM, [StringComparison]::Ordinal)) { $t = $t.Substring(3) }
+  $lines = [regex]::Split($t, '\r\n|\n|\r')
+  $cnt = $lines.Length
+  if ($cnt -gt 0 -and $lines[$cnt - 1].Length -eq 0) { $cnt-- }
+  if ($cnt -gt ` + strconv.Itoa(maxConfigLines) + `) { return @{ Status = 'too_large' } }
+  $sb = New-Object System.Text.StringBuilder
+  $vN = 0; $vDrop = $false
+  $cont = $false; $csemi = $false
+  for ($i = 0; $i -lt $cnt; $i++) {
+    $s = $lines[$i]
+    $keepIt = $false
+    if ($cont) {
+      $keepIt = $true
+      if ($csemi) { $cont = -not $s.Contains(';') } else { $cont = vBslash $s }
+    } else {
+      $t2 = $s.TrimStart(' ', [char]9)
+      if ($t2 -eq '') { $keepIt = $true }
+      elseif ($t2.StartsWith('#', [StringComparison]::Ordinal) -or $t2.StartsWith('!', [StringComparison]::Ordinal) -or $t2.StartsWith(';', [StringComparison]::Ordinal) -or $t2.StartsWith('//', [StringComparison]::Ordinal)) { $keepIt = $false }
+      else {
+        $tr = $t2.TrimEnd(' ', [char]9)
+        if (($tr.StartsWith('[', [StringComparison]::Ordinal) -and $tr.EndsWith(']', [StringComparison]::Ordinal)) -or $tr -ceq '{' -or $tr -ceq '}' -or $tr -ceq '};' -or $t2.StartsWith('</', [StringComparison]::Ordinal)) { $keepIt = $true }
+        else {
+          $w = vFirstWord $t2
+          if ($w -ne '' -and $K.Contains($w)) {
+            $keepIt = $true
+            if (vBslash $s) { $cont = $true; $csemi = $false } elseif ($S.Contains($w) -and -not $s.Contains(';')) { $cont = $true; $csemi = $true }
+          }
+        }
+      }
+    }
+    if (-not $keepIt) { continue }
+    if ($vDrop) { if (vIsEnd $s) { $vDrop = $false }; continue }
+    if (vIsBegin $s) { $vN++; if (-not (vIsEnd $s)) { $vDrop = $true }; continue }
+    $vN += ([regex]::Matches($s, $vRun)).Count
+    [void]$sb.Append([regex]::Replace($s, $vRun, '` + RedactedMarker + `'))
+    [void]$sb.Append([char]10)
+  }
+  return @{ Status = 'ok'; Text = $sb.ToString(); N = $vN }
 }
 function vInspect([string]$t) {
   $f = [ordered]@{ bad = 0; nonpub = 0; unterm = 0; priv = 0; orun = 0; sshbad = 0; sshl = 0; nl = 0 }
   $labels = New-Object System.Collections.Generic.List[string]
   $inpub = $false
-  foreach ($line in $t.Split([char]10)) {
-    $s = vStrip $line
+  foreach ($s in (vPemLines $t)) {
     if (vIsBegin $s) {
       if ($inpub) { $f.unterm = 1 }
       $inpub = $false
@@ -201,7 +327,7 @@ function vInspect([string]$t) {
     if ($inpub) { if (vIsEnd $s) { $inpub = $false }; continue }
     if ([regex]::IsMatch($s, $vRun)) { $f.orun = 1 }
     if ($s.StartsWith('#', [StringComparison]::Ordinal) -or [regex]::IsMatch($s, '^[ \t]*\z')) { continue }
-    if (vSsh $s) { $f.sshl++ } else { $f.sshbad = 1 }
+    if ((vSshKey $s) -ne '') { $f.sshl++ } else { $f.sshbad = 1 }
   }
   if ($inpub) { $f.unterm = 1 }
   return [pscustomobject]@{ Flags = $f; Labels = $labels.ToArray() }
@@ -236,43 +362,34 @@ var psIdentify = psPrelude + `try { $r = vRead $a.Path ([int64]$a.Max) } catch {
 if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
 $nul = ([Array]::IndexOf($r.Buf, [byte]0, 0, $r.N) -ge 0)
 $x = vInspect ($vL1.GetString($r.Buf, 0, $r.N))
-psOut ([pscustomobject]@{ Size = $r.Size; Magic = (vHex $r.Buf $r.N); Nul = $nul; Labels = $x.Labels; Flags = $x.Flags })`
+$u16 = $false
+$h = vHex $r.Buf $r.N
+if ($h.StartsWith('fffe') -or $h.StartsWith('feff')) {
+  $clean = New-Object System.Collections.Generic.List[byte]
+  for ($k = 0; $k -lt $r.N; $k++) { $c = $r.Buf[$k]; if ($c -ne 0 -and $c -ne 254 -and $c -ne 255) { $clean.Add($c) } }
+  foreach ($ln in ($vL1.GetString($clean.ToArray())).Split([char]10)) {
+    if ([regex]::IsMatch($ln, 'BEGIN', 'IgnoreCase, CultureInvariant') -and [regex]::IsMatch($ln, 'PRIVATE', 'IgnoreCase, CultureInvariant')) { $u16 = $true }
+  }
+}
+psOut ([pscustomobject]@{ Size = $r.Size; Magic = $h; Nul = $nul; Utf16 = $u16; Labels = $x.Labels; Flags = $x.Flags })`
 
 // psRead reads the buffer once, decides on it with the host-side rule (as the
 // awk "decide" mode does) and only then prints base64 of THAT buffer.
 var psRead = psPrelude + `try { $r = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
 if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
 if ($r.Size -gt [int64]$a.Max -or $r.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
-$nul = ([Array]::IndexOf($r.Buf, [byte]0, 0, $r.N) -ge 0)
-$f = (vInspect ($vL1.GetString($r.Buf, 0, $r.N))).Flags
-$pubname = $a.Path.EndsWith('.pub', [StringComparison]::OrdinalIgnoreCase)
-$ok = (-not $nul) -and (-not (vKeystore $r.Buf $r.N)) -and $f.bad -eq 0 -and $f.nonpub -eq 0 -and $f.unterm -eq 0 -and $f.priv -eq 0 -and (($f.nl -gt 0 -and $f.orun -eq 0) -or ($f.nl -eq 0 -and $pubname -and $f.sshl -gt 0 -and $f.sshbad -eq 0))
-if (-not $ok) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
-[Console]::Out.Write([Convert]::ToBase64String($r.Buf, 0, $r.N))`
+$pub = vPublic $r.Buf $r.N
+if ($null -eq $pub) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
+[Console]::Out.Write('D:' + [Convert]::ToBase64String($vL1.GetBytes($pub)))`
 
 // psReadText reads the buffer once, refuses it when it is not text, redacts
 // it with the rules of RedactText and prints the result with the count.
 var psReadText = psPrelude + `try { $r = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
 if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
 if ($r.Size -gt [int64]$a.Max -or $r.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
-if (([Array]::IndexOf($r.Buf, [byte]0, 0, $r.N) -ge 0) -or (vKeystore $r.Buf $r.N)) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
-$parts = ($vL1.GetString($r.Buf, 0, $r.N)).Split([char]10)
-$sb = New-Object System.Text.StringBuilder
-$n = 0; $drop = $false; $cnt = $parts.Length
-for ($i = 0; $i -lt $cnt; $i++) {
-  $line = $parts[$i]
-  if ($i -eq $cnt - 1 -and $line.Length -eq 0) { break }
-  $s = vStrip $line
-  if ($drop) { if (vIsEnd $s) { $drop = $false }; continue }
-  if (vIsBegin $s) {
-    $l = vParse $s
-    if ($null -eq $l -or -not ($vAllow -ccontains $l)) { $n++; if (-not (vIsEnd $s)) { $drop = $true }; continue }
-  }
-  $n += ([regex]::Matches($line, $vRun)).Count
-  [void]$sb.Append([regex]::Replace($line, $vRun, '` + RedactedMarker + `'))
-  if ($i -lt $cnt - 1) { [void]$sb.Append([char]10) }
-}
-psOut ([pscustomobject]@{ Redactions = $n; Data = [Convert]::ToBase64String($vL1.GetBytes($sb.ToString())) })`
+$f = vFilter $r.Buf $r.N @($a.Keep)
+if ($f.Status -ne 'ok') { psOut ([pscustomobject]@{ Error = $f.Status }); exit 0 }
+[Console]::Out.Write('T:' + $f.N + ':' + [Convert]::ToBase64String($vL1.GetBytes($f.Text)))`
 
 // psList walks a tree itself rather than with Get-ChildItem -Recurse, so that
 // a directory link or junction is reported and never entered on every
@@ -303,6 +420,7 @@ function mkFile($c, [bool]$link) {
 $files = New-Object System.Collections.Generic.List[object]
 $denied = New-Object System.Collections.Generic.List[string]
 $deniedCount = 0; $unreadable = 0; $oversize = 0; $trunc = $false; $bytes = 0
+$sw = [System.Diagnostics.Stopwatch]::StartNew(); $budget = [double]$a.Budget
 try { $ri = Get-Item -LiteralPath $root -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
 $rootVol = [System.IO.Path]::GetPathRoot($ri.FullName)
 if (-not $ri.PSIsContainer -or (psLink $ri)) {
@@ -313,6 +431,7 @@ if (-not $ri.PSIsContainer -or (psLink $ri)) {
   $stack = New-Object System.Collections.Generic.Stack[object]
   $stack.Push(@($ri.FullName, 0))
   while ($stack.Count -gt 0 -and -not $trunc) {
+    if ($sw.Elapsed.TotalSeconds -ge $budget) { $trunc = $true; break }
     $item = $stack.Pop(); $dir = [string]$item[0]; $depth = [int]$item[1]
     try { $children = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) } catch {
       if ((psErr $_.Exception) -eq 'denied') {
@@ -331,7 +450,7 @@ if (-not $ri.PSIsContainer -or (psLink $ri)) {
         }
         if (-not (nameOk $c.Name)) { continue }
         if (-not $link -and $c.Length -gt $maxSize) { $oversize++; continue }
-        if ($files.Count -ge $max -or $bytes -ge $cap) { $trunc = $true; break }
+        if ($files.Count -ge $max -or $bytes -ge $cap -or $sw.Elapsed.TotalSeconds -ge $budget) { $trunc = $true; break }
         $o = mkFile $c $link
         $files.Add($o)
         $bytes += $o.Path.Length + $o.Target.Length + 120
@@ -392,13 +511,15 @@ func psEncode(script string) string {
 	return base64.StdEncoding.EncodeToString(buf)
 }
 
-// psRun runs a script and returns its stdout with any byte-order mark and
-// surrounding space removed. A non-zero exit is an error: every script here
-// reports its own failures as JSON and exits 0.
-func (t *RemoteWindowsTarget) psRun(ctx context.Context, script string, args any) ([]byte, error) {
+// psRun runs a script and returns its answer, which is ASCII whatever the
+// host's console code page is: "J:" and base64 of UTF-8 JSON, "D:" and base64
+// of data, or "T:<count>:" and base64 of text. The kind letter is returned
+// with the decoded payload. A non-zero exit is an error: every script here
+// reports its own failures and exits 0.
+func (t *RemoteWindowsTarget) psRun(ctx context.Context, script string, args any) (byte, []byte, error) {
 	full, err := psScript(script, args)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	var out []byte
 	var exit int
@@ -407,17 +528,71 @@ func (t *RemoteWindowsTarget) psRun(ctx context.Context, script string, args any
 	} else {
 		argv, aerr := psArgv(full)
 		if aerr != nil {
-			return nil, aerr
+			return 0, nil, aerr
 		}
 		out, _, exit, err = t.runner.Run(ctx, argv)
 	}
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("hostcrypto: powershell exited %d", exit)
+		return 0, nil, fmt.Errorf("hostcrypto: powershell exited %d", exit)
 	}
-	return []byte(strings.TrimSpace(strings.TrimPrefix(string(out), "\ufeff"))), nil
+	return psDecode(out)
+}
+
+// psDecode reads one answer.
+func psDecode(out []byte) (byte, []byte, error) {
+	s := strings.TrimSpace(strings.TrimPrefix(string(out), "\ufeff"))
+	if len(s) < 2 || s[1] != ':' {
+		return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
+	}
+	kind, body := s[0], s[2:]
+	if kind == 'T' {
+		// T:<count>:<base64>; the count is returned in front of the payload
+		// by psText.
+		i := strings.IndexByte(body, ':')
+		if i < 0 {
+			return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
+		}
+		data, err := base64.StdEncoding.DecodeString(body[i+1:])
+		if err != nil {
+			return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
+		}
+		return kind, append([]byte(body[:i+1]), data...), nil
+	}
+	if kind != 'J' && kind != 'D' {
+		return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
+	}
+	data, err := base64.StdEncoding.DecodeString(body)
+	if err != nil {
+		return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
+	}
+	return kind, data, nil
+}
+
+// psJSON runs a script whose only answer is JSON.
+func (t *RemoteWindowsTarget) psJSON(ctx context.Context, script string, args any) ([]byte, error) {
+	kind, b, err := t.psRun(ctx, script, args)
+	if err != nil {
+		return nil, err
+	}
+	if kind != 'J' {
+		return nil, errors.New("hostcrypto: unexpected answer from the host")
+	}
+	return b, nil
+}
+
+// winLongPath gives a path of 260 characters or more the \\?\ form, so the
+// Windows API does not cut it at MAX_PATH and report it missing.
+func winLongPath(p string) string {
+	if len(p) < 260 || strings.HasPrefix(p, `\\?\`) {
+		return p
+	}
+	if strings.HasPrefix(p, `\\`) {
+		return `\\?\UNC\` + p[2:]
+	}
+	return `\\?\` + p
 }
 
 // psError maps a script's Error word to the sentinels.
@@ -438,8 +613,9 @@ func psError(path, word string) error {
 }
 
 type psPathArgs struct {
-	Path string `json:"Path"`
-	Max  int64  `json:"Max,omitempty"`
+	Path string   `json:"Path"`
+	Max  int64    `json:"Max,omitempty"`
+	Keep []string `json:"Keep,omitempty"`
 }
 
 type psStatResult struct {
@@ -459,7 +635,7 @@ type psStatResult struct {
 // "can Everyone, Users or Authenticated Users read it?". Mode stays 0 and
 // GroupReadable nil: Windows has no group permission class.
 func (t *RemoteWindowsTarget) Stat(ctx context.Context, path string) (FileInfo, error) {
-	out, err := t.psRun(ctx, psStat, psPathArgs{Path: path})
+	out, err := t.psJSON(ctx, psStat, psPathArgs{Path: winLongPath(path)})
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -502,6 +678,7 @@ type psIdentifyResult struct {
 	Size   *int64          `json:"Size"`
 	Magic  string          `json:"Magic"`
 	Nul    *bool           `json:"Nul"`
+	Utf16  *bool           `json:"Utf16"`
 	Labels json.RawMessage `json:"Labels"`
 	Flags  *psFlags        `json:"Flags"`
 }
@@ -510,7 +687,7 @@ type psIdentifyResult struct {
 // host did not return is an error, never a default that could make a file
 // public.
 func (t *RemoteWindowsTarget) identify(ctx context.Context, path string) (inspection, error) {
-	out, err := t.psRun(ctx, psIdentify, psPathArgs{Path: path, Max: t.maxBytes})
+	out, err := t.psJSON(ctx, psIdentify, psPathArgs{Path: winLongPath(path), Max: t.maxBytes})
 	if err != nil {
 		return inspection{}, err
 	}
@@ -522,7 +699,7 @@ func (t *RemoteWindowsTarget) identify(ctx context.Context, path string) (inspec
 		return inspection{}, psError(path, r.Error)
 	}
 	f := r.Flags
-	if r.Size == nil || r.Nul == nil || f == nil || f.Bad == nil || f.NonPub == nil || f.Unterm == nil ||
+	if r.Size == nil || r.Nul == nil || r.Utf16 == nil || f == nil || f.Bad == nil || f.NonPub == nil || f.Unterm == nil ||
 		f.Priv == nil || f.ORun == nil || f.SSHBad == nil || f.SSHL == nil || f.NL == nil {
 		return inspection{}, fmt.Errorf("hostcrypto: identify %s: incomplete answer", path)
 	}
@@ -541,6 +718,10 @@ func (t *RemoteWindowsTarget) identify(ctx context.Context, path string) (inspec
 		magic: magic, size: *r.Size, truncated: *r.Size > t.maxBytes, nul: *r.Nul,
 		bad: *f.Bad != 0, nonPublic: *f.NonPub != 0, unterminated: *f.Unterm != 0, private: *f.Priv != 0,
 		outsideRun: *f.ORun != 0, sshBad: *f.SSHBad != 0, sshLines: *f.SSHL, nLabel: *f.NL,
+		utf16: bytes.HasPrefix(magic, []byte{0xFF, 0xFE}) || bytes.HasPrefix(magic, []byte{0xFE, 0xFF}), utf16Private: *r.Utf16,
+	}
+	if in.utf16Private && !in.utf16 {
+		return inspection{}, fmt.Errorf("hostcrypto: identify %s: inconsistent answer", path)
 	}
 	for _, l := range raw {
 		if _, ok := parseBeginLine("-----BEGIN " + l + "-----"); !ok {
@@ -583,18 +764,17 @@ func (t *RemoteWindowsTarget) ReadFile(ctx context.Context, path string) ([]byte
 	if !identityFrom(path, in).Public() {
 		return nil, fmt.Errorf("%s: %w", path, ErrNotPublic)
 	}
-	out, err := t.psRun(ctx, psRead, psPathArgs{Path: path, Max: readCap})
+	kind, out, err := t.psRun(ctx, psRead, psPathArgs{Path: winLongPath(path), Max: readCap})
 	if err != nil {
 		return nil, err
 	}
-	if len(out) > 0 && out[0] == '{' {
+	if kind == 'J' {
 		return nil, psJSONError(path, out)
 	}
-	b, err := base64.StdEncoding.DecodeString(string(out))
-	if err != nil {
-		return nil, fmt.Errorf("hostcrypto: read %s: unreadable answer", path)
+	if kind != 'D' {
+		return nil, fmt.Errorf("hostcrypto: read %s: unexpected answer", path)
 	}
-	return recheckPublic(path, b, readCap)
+	return recheckPublic(path, out, readCap)
 }
 
 // psJSONError reads a script's {"Error": ...} answer.
@@ -608,32 +788,31 @@ func psJSONError(path string, out []byte) error {
 	return fmt.Errorf("hostcrypto: %s: unreadable answer", path)
 }
 
-// ReadText returns a configuration file redacted on the host by psReadText,
-// checked here as on Unix (see [RemoteUnixTarget.ReadText]).
-func (t *RemoteWindowsTarget) ReadText(ctx context.Context, path string) ([]byte, int, error) {
-	out, err := t.psRun(ctx, psReadText, psPathArgs{Path: path, Max: t.readCap()})
+// ReadText returns the lines of a configuration file a parser asked for,
+// narrowed and redacted on the host by psReadText (filterConfig's rule),
+// checked here as on Unix (see [RemoteUnixTarget.ReadText]). An empty keep is
+// refused before anything is sent.
+func (t *RemoteWindowsTarget) ReadText(ctx context.Context, path string, keep []string) ([]byte, int, error) {
+	words, err := keepArg(keep)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", path, err)
+	}
+	kind, out, err := t.psRun(ctx, psReadText, psPathArgs{Path: winLongPath(path), Max: t.readCap(), Keep: strings.Fields(words)})
 	if err != nil {
 		return nil, 0, err
 	}
-	var r struct {
-		Error      string `json:"Error"`
-		Redactions *int   `json:"Redactions"`
-		Data       string `json:"Data"`
+	if kind == 'J' {
+		return nil, 0, psJSONError(path, out)
 	}
-	if err := json.Unmarshal(out, &r); err != nil {
-		return nil, 0, fmt.Errorf("hostcrypto: read text %s: unreadable answer", path)
+	if kind != 'T' {
+		return nil, 0, fmt.Errorf("hostcrypto: read text %s: unexpected answer", path)
 	}
-	if r.Error != "" {
-		return nil, 0, psError(path, r.Error)
-	}
-	if r.Redactions == nil || *r.Redactions < 0 {
+	i := bytes.IndexByte(out, ':')
+	n, err := strconv.Atoi(string(out[:i]))
+	if err != nil || n < 0 {
 		return nil, 0, fmt.Errorf("hostcrypto: read text %s: the host did not report its redactions", path)
 	}
-	b, err := base64.StdEncoding.DecodeString(r.Data)
-	if err != nil {
-		return nil, 0, fmt.Errorf("hostcrypto: read text %s: unreadable answer", path)
-	}
-	return checkRedacted(path, b, *r.Redactions)
+	return checkFiltered(path, out[i+1:], n)
 }
 
 type psListArgs struct {
@@ -642,6 +821,7 @@ type psListArgs struct {
 	Max     int      `json:"Max"`
 	MaxSize int64    `json:"MaxSize"`
 	ByteCap int      `json:"ByteCap"`
+	Budget  float64  `json:"Budget"`
 	Cross   bool     `json:"Cross"`
 	Exclude []string `json:"Exclude"`
 	Names   []string `json:"Names"`
@@ -683,9 +863,10 @@ func (t *RemoteWindowsTarget) List(ctx context.Context, root string, opts ListOp
 		// keeps the answer under the runner's 8 MiB bound.
 		ByteCap: remoteListByteCap - (1 << 20),
 		Cross:   opts.CrossFilesystems,
+		Budget:  remoteWindowsListBudget.Seconds(),
 		Exclude: nonNil(opts.Exclude), Names: nonNil(opts.Names),
 	}
-	out, err := t.psRun(ctx, psList, args)
+	out, err := t.psJSON(ctx, psList, args)
 	if err != nil {
 		return nil, err
 	}

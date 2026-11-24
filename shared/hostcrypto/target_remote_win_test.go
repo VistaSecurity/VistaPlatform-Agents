@@ -7,9 +7,25 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// tgtJ, tgtD and tgtT are the Windows scripts' answers: base64 of UTF-8
+// JSON, of data, and of text with its redaction count.
+func tgtJ(v any) string {
+	b, _ := json.Marshal(v)
+	return "J:" + base64.StdEncoding.EncodeToString(b)
+}
+
+func tgtJRaw(js string) string { return "J:" + base64.StdEncoding.EncodeToString([]byte(js)) }
+
+func tgtD(b []byte) string { return "D:" + base64.StdEncoding.EncodeToString(b) }
+
+func tgtT(n int, b []byte) string {
+	return "T:" + strconv.Itoa(n) + ":" + base64.StdEncoding.EncodeToString(b)
+}
 
 // tgtWinIdentifyOut is psIdentify's answer for an inspection.
 func tgtWinIdentifyOut(in inspection) string {
@@ -19,12 +35,11 @@ func tgtWinIdentifyOut(in inspection) string {
 		}
 		return 0
 	}
-	b, _ := json.Marshal(map[string]any{
-		"Size": in.size, "Magic": hex.EncodeToString(in.magic), "Nul": in.nul, "Labels": in.labels,
+	return tgtJ(map[string]any{
+		"Size": in.size, "Magic": hex.EncodeToString(in.magic), "Nul": in.nul, "Utf16": in.utf16Private, "Labels": in.labels,
 		"Flags": map[string]int{"bad": b01(in.bad), "nonpub": b01(in.nonPublic), "unterm": b01(in.unterminated),
 			"priv": b01(in.private), "orun": b01(in.outsideRun), "sshbad": b01(in.sshBad), "sshl": in.sshLines, "nl": in.nLabel},
 	})
-	return string(b)
 }
 
 func tgtWinIdentifyFor(content []byte) string {
@@ -55,15 +70,25 @@ func tgtWinHost(t *testing.T, content []byte, kinds *[]string) func(argv []strin
 		case "identify":
 			return tgtResult{stdout: tgtWinIdentifyFor(content)}
 		case "read":
-			return tgtResult{stdout: base64.StdEncoding.EncodeToString(content)}
+			pub, ok := publicContent(content)
+			if !ok {
+				return tgtResult{stdout: tgtJ(map[string]string{"Error": "not_public"})}
+			}
+			return tgtResult{stdout: tgtD(pub)}
 		case "readtext":
-			out, n := RedactText(content)
-			b, _ := json.Marshal(map[string]any{"Redactions": n, "Data": base64.StdEncoding.EncodeToString(out)})
-			return tgtResult{stdout: string(b)}
+			var keep []string
+			for _, w := range args["Keep"].([]any) {
+				keep = append(keep, w.(string))
+			}
+			out, n, st := filterConfig(content, keep)
+			if st != configOK {
+				return tgtResult{stdout: tgtJ(map[string]string{"Error": "not_public"})}
+			}
+			return tgtResult{stdout: tgtT(n, out)}
 		case "list":
-			return tgtResult{stdout: `{"Files":[],"Denied":[],"DeniedCount":0,"Unreadable":0,"OverSize":0,"Truncated":false}`}
+			return tgtResult{stdout: tgtJRaw(`{"Files":[],"Denied":[],"DeniedCount":0,"Unreadable":0,"OverSize":0,"Truncated":false}`)}
 		case "stat":
-			return tgtResult{stdout: `{"Path":"x","Size":1,"Modified":"2026-01-02T03:04:05Z","Owner":"BUILTIN\\Administrators","AclOk":true,"Broad":false}`}
+			return tgtResult{stdout: tgtJRaw(`{"Path":"x","Size":1,"Modified":"2026-01-02T03:04:05Z","Owner":"BUILTIN\\Administrators","AclOk":true,"Broad":false}`)}
 		}
 		_ = args
 		return tgtResult{exit: 1}
@@ -100,7 +125,7 @@ func TestRemoteWindowsStdinPath(t *testing.T) {
 		if b, err := wt.ReadFile(ctx, p); err != nil || string(b) != string(certPEM) {
 			t.Fatalf("%q: ReadFile %v", p, err)
 		}
-		if _, _, err := wt.ReadText(ctx, p); err != nil {
+		if _, _, err := wt.ReadText(ctx, p, []string{"ciphers"}); err != nil {
 			t.Fatalf("%q: ReadText %v", p, err)
 		}
 		if strings.Join(kinds, ",") != "stat,list,identify,read,readtext" {
@@ -160,13 +185,16 @@ func TestRemoteWindowsListArgs(t *testing.T) {
 	var got map[string]any
 	fr := newTgtFakeInputRunner(func(argv []string, stdin []byte) tgtResult {
 		_, got = tgtDecodePS(t, argv, stdin)
-		return tgtResult{stdout: `{"Files":[{"Path":"C:\\r\\z.pem","Size":3,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""},` +
-			`{"Path":"C:\\r\\a.pem","Size":3,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""}],` +
-			`"Denied":"C:\\r\\locked","DeniedCount":1,"Unreadable":2,"OverSize":3,"Truncated":true}`}
+		return tgtResult{stdout: "J:" + base64.StdEncoding.EncodeToString([]byte(`{"Files":[{"Path":"C:\\r\\z.pem","Size":3,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""},`+
+			`{"Path":"C:\\r\\a.pem","Size":3,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""}],`+
+			`"Denied":"C:\\r\\locked","DeniedCount":1,"Unreadable":2,"OverSize":3,"Truncated":true}`))}
 	})
 	files, err := NewRemoteWindowsTarget(fr).List(context.Background(), `C:\r`, ListOptions{
 		MaxDepth: 3, MaxFiles: 7, MaxSizeBytes: 99, Exclude: []string{`C:\r\skip`}, Names: []string{"*.pem"},
 	})
+	if got["Budget"] != remoteWindowsListBudget.Seconds() || got["Budget"].(float64) >= 90 {
+		t.Fatalf("list budget = %v", got["Budget"])
+	}
 	if got["Root"] != `C:\r` || got["Depth"] != float64(3) || got["Max"] != float64(7) || got["MaxSize"] != float64(99) || got["Cross"] != false {
 		t.Fatalf("args = %v", got)
 	}
@@ -213,7 +241,15 @@ func TestRemoteWindowsStat(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		fr := newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: tc.out} })
+		out := tc.out
+		if out != "not json" {
+			bom := strings.HasPrefix(out, "\ufeff")
+			out = tgtJRaw(strings.TrimPrefix(out, "\ufeff"))
+			if bom {
+				out = "\ufeff" + out
+			}
+		}
+		fr := newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: out} })
 		fi, err := NewRemoteWindowsTarget(fr).Stat(context.Background(), `C:\k\a.pfx`)
 		tc.check(t, fi, err)
 	}
@@ -243,7 +279,6 @@ func TestRemoteWindowsReadFileGuard(t *testing.T) {
 		{"mixed", `C:\k\both.pem`, append(append([]byte(nil), certPEM...), keyPEM...)},
 		{"utf16 certificate", `C:\k\utf16cert.pem`, utf16(string(certPEM))},
 		{"utf16 cert then ascii key", `C:\k\mixenc.pem`, append(utf16(string(certPEM)), keyPEM...)},
-		{"cert then secret", `C:\k\cert_then_secret.pem`, append(append([]byte(nil), certPEM...), "PrivateKey: "+strings.Repeat("Q", 44)+"\n"...)},
 		{"pfx", `C:\k\server.pfx`, certDER},
 		{"jks", `C:\k\a.jks`, append(append([]byte(nil), magicJKS...), 0, 0, 0, 2)},
 		{"putty", `C:\Users\u\key.ppk`, []byte("PuTTY-User-Key-File-3: ssh-ed25519\n")},
@@ -273,7 +308,7 @@ func TestRemoteWindowsReadFileGuard(t *testing.T) {
 			if args["Max"] != float64(remoteWindowsReadMax) {
 				t.Errorf("read bound = %v", args["Max"])
 			}
-			return tgtResult{stdout: base64.StdEncoding.EncodeToString(keyPEM) + "\r\n"}
+			return tgtResult{stdout: tgtD(keyPEM) + "\r\n"}
 		}
 		return tgtResult{stdout: tgtWinIdentifyFor(certPEM)}
 	})
@@ -286,7 +321,7 @@ func TestRemoteWindowsReadFileGuard(t *testing.T) {
 		fr = newTgtFakeInputRunner(func(argv []string, stdin []byte) tgtResult {
 			script, _ := tgtDecodePS(t, argv, stdin)
 			if tgtPSKind(script) == "read" {
-				return tgtResult{stdout: `{"Error":"` + word + `"}`}
+				return tgtResult{stdout: tgtJ(map[string]string{"Error": word})}
 			}
 			return tgtResult{stdout: tgtWinIdentifyFor(certPEM)}
 		})
@@ -307,7 +342,7 @@ func TestRemoteWindowsReadFileGuard(t *testing.T) {
 	}
 	// An answer missing a field is not trusted.
 	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult {
-		return tgtResult{stdout: `{"Size":10,"Magic":"2d2d2d2d2d424547","Labels":["CERTIFICATE"],"Flags":{"bad":0}}`}
+		return tgtResult{stdout: tgtJRaw(`{"Size":10,"Magic":"2d2d2d2d2d424547","Labels":["CERTIFICATE"],"Flags":{"bad":0}}`)}
 	})
 	if _, err := NewRemoteWindowsTarget(fr).Identify(context.Background(), `C:\x\a.pem`); err == nil {
 		t.Error("an incomplete identify answer was accepted")
@@ -316,25 +351,83 @@ func TestRemoteWindowsReadFileGuard(t *testing.T) {
 
 func TestRemoteWindowsReadText(t *testing.T) {
 	conf := []byte("[Interface]\r\nPrivateKey = " + strings.Repeat("Q", 44) + "\r\nAddress = 10.0.0.1/24\r\n")
-	fr := newTgtFakeInputRunner(tgtWinHost(t, conf, nil))
-	out, n, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\wg\wg0.conf`)
-	want, wn := RedactText(conf)
+	keep := []string{"address", "privatekey"}
+	var kinds []string
+	fr := newTgtFakeInputRunner(tgtWinHost(t, conf, &kinds))
+	out, n, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\wg\wg0.conf`, keep)
+	want, wn, _ := FilterConfigText(conf, keep)
 	if err != nil || string(out) != string(want) || n != wn || n != 1 {
 		t.Fatalf("ReadText = %q %d %v", out, n, err)
 	}
+	// An empty keep is refused before anything is sent.
+	if _, _, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\wg\wg0.conf`, nil); !errors.Is(err, ErrNotPublic) || len(kinds) != 1 {
+		t.Fatalf("empty keep: %v, %d scripts", err, len(kinds))
+	}
 	// A host that "forgot" to redact is caught.
-	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult {
-		b, _ := json.Marshal(map[string]any{"Redactions": 0, "Data": base64.StdEncoding.EncodeToString(conf)})
-		return tgtResult{stdout: string(b)}
-	})
-	if _, _, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\wg\wg0.conf`); !errors.Is(err, ErrNotPublic) {
+	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: tgtT(0, conf)} })
+	if _, _, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\wg\wg0.conf`, keep); !errors.Is(err, ErrNotPublic) {
 		t.Fatalf("unredacted answer: %v", err)
 	}
 	for word, want := range map[string]error{"not_public": ErrNotPublic, "too_large": ErrFileTooLarge, "not_found": ErrNotExist} {
-		fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: `{"Error":"` + word + `"}`} })
-		if _, _, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\x`); !errors.Is(err, want) {
+		fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: tgtJ(map[string]string{"Error": word})} })
+		if _, _, err := NewRemoteWindowsTarget(fr).ReadText(context.Background(), `C:\x`, keep); !errors.Is(err, want) {
 			t.Errorf("%s: %v", word, err)
 		}
+	}
+}
+
+// TestRemoteWindowsEncodingAndLongPaths (review item D): every answer is
+// ASCII on the wire, non-ASCII names survive the round trip, and a path of
+// 260 characters or more is sent in the \\?\ form.
+func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
+	var sent []string
+	fr := newTgtFakeInputRunner(func(argv []string, stdin []byte) tgtResult {
+		_, args := tgtDecodePS(t, argv, stdin)
+		sent = append(sent, args["Path"].(string))
+		return tgtResult{stdout: tgtJ(map[string]any{"Path": "x", "Size": 1, "Modified": "2026-01-02T03:04:05Z",
+			"Owner": "HÔTE\\Jürgen-日本", "AclOk": true, "Broad": false})}
+	})
+	name := `C:\Users\Jürgen\café-日本.pem`
+	fi, err := NewRemoteWindowsTarget(fr).Stat(context.Background(), name)
+	if err != nil || fi.Owner != "HÔTE\\Jürgen-日本" || fi.Path != name || sent[0] != name {
+		t.Fatalf("non-ASCII: %+v %v %q", fi, err, sent)
+	}
+	long := `C:\` + strings.Repeat("d\\", 140) + "x.pem"
+	_, _ = NewRemoteWindowsTarget(fr).Stat(context.Background(), long)
+	if sent[1] != `\\?\`+long {
+		t.Fatalf("long path sent as %q", sent[1][:12])
+	}
+	unc := `\\server\share\` + strings.Repeat("d", 260)
+	if got := winLongPath(unc); got != `\\?\UNC\server\share\`+strings.Repeat("d", 260) {
+		t.Fatalf("UNC long path: %q", got[:20])
+	}
+	if winLongPath(`C:\short`) != `C:\short` || winLongPath(`\\?\`+long) != `\\?\`+long {
+		t.Fatal("short or prefixed path changed")
+	}
+	// A raw (code-page) answer is refused, not misread.
+	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: `{"Path":"x"}`} })
+	if _, err := NewRemoteWindowsTarget(fr).Stat(context.Background(), name); err == nil {
+		t.Fatal("an unencoded answer was accepted")
+	}
+	for _, sc := range []string{psStat, psIdentify, psList} {
+		if strings.Count(sc, "[Console]::Out.Write(") != 1 {
+			t.Fatal("a script writes other than through psOut")
+		}
+	}
+}
+
+// TestRemoteWindowsListBudget: the listing reports Truncated when the
+// host's time budget stops it, and the budget is below the runner timeout.
+func TestRemoteWindowsListBudget(t *testing.T) {
+	if !strings.Contains(psList, "Stopwatch") || !strings.Contains(psList, "$sw.Elapsed.TotalSeconds -ge $budget") {
+		t.Fatal("psList has no time budget")
+	}
+	fr := newTgtFakeInputRunner(func([]string, []byte) tgtResult {
+		return tgtResult{stdout: tgtJRaw(`{"Files":[{"Path":"C:\\a.pem","Size":1,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""}],"Denied":[],"DeniedCount":0,"Unreadable":0,"OverSize":0,"Truncated":true}`)}
+	})
+	files, err := NewRemoteWindowsTarget(fr).List(context.Background(), `C:\`, ListOptions{MaxDepth: 30})
+	if !errors.Is(err, ErrListTruncated) || len(files) != 1 {
+		t.Fatalf("budget stop: %d files, %v", len(files), err)
 	}
 }
 

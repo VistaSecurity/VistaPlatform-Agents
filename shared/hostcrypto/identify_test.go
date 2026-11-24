@@ -311,8 +311,10 @@ func TestPublicIsAnAllowlist(t *testing.T) {
 		{"base64 label", "-----BEGIN YY99uuY1gWotaYup510A3QVEZh0RN8YzrOkWD0reoNvzXMhgs5UEoQn1CmXQ-----\n", false, ClassText, ""},
 		{"label over 64", block(strings.Repeat("A", 65)), false, ClassText, ""},
 		{"text after the dashes", "-----BEGIN CERTIFICATE----- x\n" + body + "-----END CERTIFICATE-----\n", false, ClassText, ""},
-		{"cert then pasted secret", string(certPEM) + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", false, ClassUnknown, "CERTIFICATE"},
-		{"unterminated cert", "-----BEGIN CERTIFICATE-----\n" + body, false, ClassUnknown, "CERTIFICATE"},
+		// Text around public blocks no longer makes a file not public: a remote
+		// read returns the blocks and nothing else (publicContent).
+		{"cert then pasted secret", string(certPEM) + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", true, ClassCertificate, "CERTIFICATE"},
+		{"unterminated cert (public, but a read finds no block)", "-----BEGIN CERTIFICATE-----\n" + body, true, ClassCertificate, "CERTIFICATE"},
 		{"cert with nested key, no END", "-----BEGIN CERTIFICATE-----\n" + body + string(keyPEM), false, ClassMixed, "CERTIFICATE,PRIVATE KEY"},
 		{"cert with NUL", string(certPEM) + "\x00", false, ClassUnknown, "CERTIFICATE"},
 		{"unknown label beside cert", string(certPEM) + block("PKCS7"), false, ClassUnknown, "CERTIFICATE,PKCS7"},
@@ -355,8 +357,8 @@ func TestSSHPublicKeyFileRule(t *testing.T) {
 		{line, true},
 		{"# comment\n\n" + line, false}, // public by content, but the magic is not a key type: Go is stricter than the host here
 		{line + line, true},
-		{line + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", false},
-		{"ssh-ed25519 AAAA " + strings.Repeat("Q", 44) + "\n", false},
+		{line + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", true}, // a read returns the key line only
+		{"ssh-ed25519 AAAA " + strings.Repeat("Q", 44) + "\n", false},  // no genuine key line
 		{"ssh-ed25519  AAAA\n", false},
 		{"ssh-rsa AAAA==x\n", false},
 	}

@@ -363,12 +363,33 @@ func ScanPEMLabels(b []byte, max int) []string {
 // material make the file a private key, then refuse public status for any of
 // the reasons inspection found. It is the one place this rule lives; the
 // remote programs return inspection fields and Go decides here.
+//
+// Public here means "has public content that a remote read can cut out":
+// text around the blocks (a secret pasted after a certificate) does not make
+// a file not public, because a remote ReadFile returns the public blocks and
+// nothing else (publicContent). What does: a NUL, a BEGIN line that does not
+// parse, a label off the allowlist, a label naming private material, UTF-16.
 func identityFrom(name string, in inspection) Identity {
 	labels := in.labels
 	if len(labels) > maxPEMLabels {
 		labels = labels[:maxPEMLabels]
 	}
-	id := ClassifyNamed(name, in.magic, labels)
+	if in.utf16 {
+		// UTF-16 is never public. A UTF-16 file with a BEGIN ... PRIVATE line
+		// is a private key in a form the byte rules cannot read.
+		id := Identity{Magic: cloneBytes(in.magic), PEMLabels: cloneLabels(labels), Class: ClassUnknown}
+		if in.utf16Private {
+			id.Class = ClassPrivateKey
+		}
+		return id
+	}
+	magic := in.magic
+	if len(labels) > 0 {
+		// A UTF-8 byte-order mark before "-----BEGIN" is still that PEM.
+		magic = bytes.TrimPrefix(magic, utf8BOM)
+	}
+	id := ClassifyNamed(name, magic, labels)
+	id.Magic = cloneBytes(in.magic)
 	if in.private {
 		switch id.Class {
 		case ClassPrivateKey, ClassMixed, ClassPGP, ClassKeystore:
@@ -382,16 +403,14 @@ func identityFrom(name string, in inspection) Identity {
 		return id
 	}
 	switch {
-	case in.nul, in.bad, in.nonPublic, in.unterminated, in.truncated:
+	case in.nul, in.bad, in.nonPublic, in.truncated:
 		id.Class = ClassUnknown
 	case in.nLabel == 0:
-		// Public without a PEM label: only an OpenSSH .pub file, and only
-		// when every line is a public key line.
-		if id.Class != ClassPublicKey || in.sshBad || in.sshLines == 0 {
+		// Public without a PEM label: only an OpenSSH .pub file with at
+		// least one genuine key line.
+		if id.Class != ClassPublicKey || in.sshLines == 0 {
 			id.Class = ClassUnknown
 		}
-	case in.outsideRun:
-		id.Class = ClassUnknown
 	}
 	return id
 }

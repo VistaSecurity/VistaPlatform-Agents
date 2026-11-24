@@ -170,21 +170,34 @@ func (t *LocalTarget) ReadFile(ctx context.Context, path string) ([]byte, error)
 	return b, nil
 }
 
-// ReadText reads a configuration file and redacts it with [RedactText], the
-// same rule a remote host applies, so a parser sees the same bytes in both
-// modes. A file with a NUL byte or a keystore's magic is not text and is
-// refused with ErrNotPublic.
-func (t *LocalTarget) ReadText(ctx context.Context, path string) ([]byte, int, error) {
+// ReadText returns the lines of a configuration file a parser asked for,
+// by [FilterConfigText], the rule every remote host applies, so a parser
+// sees the same bytes in both modes. An empty keep is refused before the file
+// is opened.
+func (t *LocalTarget) ReadText(ctx context.Context, path string, keep []string) ([]byte, int, error) {
+	if len(newKeepSet(keep).words) == 0 {
+		return nil, 0, fmt.Errorf("%s: %w (no keep words)", path, ErrNotPublic)
+	}
 	b, err := t.ReadFile(ctx, path)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer clear(b)
-	if textRefused(b) {
-		return nil, 0, fmt.Errorf("%s: %w (not text)", path, ErrNotPublic)
+	return configResult(path, b, keep)
+}
+
+// configResult runs filterConfig and maps its refusals to the sentinels.
+func configResult(path string, b []byte, keep []string) ([]byte, int, error) {
+	out, n, st := filterConfig(b, keep)
+	switch st {
+	case configOK:
+		return out, n, nil
+	case configTooManyLines:
+		return nil, 0, fmt.Errorf("%s: %w (more than %d lines)", path, ErrFileTooLarge, maxConfigLines)
+	case configNoKeep:
+		return nil, 0, fmt.Errorf("%s: %w (no keep words)", path, ErrNotPublic)
 	}
-	out, n := RedactText(b)
-	return out, n, nil
+	return nil, 0, fmt.Errorf("%s: %w (not text)", path, ErrNotPublic)
 }
 
 // Stat describes path itself, not what a link points at.

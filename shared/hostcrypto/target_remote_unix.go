@@ -3,6 +3,7 @@ package hostcrypto
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"golang.org/x/crypto/ssh"
 )
 
 // RemoteUnixTarget is a Linux or macOS host reached through a
@@ -75,19 +77,36 @@ func (t *RemoteUnixTarget) Run(ctx context.Context, argv []string) ([]byte, []by
 // Local is false: bytes read here cross a connection.
 func (t *RemoteUnixTarget) Local() bool { return false }
 
-// awkRules is the text rule set of redact.go as a POSIX awk program: no
-// interval expressions (mawk 1.3.3 and old BWK awk lack them), no gawk
-// extensions, no single quote (it sits inside one in the shell script). Three
-// modes, chosen with -v mode=:
+// sshKeyTable renders sshKeyTypes for the awk program: one
+// "name|min|max|prefix" per entry, ";"-separated.
+func sshKeyTable() string {
+	parts := make([]string, len(sshKeyTypes))
+	for i, k := range sshKeyTypes {
+		parts[i] = k.name + "|" + strconv.Itoa(k.minLen) + "|" + strconv.Itoa(k.maxLen) + "|" + k.prefix
+	}
+	return strings.Join(parts, ";")
+}
+
+// awkRules is the rule set of redact.go as one POSIX awk program: no interval
+// expressions (mawk 1.3.3 and old BWK awk lack them), no gawk extensions, no
+// single quote (it sits inside one in the shell scripts). Its input comes
+// through tr, so every awk sees a NUL the same way, as 0x01: text and
+// identify modes map NUL to 0x01 (and refuse 0x01 itself, as Go does);
+// public mode maps NUL to 0x01 and 0x01 to 0x02, so 0x01 means NUL alone —
+// lossless for everything public mode can print, which is base64, PEM
+// frames and key types. Modes, by -v mode=:
 //
-//	identify  print up to 64 "label:" lines and one "flags:" line
-//	decide    print "public" or "refuse" (needs -v nul, ks, pubname)
-//	redact    print the redacted text (needs -v nonl) and the count on stderr
+//	identify  print up to 64 "label:" lines and one "flags:" line (inspect)
+//	public    buffer, then print ONLY the public blocks and genuine SSH key
+//	          lines, or nothing and exit 8 (publicContent)
+//	text      buffer, then print the kept, redacted lines and the count on
+//	          stderr, or nothing and exit 8 (not text) or 7 (too many lines)
+//	          (filterConfig; the keep words come from ENVIRON["HC_KEEP"], so
+//	          awk -v never processes an escape in them)
 //
-// It mirrors inspect, identityFrom's host-side core, and RedactText; the
-// parity tests run it for real and compare.
-var awkRules = `function cls(n,   r, i) { r = ""; for (i = 0; i < n; i++) r = r "[A-Za-z0-9+/=]"; return r }
-function isbegin(s) { return index(s, "----BEGIN") || index(s, "---- BEGIN") }
+// In public and text modes NOTHING is printed before END: what is printed is
+// what was decided on, from the one read the shell gave it.
+var awkRules = `function isbegin(s) { return index(s, "----BEGIN") || index(s, "---- BEGIN") }
 function isend(s) { return index(s, "----END") || index(s, "---- END") }
 function parsebegin(s,   n, l) {
   n = length(s); LAB = ""
@@ -99,40 +118,102 @@ function parsebegin(s,   n, l) {
   return 1
 }
 function namespriv(s,   u) { u = toupper(s); return index(u, "PRIVATE") || index(u, "SECRET") || index(u, "KEY") }
-function sshline(s,   i, t, r, j, b, c) {
-  i = index(s, " ")
-  if (i < 2) return 0
-  t = substr(s, 1, i - 1)
-  if (substr(t, 1, 4) != "ssh-" && substr(t, 1, 11) != "ecdsa-sha2-" && substr(t, 1, 3) != "sk-") return 0
-  if (t !~ /^[a-z0-9@.-]+$/) return 0
-  r = substr(s, i + 1)
-  j = index(r, " ")
-  if (j == 0) { b = r; c = "" } else { b = substr(r, 1, j - 1); c = substr(r, j + 1) }
-  if (b !~ /^[A-Za-z0-9+\/]+=*$/) return 0
-  if (match(c, RUN)) return 0
-  return 1
+function sshkey(s,   n, T, i, t, b) {
+  n = split(s, T, /[ \t]+/)
+  for (i = 1; i < n; i++) {
+    t = T[i]
+    if (!(t in KMIN)) continue
+    b = T[i + 1]
+    if (b ~ /^[A-Za-z0-9+\/]+=*$/ && length(b) >= KMIN[t] && length(b) <= KMAX[t] && substr(b, 1, length(KP[t])) == KP[t]) return t " " b
+    return ""
+  }
+  return ""
 }
 function redact(s,   o) {
   o = ""
   while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) "` + RedactedMarker + `"; s = substr(s, RSTART + RLENGTH); NRED++ }
   return o s
 }
+function bodyline(s) { return length(s) >= 1 && length(s) <= ` + strconv.Itoa(maxPEMBodyLine) + ` && s ~ /^[A-Za-z0-9+\/=]+$/ }
+function keepl(s) {
+  if (DROP) { if (isend(s)) DROP = 0; return }
+  if (isbegin(s)) { NRED++; if (!isend(s)) DROP = 1; return }
+  OUT[++NO] = redact(s)
+}
+function fw(t,   i, c) {
+  if (substr(t, 1, 1) == "<") t = substr(t, 2)
+  if (substr(t, 1, 2) == "-D") t = substr(t, 3)
+  for (i = 1; i <= length(t); i++) { c = substr(t, i, 1); if (c == " " || c == "\t" || c == "=" || c == ":" || c == ";" || c == "{" || c == "}") break }
+  t = substr(t, 1, i - 1)
+  if (substr(t, length(t)) == ">") t = substr(t, 1, length(t) - 1)
+  return tolower(t)
+}
+function bslash(s,   t) { t = s; sub(/[ \t]+$/, "", t); return substr(t, length(t)) == "\\" }
+function cline(s,   t, tr, w) {
+  NL++
+  if (NL > ` + strconv.Itoa(maxConfigLines) + `) TOOMANY = 1
+  if (BAD || TOOMANY) return
+  if (CONT) { keepl(s); if (CSEMI) CONT = !index(s, ";"); else CONT = bslash(s); return }
+  t = s; sub(/^[ \t]+/, "", t)
+  if (t == "") { keepl(s); return }
+  if (substr(t, 1, 1) == "#" || substr(t, 1, 1) == "!" || substr(t, 1, 1) == ";" || substr(t, 1, 2) == "//") return
+  tr = t; sub(/[ \t]+$/, "", tr)
+  if ((substr(tr, 1, 1) == "[" && substr(tr, length(tr)) == "]") || tr == "{" || tr == "}" || tr == "};" || substr(t, 1, 2) == "</") { keepl(s); return }
+  w = fw(t)
+  if (w == "" || !(w in K)) return
+  keepl(s)
+  if (bslash(s)) { CONT = 1; CSEMI = 0 } else if ((w in S) && !index(s, ";")) { CONT = 1; CSEMI = 1 }
+}
 BEGIN {
-  RUN = cls(` + strconv.Itoa(RedactRunLength) + `) "[A-Za-z0-9+/=]*"
+  RUN = ""
+  for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
+  RUN = RUN "[A-Za-z0-9+/=]*"
   na = split("` + strings.Join(publicPEMLabels, "|") + `", AL, "|")
   for (k = 1; k <= na; k++) ALLOW[AL[k]] = 1
-  inpub = 0; drop = 0; NRED = 0; pend = 0
+  nt = split("` + sshKeyTable() + `", TT, ";")
+  for (k = 1; k <= nt; k++) { split(TT[k], F, "|"); KMIN[F[1]] = F[2] + 0; KMAX[F[1]] = F[3] + 0; KP[F[1]] = F[4] }
+  nk = split(ENVIRON["HC_KEEP"], KW, " ")
+  for (k = 1; k <= nk; k++) { w = tolower(KW[k]); sm = 0; if (substr(w, length(w)) == ";") { w = substr(w, 1, length(w) - 1); sm = 1 }; if (w != "") { K[w] = 1; if (sm) S[w] = 1 } }
 }
-mode == "redact" {
-  if (pend) { printf "%s\n", P; pend = 0 }
-  line = $0; s = line; sub(/\r$/, "", s)
-  if (drop) { if (isend(s)) drop = 0; next }
-  if (isbegin(s)) { if (!parsebegin(s) || !(LAB in ALLOW)) { NRED++; if (!isend(s)) drop = 1; next } }
-  P = redact(line); pend = 1
+mode == "text" {
+  r = $0
+  if (NR == 1) {
+    if (substr(r, 1, 4) == "\376\355\376\355" || substr(r, 1, 4) == "\316\316\316\316" || substr(r, 1, 2) == "\005\002" || substr(r, 1, 2) == "\005\001" || substr(r, 1, 8) == "SQLite f") BAD = 1
+    if (substr(r, 1, 3) == "\357\273\277") r = substr(r, 4)
+  }
+  if (index(r, "\001")) BAD = 1
+  if (substr(r, length(r)) == "\r") r = substr(r, 1, length(r) - 1)
+  if (r == "") { cline(""); next }
+  n = split(r, P, "\r")
+  for (i = 1; i <= n; i++) cline(P[i])
   next
 }
 {
-  s = $0; sub(/\r$/, "", s)
+  s = $0
+  if (NR == 1 && substr(s, 1, 3) == "\357\273\277") s = substr(s, 4)
+  if (index(s, "\001")) POISON = 1
+  if (substr(s, length(s)) == "\r") s = substr(s, 1, length(s) - 1)
+}
+mode == "public" {
+  if (isbegin(s)) {
+    INB = 0
+    if (!parsebegin(s) || !(LAB in ALLOW)) { POISON = 1; next }
+    INB = 1; BOK = 1; BN = 0; BB[++BN] = s
+    if (substr(s, 1, 5) == "-----") BE = "-----END " LAB "-----"; else BE = "---- END " LAB " ----"
+    next
+  }
+  if (INB) {
+    if (s == BE) { BB[++BN] = s; if (BOK) for (i = 1; i <= BN; i++) PUB[++NP] = BB[i]; INB = 0; next }
+    if (isend(s)) { INB = 0; next }
+    if (!bodyline(s)) BOK = 0
+    BB[++BN] = s
+    next
+  }
+  k = sshkey(s)
+  if (k != "") PUB[++NP] = k
+  next
+}
+mode == "identify" {
   if (isbegin(s)) {
     if (inpub) unterm = 1
     inpub = 0
@@ -140,49 +221,52 @@ mode == "redact" {
     if (!pub && namespriv(s)) priv = 1
     if (!ok) { bad = 1; next }
     nl++
-    if (mode == "identify" && nl <= 64) print "label:" LAB
+    if (nl <= 64) print "label:" LAB
     if (pub) inpub = 1; else nonpub = 1
     next
   }
   if (inpub) { if (isend(s)) inpub = 0; next }
   if (match(s, RUN)) orun = 1
   if (substr(s, 1, 1) == "#" || s ~ /^[ \t]*$/) next
-  if (sshline(s)) sshl++; else sshbad = 1
+  if (sshkey(s) != "") sshl++; else sshbad = 1
 }
 END {
-  if (mode == "redact") {
-    if (pend) printf "%s%s", P, (nonl ? "" : "\n")
-    print "vista-redactions:" NRED > "/dev/stderr"
+  if (mode == "text") {
+    if (BAD) exit 8
+    if (TOOMANY) exit 7
+    for (i = 1; i <= NO; i++) print OUT[i]
+    print "vista-redactions:" (NRED + 0) > "/dev/stderr"
+    exit 0
+  }
+  if (mode == "public") {
+    if (POISON || NP == 0) exit 8
+    for (i = 1; i <= NP; i++) print PUB[i]
     exit 0
   }
   if (inpub) unterm = 1
-  if (mode == "identify") { print "flags:" (bad + 0) " " (nonpub + 0) " " (unterm + 0) " " (priv + 0) " " (orun + 0) " " (sshbad + 0) " " (sshl + 0) " " (nl + 0); exit 0 }
-  ok = !nul && !ks && !bad && !nonpub && !unterm && !priv && ((nl > 0 && !orun) || (nl == 0 && pubname && sshl > 0 && !sshbad))
-  print (ok ? "public" : "refuse")
+  print "flags:" (bad + 0) " " (nonpub + 0) " " (unterm + 0) " " (priv + 0) " " (orun + 0) " " (sshbad + 0) " " (sshl + 0) " " (nl + 0)
 }`
 
 // readPrelude starts every script that reads a file. $1 is the path, $2 the
 // platform, $3 the byte bound. It refuses with an exit code rather than a
-// message (3 missing, 4 permission, 5 directory, 6 not a regular file, 9
-// changed, 10 cannot pin), then pins the file:
+// message (3 missing, 4 permission denied, 5 directory, 6 not a regular file,
+// 10 cannot pin, 11 could not open for another reason), then opens the file
+// ONCE, on fd 3, and takes its identity from that descriptor:
 //
-// The file is opened ONCE, on fd 3, and every later check and the output read
-// that one file rather than whatever the path names by then:
+//   - Linux: stat of /proc/self/fd/3, the open file itself.
+//   - macOS: `stat -f ... <&3`, which BSD stat answers with fstat of its
+//     standard input. (stat of /dev/fd/3 answers for the devfs node, not the
+//     file, and a second open of /dev/fd/3 shares fd 3's offset.)
 //
-//   - Linux: everything reads /proc/self/fd/3, which opens the inode fd 3
-//     holds even if the path has been renamed, replaced or re-linked since.
-//     A host without /proc refuses (exit 10) rather than read unpinned.
-//   - macOS (no /proc): the checks read the path; before them and again just
-//     before the output, the path's device, inode, size and mtime must equal
-//     those of fd 3 (stat of /dev/fd/3), and the output is read from fd 3.
+// The size and type come from that identity, so they describe the file that
+// will be read. ReadFile and ReadText then read fd 3 exactly ONCE, from
+// offset 0 (`head -c "$size" <&3`), into an awk program that decides and
+// prints from that one buffer: what crosses is what was decided on, whatever
+// happens to the path or the file meanwhile. A file rewritten in place while
+// it is read gives awk a mixture, which it judges as it would any file.
 //
-// RESIDUAL WINDOW, stated honestly: the file's CONTENT can still change in
-// place between the checks and the output (same inode; on macOS also a
-// rename away and back between the two comparisons). The identity is checked
-// again just before the output, which catches a change of size or mtime; a
-// same-size rewrite within one second is not caught on the host. The Go side
-// re-checks every byte that arrives and drops it if it fails, so such a
-// swap is never parsed or reported — but its bytes have crossed.
+// "Permission denied" is reported only when the host's own error says so: a
+// path that vanishes during a swap is not a permission problem.
 //
 // `[ -f ]` runs before the open, so a FIFO is never opened (a FIFO swapped in
 // between the test and the open would block until the command timeout).
@@ -190,85 +274,68 @@ const readPrelude = `p=$1; plat=$2; max=$3
 if [ ! -e "$p" ]; then
   if [ -L "$p" ]; then exit 3; fi
   e=$(stat -- "$p" 2>&1 >/dev/null)
-  case $e in *"ermission denied"*) exit 4;; esac
+  case $e in *"Permission denied"*) exit 4;; esac
   exit 3
 fi
 if [ -d "$p" ]; then exit 5; fi
 if [ ! -f "$p" ]; then exit 6; fi
-if [ ! -r "$p" ]; then exit 4; fi
-exec 3< "$p" || exit 4
-fid() { if [ "$plat" = darwin ]; then stat -L -f '%d:%i:%z:%m' -- "$1"; else stat -L -c '%d:%i:%s:%Y' -- "$1"; fi 2>/dev/null; }
-if [ "$plat" = darwin ]; then
-  F=$p; pin=$(fid /dev/fd/3)
-  if [ -z "$pin" ] || [ "$pin" != "$(fid "$p")" ]; then exit 9; fi
-else
-  F=/proc/self/fd/3
-  if [ ! -r "$F" ]; then exit 10; fi
-  pin=$(fid "$F")
+if [ ! -r "$p" ]; then
+  e=$(head -c 1 -- "$p" 2>&1 >/dev/null)
+  case $e in *"Permission denied"*) exit 4;; *"No such file"*) exit 3;; esac
+  exit 11
 fi
-if [ ! -f "$F" ]; then exit 6; fi
+exec 3< "$p" || exit 11
+if [ "$plat" = darwin ]; then
+  pin=$(stat -f '%d:%i:%z:%m:%p' <&3 2>/dev/null)
+  F=$p
+else
+  pin=$(stat -L -c '%d:%i:%s:%Y:%f' /proc/self/fd/3 2>/dev/null)
+  F=/proc/self/fd/3
+fi
+if [ -z "$pin" ]; then exit 10; fi
+case $plat:${pin##*:} in darwin:100*|linux:8???) ;; *) exit 6;; esac
 size=${pin#*:}; size=${size#*:}; size=${size%%:*}
 case $size in ''|*[!0-9]*) exit 10;; esac
-win() { if [ "$w" -gt 0 ]; then head -c "$w" -- "$F"; fi; }
-repin() {
-  if [ "$pin" != "$(fid "$F")" ]; then exit 9; fi
-  if [ "$plat" = darwin ] && [ "$pin" != "$(fid "$p")" ]; then exit 9; fi
-}
-magic=$(head -c 8 -- "$F" | od -An -v -tx1 | tr -d ' \n')
-ks=0
-case $magic in feedfeed*|cececece*|0502*|0501*|53514c6974652066*) ks=1;; esac
 `
 
 // identifyScript prints ONLY markers: the size, the first eight bytes in hex,
-// whether the scanned window holds a NUL, up to 64 valid labels and the rule
-// flags. It reads at most the byte bound.
+// whether the scanned window holds a NUL, whether a UTF-16 file names a
+// private key, up to 64 valid labels and the rule flags. It reads at most the
+// byte bound. (Identification is advisory: ReadFile decides again from its
+// own single read.)
 var identifyScript = readPrelude + `w=$size
 if [ "$w" -gt "$max" ]; then w=$max; fi
+win() { if [ "$w" -gt 0 ]; then head -c "$w" -- "$F"; fi; }
+magic=$(head -c 8 -- "$F" | od -An -v -tx1 | tr -d ' \n')
 printf 'size:%s\nmagic:%s\n' "$size" "$magic"
 n=$(win | tr -d '\000' | wc -c)
 if [ "$((n + 0))" -eq "$w" ]; then echo nul:0; else echo nul:1; fi
-win | awk -v mode=identify '` + awkRules + `'
+u=0
+case $magic in fffe*|feff*) u=$(win | tr -d '\000\376\377' | awk '{ x = toupper($0) } index(x, "BEGIN") && index(x, "PRIVATE") { f = 1 } END { print f + 0 }');; esac
+echo "utf16:$u"
+win | tr '\000' '\001' | awk -v mode=identify '` + awkRules + `'
 exit 0`
 
-// readScript decides on the host, from the pinned file, with the
-// conservative rule (no NUL, no keystore magic, every label on the allowlist,
-// nothing private-looking, no long run outside public blocks, or an OpenSSH
-// .pub file of public key lines only), and only then prints the file. Exit 7
-// is over the bound, 8 is not public; nothing is printed for either.
+// readScript reads the pinned file ONCE and prints only what publicContent
+// would: exit 7 over the bound, 8 not public; nothing printed for either.
 var readScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
-w=$size
-n=$(win | tr -d '\000' | wc -c)
-nul=0; if [ "$((n + 0))" -ne "$w" ]; then nul=1; fi
-pn=0; case $p in *.pub) pn=1;; esac
-d=$(win | awk -v mode=decide -v nul=$nul -v ks=$ks -v pubname=$pn '` + awkRules + `')
-if [ "$d" != public ]; then exit 8; fi
-repin
-if [ "$plat" = darwin ]; then cat <&3; else cat -- "$F"; fi`
+if [ "$size" -eq 0 ]; then exit 8; fi
+head -c "$size" <&3 | tr '\000\001' '\001\002' | awk -v mode=public '` + awkRules + `'`
 
-// readTextScript refuses a file that is not text (NUL anywhere, keystore
-// magic: exit 8) or over the bound (exit 7), then prints it redacted by the
-// awk rules, with the redaction count on stderr.
+// readTextScript reads the pinned file ONCE and prints only what
+// filterConfig would; $4 is the space-separated keep list. Exit 7 over the
+// bound or the line bound, 8 not text.
 var readTextScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
-if [ "$ks" = 1 ]; then exit 8; fi
-w=$size
-n=$(win | tr -d '\000' | wc -c)
-if [ "$((n + 0))" -ne "$w" ]; then exit 8; fi
-nonl=0
-if [ "$w" -gt 0 ]; then
-  l=$(tail -c 1 -- "$F" | od -An -tx1 | tr -d ' \n')
-  if [ "$l" != 0a ]; then nonl=1; fi
-fi
-repin
-if [ "$plat" = darwin ]; then awk -v mode=redact -v nonl=$nonl '` + awkRules + `' <&3
-else awk -v mode=redact -v nonl=$nonl '` + awkRules + `' < "$F"; fi`
+{ if [ "$size" -gt 0 ]; then head -c "$size" <&3; fi; } | tr '\000' '\001' | HC_KEEP=$4 awk -v mode=text '` + awkRules + `'`
 
 // errChanged is a read the host refused because the file changed between
 // being opened and being read.
 var errChanged = errors.New("hostcrypto: the file changed while it was read")
 
 // scriptArgv runs one of the fixed scripts on path.
-func (t *RemoteUnixTarget) scriptArgv(script, path string, bound int64) []string {
-	return []string{"env", "LC_ALL=C", "sh", "-c", script, "sh", path, t.platformArg(), strconv.FormatInt(bound, 10)}
+func (t *RemoteUnixTarget) scriptArgv(script, path string, bound int64, extra ...string) []string {
+	argv := []string{"env", "LC_ALL=C", "sh", "-c", script, "sh", path, t.platformArg(), strconv.FormatInt(bound, 10)}
+	return append(argv, extra...)
 }
 
 func (t *RemoteUnixTarget) identifyArgv(path string) []string {
@@ -293,7 +360,9 @@ func scriptError(path string, exit int) error {
 	case 9:
 		return fmt.Errorf("%s: %w", path, errChanged)
 	case 10:
-		return fmt.Errorf("hostcrypto: %s: the host cannot pin the file for reading (no /proc/self/fd)", path)
+		return fmt.Errorf("hostcrypto: %s: the host could not describe the open file", path)
+	case 2, 11:
+		return fmt.Errorf("hostcrypto: %s: could not be opened", path)
 	}
 	return fmt.Errorf("hostcrypto: %s: exit %d", path, exit)
 }
@@ -328,7 +397,7 @@ func (t *RemoteUnixTarget) Identify(ctx context.Context, path string) (Identity,
 // must not make a file public.
 func parseIdentifyOutput(out []byte, window int64) (inspection, error) {
 	var in inspection
-	var sawSize, sawMagic, sawNul, sawFlags bool
+	var sawSize, sawMagic, sawNul, sawUTF16, sawFlags bool
 	for _, line := range strings.Split(string(out), "\n") {
 		switch {
 		case strings.HasPrefix(line, "size:"):
@@ -348,6 +417,8 @@ func parseIdentifyOutput(out []byte, window int64) (inspection, error) {
 			sawMagic = true
 		case line == "nul:0", line == "nul:1":
 			in.nul, sawNul = line == "nul:1", true
+		case line == "utf16:0", line == "utf16:1":
+			in.utf16Private, sawUTF16 = line == "utf16:1", true
 		case strings.HasPrefix(line, "label:"):
 			l := strings.TrimPrefix(line, "label:")
 			if _, ok := parseBeginLine("-----BEGIN " + l + "-----"); !ok {
@@ -376,25 +447,32 @@ func parseIdentifyOutput(out []byte, window int64) (inspection, error) {
 			sawFlags = true
 		}
 	}
-	if !sawSize || !sawMagic || !sawNul || !sawFlags {
+	if !sawSize || !sawMagic || !sawNul || !sawUTF16 || !sawFlags {
 		return in, errors.New("incomplete answer")
 	}
 	if len(in.labels) > in.nLabel {
 		return in, errors.New("inconsistent answer")
 	}
+	in.utf16 = bytes.HasPrefix(in.magic, []byte{0xFF, 0xFE}) || bytes.HasPrefix(in.magic, []byte{0xFE, 0xFF})
+	if !in.utf16 && in.utf16Private {
+		return in, errors.New("inconsistent answer")
+	}
 	return in, nil
 }
 
-// ReadFile returns a file only when it is public, decided twice before any
-// byte crosses and once after:
+// ReadFile returns the PUBLIC CONTENT of a file (publicContent: its public
+// PEM blocks and genuine SSH public key lines, nothing around them), decided
+// twice before any byte crosses and once after:
 //
 //  1. Identify, decided in Go with the full rule (name included). Not public:
 //     ErrNotPublic, and no command that prints content is sent. Over the read
 //     cap: ErrFileTooLarge, and nothing is sent.
-//  2. readScript, which pins the file and decides again ON THE HOST from the
-//     bytes it is about to print, and prints nothing unless they pass.
-//  3. The bytes that arrive are inspected again here and dropped (cleared)
-//     unless public: the backstop for the residual window in readPrelude.
+//  2. readScript, which reads the pinned file once and prints, from that one
+//     buffer, only its public content, or nothing.
+//  3. What arrives must be exactly its own public content, or it is dropped
+//     (cleared): a backstop, and a check that the host ran the rule.
+//
+// A DER certificate is not readable remotely (see publicContent).
 func (t *RemoteUnixTarget) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	in, err := t.identify(ctx, path)
 	if err != nil {
@@ -418,27 +496,33 @@ func (t *RemoteUnixTarget) ReadFile(ctx context.Context, path string) ([]byte, e
 	return recheckPublic(path, out, readCap)
 }
 
-// recheckPublic inspects bytes a remote read returned and refuses them when
-// they are not public after all. The buffer is cleared before it is dropped.
+// recheckPublic requires bytes a remote read returned to be exactly their
+// own public content, and every SSH key line to parse as the key it claims
+// to be. Anything else is cleared and refused.
 func recheckPublic(path string, b []byte, readCap int64) ([]byte, error) {
 	if int64(len(b)) > readCap {
 		clear(b)
 		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
-	if !identityFrom(path, inspect(b, int64(len(b)))).Public() {
+	again, ok := publicContent(b)
+	if !ok || !bytes.Equal(again, b) || !sshLinesParse(b) {
 		clear(b)
-		return nil, fmt.Errorf("%s: %w (content changed after identification)", path, ErrNotPublic)
+		return nil, fmt.Errorf("%s: %w (the host returned more than public content)", path, ErrNotPublic)
 	}
 	return b, nil
 }
 
-// ReadText returns a configuration file redacted ON THE HOST by
-// readTextScript. What arrives is checked: no NUL, and RedactText must find
-// nothing left to redact (the rule is idempotent); otherwise it is dropped
-// with ErrNotPublic.
-func (t *RemoteUnixTarget) ReadText(ctx context.Context, path string) ([]byte, int, error) {
+// ReadText returns the lines of a configuration file a parser asked for,
+// narrowed and redacted ON THE HOST by readTextScript (filterConfig's rule).
+// An empty keep is refused before any command is sent. What arrives is
+// checked: it must hold no NUL and be unchanged by the rule applied again.
+func (t *RemoteUnixTarget) ReadText(ctx context.Context, path string, keep []string) ([]byte, int, error) {
+	words, err := keepArg(keep)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", path, err)
+	}
 	readCap := t.readCap()
-	out, stderr, exit, err := t.runner.Run(ctx, t.scriptArgv(readTextScript, path, readCap))
+	out, stderr, exit, err := t.runner.Run(ctx, t.scriptArgv(readTextScript, path, readCap, words))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -451,20 +535,79 @@ func (t *RemoteUnixTarget) ReadText(ctx context.Context, path string) ([]byte, i
 		clear(out)
 		return nil, 0, fmt.Errorf("hostcrypto: read text %s: the host did not report its redactions", path)
 	}
-	return checkRedacted(path, out, n)
+	return checkFiltered(path, out, n)
 }
 
-// checkRedacted is the backstop for a host's redaction.
-func checkRedacted(path string, out []byte, n int) ([]byte, int, error) {
-	if bytes.IndexByte(out, 0) >= 0 {
-		clear(out)
-		return nil, 0, fmt.Errorf("%s: %w (not text)", path, ErrNotPublic)
+// keepArg validates keep and joins it for the host: words of
+// [A-Za-z0-9._@/*+-] with an optional trailing ";". Anything else is refused
+// rather than escaped. An empty keep is ErrNotPublic.
+func keepArg(keep []string) (string, error) {
+	var words []string
+	for _, w := range keep {
+		if w == "" {
+			continue
+		}
+		body := strings.TrimSuffix(w, ";")
+		if body == "" {
+			continue
+		}
+		for i := 0; i < len(body); i++ {
+			c := body[i]
+			if !redactClass(c) && c != '.' && c != '_' && c != '@' && c != '-' && c != '*' || c == '=' {
+				return "", fmt.Errorf("hostcrypto: keep word %q is not a directive name", w)
+			}
+		}
+		words = append(words, w)
 	}
-	if again, k := RedactText(out); k != 0 || !bytes.Equal(again, out) {
+	if len(words) == 0 {
+		return "", ErrNotPublic
+	}
+	return strings.Join(words, " "), nil
+}
+
+// checkFiltered is the backstop for a host's filtering. It cannot re-derive
+// which lines the host kept (a continuation line is kept for its
+// predecessor's sake), so it checks the properties that matter: no NUL or
+// 0x01, no PEM BEGIN line, no run of RedactRunLength base64 characters, no
+// more lines than the bound. Anything else is cleared and refused.
+func checkFiltered(path string, out []byte, n int) ([]byte, int, error) {
+	bad := bytes.IndexByte(out, 0) >= 0 || bytes.IndexByte(out, 1) >= 0
+	lines := 0
+	for _, s := range configLines(out) {
+		lines++
+		if isBeginLine(s) || hasLongRun(s) {
+			bad = true
+		}
+	}
+	if bad || lines > maxConfigLines {
 		clear(out)
-		return nil, 0, fmt.Errorf("%s: %w (the host's redaction left material)", path, ErrNotPublic)
+		return nil, 0, fmt.Errorf("%s: %w (the host's filtering left material)", path, ErrNotPublic)
 	}
 	return out, n, nil
+}
+
+// sshLinesParse requires every SSH key line of a public read to decode and
+// parse as a key of the type it declares: stronger than the host's prefix
+// and length rule, which needs no decoder.
+func sshLinesParse(b []byte) bool {
+	for _, s := range pemLines(b) {
+		typ, blob, ok := strings.Cut(s, " ")
+		if !ok {
+			continue
+		}
+		if _, known := findSSHKeyType(typ); !known {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(blob)
+		if err != nil {
+			return false
+		}
+		pub, err := ssh.ParsePublicKey(raw)
+		if err != nil || pub.Type() != typ {
+			return false
+		}
+	}
+	return true
 }
 
 // parseRedactionCount finds awk's "vista-redactions:N" line.

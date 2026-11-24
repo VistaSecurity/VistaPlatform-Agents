@@ -43,7 +43,7 @@ func tgtIdentifyOut(in inspection) string {
 		return 0
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "size:%d\nmagic:%s\nnul:%d\n", in.size, hex.EncodeToString(in.magic), b01(in.nul))
+	fmt.Fprintf(&b, "size:%d\nmagic:%s\nnul:%d\nutf16:%d\n", in.size, hex.EncodeToString(in.magic), b01(in.nul), b01(in.utf16Private))
 	for _, l := range in.labels {
 		b.WriteString("label:" + l + "\n")
 	}
@@ -69,7 +69,7 @@ func TestRemoteUnixArgv(t *testing.T) {
 			rt := NewRemoteUnixTarget(fr, platform)
 			_, _ = rt.Identify(context.Background(), p)
 			_, _ = rt.Stat(context.Background(), p)
-			_, _, _ = rt.ReadText(context.Background(), p)
+			_, _, _ = rt.ReadText(context.Background(), p, []string{"ciphers", "ssl_protocols;"})
 			runs := fr.recordedRuns()
 			if len(runs) != 3 {
 				t.Fatalf("%s %q: %d runs", platform, p, len(runs))
@@ -85,7 +85,7 @@ func TestRemoteUnixArgv(t *testing.T) {
 			if !reflect.DeepEqual(runs[1], wantStat) {
 				t.Errorf("%s stat argv for %q:\n got %q\nwant %q", platform, p, runs[1], wantStat)
 			}
-			wantText := []string{"env", "LC_ALL=C", "sh", "-c", readTextScript, "sh", p, platform, "8000000"}
+			wantText := []string{"env", "LC_ALL=C", "sh", "-c", readTextScript, "sh", p, platform, "8000000", "ciphers ssl_protocols;"}
 			if !reflect.DeepEqual(runs[2], wantText) {
 				t.Errorf("%s readtext argv for %q:\n got %q", platform, p, runs[2])
 			}
@@ -291,7 +291,7 @@ func TestRemoteUnixErrors(t *testing.T) {
 		if _, err := rt.Identify(context.Background(), "/x"); exit != 7 && exit != 8 && !errors.Is(err, want) {
 			t.Errorf("identify exit %d: %v", exit, err)
 		}
-		if _, _, err := rt.ReadText(context.Background(), "/x"); !errors.Is(err, want) {
+		if _, _, err := rt.ReadText(context.Background(), "/x", []string{"a"}); !errors.Is(err, want) {
 			t.Errorf("readtext exit %d: %v", exit, err)
 		}
 	}
@@ -337,7 +337,7 @@ func TestRemoteUnixErrors(t *testing.T) {
 	// A label the host returns that is not a valid label makes the file not
 	// public and is not kept.
 	fr = newTgtFakeRunner(func([]string) tgtResult {
-		return tgtResult{stdout: "size:10\nmagic:2d2d2d2d2d424547\nnul:0\nlabel:CERTIFICATE\nlabel:bad label\nflags:0 0 0 0 0 0 0 2\n"}
+		return tgtResult{stdout: "size:10\nmagic:2d2d2d2d2d424547\nnul:0\nutf16:0\nlabel:CERTIFICATE\nlabel:bad label\nflags:0 0 0 0 0 0 0 2\n"}
 	})
 	id, err := NewRemoteUnixTarget(fr, "linux").Identify(context.Background(), "/x.pem")
 	if err != nil || id.Public() || len(id.PEMLabels) != 1 {
@@ -345,7 +345,7 @@ func TestRemoteUnixErrors(t *testing.T) {
 	}
 	// The host's redaction count is required.
 	fr = newTgtFakeRunner(func([]string) tgtResult { return tgtResult{stdout: "a = b\n"} })
-	if _, _, err := NewRemoteUnixTarget(fr, "linux").ReadText(context.Background(), "/x"); err == nil {
+	if _, _, err := NewRemoteUnixTarget(fr, "linux").ReadText(context.Background(), "/x", []string{"a"}); err == nil {
 		t.Error("readtext without a count accepted")
 	}
 }
@@ -365,7 +365,6 @@ func TestRemoteUnixReadFileGuard(t *testing.T) {
 		{"pkcs8", "/etc/ssl/private/server.key", keyPEM},
 		{"mixed", "/k/both.pem", append(append([]byte(nil), certPEM...), keyPEM...)},
 		{"dashed private label", "/k/dash.key", []byte("-----BEGIN X-PRIVATE KEY-----\nAAAA\n-----END X-PRIVATE KEY-----\n")},
-		{"cert then secret", "/k/cert_then_secret.pem", append(append([]byte(nil), certPEM...), "PrivateKey: "+secret+"\n"...)},
 		{"wireguard text", "/etc/wireguard/wg0.conf", []byte("[Interface]\nPrivateKey = " + secret + "\n")},
 		{"bare base64", "/k/private.key", []byte(secret + "\n")},
 		{"jks", "/k/a.jks", append(append([]byte(nil), magicJKS...), 0, 0, 0, 2)},
@@ -411,6 +410,29 @@ func TestRemoteUnixReadFileGuard(t *testing.T) {
 		t.Fatalf("runs: %d", len(runs))
 	}
 
+	// A certificate with a secret pasted after it: the read returns the
+	// certificate and nothing else; a host that sent the rest is refused.
+	cts := append(append([]byte(nil), certPEM...), "PrivateKey: "+secret+"\n"...)
+	for _, honest := range []bool{true, false} {
+		fr := newTgtFakeRunner(func(argv []string) tgtResult {
+			if argv[4] == readScript {
+				if !honest {
+					return tgtResult{stdout: string(cts)}
+				}
+				pub, _ := publicContent(cts)
+				return tgtResult{stdout: string(pub)}
+			}
+			return tgtResult{stdout: tgtIdentifyFor(cts)}
+		})
+		b, err := NewRemoteUnixTarget(fr, "linux").ReadFile(context.Background(), "/k/cert_then_secret.pem")
+		if honest && (err != nil || string(b) != string(certPEM)) {
+			t.Fatalf("cert then secret: %v %q", err, b)
+		}
+		if !honest && !errors.Is(err, ErrNotPublic) {
+			t.Fatalf("a host returning the secret was not refused: %v", err)
+		}
+	}
+
 	// The recheck: the host said "certificate", the bytes are a key.
 	fr = newTgtFakeRunner(func(argv []string) tgtResult {
 		if argv[4] == readScript {
@@ -439,9 +461,9 @@ func TestRemoteUnixReadFileGuard(t *testing.T) {
 // tgtRealToolsAvailable reports whether this machine can run the remote Unix
 // commands for real, through a LocalRunner.
 func tgtRealToolsAvailable() bool {
-	if runtime.GOOS != "linux" {
-		// The scripts pin files through /proc/self/fd on Linux; on macOS the
-		// darwin path would need its own run (not available here).
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		// Linux pins through /proc/self/fd, macOS through fstat of fd 3; a
+		// test binary cross-compiled for a Mac runs every real-tools test.
 		return false
 	}
 	for _, p := range []string{"sh", "env", "find", "stat", "awk", "head", "tail", "od", "tr", "wc", "cat"} {

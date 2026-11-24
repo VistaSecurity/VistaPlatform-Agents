@@ -452,7 +452,7 @@ func TestCollectThreadsMaxFileBytes(t *testing.T) {
 	if _, err := Collect(context.Background(), ft, Options{Platform: "linux", MaxFileBytes: 50}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ft.ReadText(context.Background(), "/x.conf"); !errors.Is(err, ErrFileTooLarge) {
+	if _, _, err := ft.ReadText(context.Background(), "/x.conf", []string{"a"}); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("bound not threaded: %v", err)
 	}
 }
@@ -468,4 +468,52 @@ func TestLocalRunnerRunInput(t *testing.T) {
 		t.Fatalf("RunInput: %q %d %v", out, exit, err)
 	}
 	var _ hostinventory.InputRunner = (*hostinventory.SSHRunner)(nil)
+}
+
+// TestReadConfigIsTheOnlyPath (review item F): readConfig asks the target
+// for exactly the product's keep words and refuses a product without them
+// before the target is asked anything; the sweep reads no file at all, so a
+// sweep hit is never read as text and a non-public file never as a file.
+func TestReadConfigIsTheOnlyPath(t *testing.T) {
+	saved := configKeepWords
+	t.Cleanup(func() { configKeepWords = saved })
+	configKeepWords = map[string][]string{"wireguard": {"address", "listenport"}}
+
+	conf := []byte("[Interface]\nPrivateKey = " + strings.Repeat("Q", 44) + "\nAddress = 10.0.0.1/24\npassword = hunter2\n")
+	ft := newTgtFakeTarget(false).file("/etc/wireguard/wg0.conf", conf)
+	c := tgtCollection(ft, Options{})
+	got, err := c.readConfig(context.Background(), "/etc/wireguard/wg0.conf", "wireguard")
+	if err != nil || string(got) != "[Interface]\nAddress = 10.0.0.1/24\n" {
+		t.Fatalf("readConfig = %q, %v", got, err)
+	}
+	if len(ft.keeps) != 1 || strings.Join(ft.keeps[0], ",") != "address,listenport" {
+		t.Fatalf("keep words sent: %q", ft.keeps)
+	}
+	before := len(ft.recorded())
+	if _, err := c.readConfig(context.Background(), "/etc/wireguard/wg0.conf", "unknown-product"); !errors.Is(err, ErrNotPublic) {
+		t.Fatalf("product without keep words: %v", err)
+	}
+	if len(ft.recorded()) != before {
+		t.Fatal("the target was asked for a product without keep words")
+	}
+
+	// The sweep over a tree of text secrets, keys and certificates.
+	_, keyPEM, _, _ := tgtMaterial(t)
+	certPEM, _, _, _ := tgtMaterial(t)
+	tree := newTgtFakeTarget(false).
+		file("/srv/wg0.conf", conf).
+		file("/srv/app/.env", []byte("DB_PASSWORD=hunter2\nAPI_TOKEN="+strings.Repeat("Z", 44)+"\n")).
+		file("/srv/app/server.key", keyPEM).
+		file("/srv/app/server.crt", certPEM).
+		file("/srv/app/id_ed25519", keyPEM)
+	sc := tgtCollection(tree, Options{})
+	hits := sweep(context.Background(), sc, []string{"/srv"})
+	if len(hits) == 0 {
+		t.Fatal("no hits; the test proves nothing")
+	}
+	for _, call := range tree.recorded() {
+		if strings.HasPrefix(call, "readtext ") || strings.HasPrefix(call, "read ") || strings.HasPrefix(call, "read-refused ") {
+			t.Fatalf("the sweep read a file: %s", call)
+		}
+	}
 }
