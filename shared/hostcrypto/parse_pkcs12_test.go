@@ -645,16 +645,21 @@ func TestKsRC2(t *testing.T) {
 }
 
 func FuzzParsePKCS12(f *testing.F) {
-	fx := ksMakeP12Fixture(f)
+	// Small seeds at low iteration counts, so the fuzzer spends its time on
+	// structure rather than on PBKDF2 and minimisation does not stall. The
+	// budget, not the seeds, bounds the cost of what it mutates them into.
+	key := ksTestEd25519(f)
+	leaf := ksTestCert(f, key, "f", false)
 	for _, enc := range []*pkcs12.Encoder{pkcs12.Modern2023, pkcs12.LegacyRC2, pkcs12.Modern2026} {
-		b, err := enc.Encode(fx.key, fx.leaf, nil, "changeit")
+		b, err := enc.WithIterations(1).Encode(key, leaf, nil, "changeit")
 		if err != nil {
 			f.Fatal(err)
 		}
 		f.Add(b)
 	}
-	kt, _, _ := ksKeytoolPFX(f, "changeit", false, make([]byte, 16))
-	f.Add(kt)
+	inner := []ksSafeBag{ksCertSafeBag(f, leaf.Raw, ksAttrName(f, "a"), ksAttrKeyID(f, []byte{1})), ksShroudedSafeBag(f, 2_000_000_000, make([]byte, 16), ksAttrKeyID(f, []byte{1}))}
+	f.Add(ksBuildPFX(f, nil, ksEncryptedPart(f, "", 1, inner...)))
+	f.Add(ksBuildPFX(f, ksStr("changeit"), ksDataPart(f, inner...)))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		start := time.Now()
 		got, _ := ksParsePKCS12(b, true, 50)

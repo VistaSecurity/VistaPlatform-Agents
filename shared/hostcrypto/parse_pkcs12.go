@@ -337,10 +337,12 @@ type ksP12Structure struct {
 
 // ksMaxTrialWork bounds the key-derivation work a default-password trial does
 // on one file, summed over every password tried and every part opened, in
-// iterations of the underlying KDF (a PBKDF2 output block or a PKCS#12 KDF
-// hash chain counts once per iteration). 4,000,000 is a few hundred
-// milliseconds; real files ask for 1 to 600,000 per derivation. A file that
-// would need more is not tried, and says so in DefaultsNotTried.
+// hash computations: an iteration of the PKCS#12 KDF counts 1, an iteration
+// of PBKDF2 (an HMAC) counts 2 per output block. 4,000,000 is under a second
+// on a laptop core. Common writers ask for 1 to 10,000 iterations (OpenSSL
+// 2048, Java 10,000), which costs a few hundred thousand; a file asking for
+// more than about 300,000 per derivation is not tried, and says so in
+// DefaultsNotTried.
 const ksMaxTrialWork = 4_000_000
 
 // The reasons a default-password trial did not run.
@@ -1041,7 +1043,9 @@ func ksPBKDF2(kdf ksAlgorithmIdentifier, keyLen int) (derive func(pw []byte) []b
 		}
 		return k
 	}
-	return derive, ksMulCost(iters, (keyLen+hlen-1)/hlen), keyLen, true
+	// Each PBKDF2 iteration is an HMAC, two hash computations; the PKCS#12
+	// KDF's is one. Counting them so keeps the budget a bound on time.
+	return derive, ksMulCost(iters, 2*((keyLen+hlen-1)/hlen)), keyLen, true
 }
 
 // ksP12Decrypter prepares decryption of an encryptedData part: the schemes
