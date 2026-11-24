@@ -7,7 +7,9 @@
 package hostcrypto
 
 import (
+	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -120,4 +122,30 @@ func localDevice(path string, _ fs.FileInfo) (uint64, bool) {
 		h *= 1099511628211
 	}
 	return h, true
+}
+
+// openRegular opens path for reading only if it is a regular file. Windows
+// has no FIFOs in the file namespace; the check still refuses directories and
+// devices, and the open file is checked again.
+func openRegular(path string) (*os.File, int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, mapOSError(path, err)
+	}
+	if fi.IsDir() {
+		return nil, 0, fmt.Errorf("hostcrypto: %s is a directory", path)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	f, err := os.Open(path) //nolint:gosec // reading the host's files is this package's purpose
+	if err != nil {
+		return nil, 0, mapOSError(path, err)
+	}
+	fi, err = f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	return f, fi.Size(), nil
 }

@@ -19,26 +19,26 @@ import (
 const (
 	defaultMaxFiles     = 200000
 	defaultMaxFileBytes = 10 << 20 // 10 MiB
-	// identifyScanBytes is how much of a file the LOCAL target reads to find
-	// PEM labels. A remote target's grep reads the whole file on the host,
-	// but returns only the labels.
-	identifyScanBytes = 1 << 20
 	// maxDeniedListed bounds how many unreadable directory paths a
 	// [ListError] carries; DeniedCount has the total.
 	maxDeniedListed = 100
 )
 
-// ErrFileTooLarge is returned by a target's ReadFile for a file over the read
-// bound (10 MiB). The collector records it as the "max_file_bytes" limit.
-var ErrFileTooLarge = errors.New("hostcrypto: file exceeds the read bound")
+// errNotRegular is returned by Identify, ReadFile and ReadText for a path
+// that exists but is not a regular file: a FIFO, a device, a socket. Opening
+// a FIFO to look at it blocks forever, so every target checks first. It is
+// deliberately not ErrNotPublic (nothing was refused for being private) and
+// not ErrNotExist.
+var errNotRegular = errors.New("hostcrypto: not a regular file")
 
 // ListError is what [Target.List] returns when the walk finished but did not
-// see everything: some directories could not be read, a bound stopped it, or
-// both. The files it did see are returned beside it and are real.
+// see everything. The files it did see are returned beside it and are real.
 //
 // It matches [ErrPermission] with errors.Is when any directory was denied and
-// [ErrListTruncated] when a bound stopped the walk, so a caller can test for
-// either without a type assertion, and both when both happened.
+// [ErrListTruncated] when a bound stopped the walk. Unreadable and OverSize
+// are counts of files that were seen and could not be returned; they do not
+// match either sentinel, but they make the error non-nil, so nothing a walk
+// passes over is silent.
 type ListError struct {
 	// Denied are directories the account could not read, at most 100 of
 	// them. DeniedCount is how many there were in all.
@@ -47,13 +47,25 @@ type ListError struct {
 	// Truncated is true when MaxFiles (or a remote output bound) stopped the
 	// walk.
 	Truncated bool
+	// Unreadable counts entries that could not be stat'ed or read for a
+	// reason other than a permission denial (a name too long, an I/O error,
+	// an entry gone mid-walk).
+	Unreadable int
+	// OverSize counts regular files skipped for MaxSizeBytes.
+	OverSize int
 }
 
-// Error says what happened in a few words. It names a count, not the paths.
+// Error says what happened in a few words. It names counts, not paths.
 func (e *ListError) Error() string {
 	var parts []string
 	if e.DeniedCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d directories could not be read", e.DeniedCount))
+	}
+	if e.Unreadable > 0 {
+		parts = append(parts, fmt.Sprintf("%d entries could not be read", e.Unreadable))
+	}
+	if e.OverSize > 0 {
+		parts = append(parts, fmt.Sprintf("%d files over the size bound were skipped", e.OverSize))
 	}
 	if e.Truncated {
 		parts = append(parts, "the listing stopped at a bound")
@@ -85,7 +97,7 @@ func (e *ListError) addDenied(p string) {
 
 // orNil returns e when it records anything, else nil.
 func (e *ListError) orNil() error {
-	if e.DeniedCount == 0 && !e.Truncated {
+	if e.DeniedCount == 0 && !e.Truncated && e.Unreadable == 0 && e.OverSize == 0 {
 		return nil
 	}
 	return e
@@ -96,13 +108,24 @@ func (e *ListError) orNil() error {
 // library, so a private key file is parsed in the agent's memory and never
 // leaves it.
 type LocalTarget struct {
-	runner *hostinventory.LocalRunner
-	ids    *idCache
+	runner   *hostinventory.LocalRunner
+	ids      *idCache
+	maxBytes int64
 }
 
 // NewLocalTarget returns the target for the host the agent runs on.
 func NewLocalTarget() *LocalTarget {
-	return &LocalTarget{runner: hostinventory.NewLocalRunner(), ids: newIDCache()}
+	return &LocalTarget{runner: hostinventory.NewLocalRunner(), ids: newIDCache(), maxBytes: defaultMaxFileBytes}
+}
+
+// SetMaxFileBytes sets the read bound (ReadFile, ReadText, and the window
+// Identify scans). n <= 0 restores the default of 10 MiB. [Collect] sets it
+// from Options.MaxFileBytes.
+func (t *LocalTarget) SetMaxFileBytes(n int64) {
+	if n <= 0 {
+		n = defaultMaxFileBytes
+	}
+	t.maxBytes = n
 }
 
 // Run executes argv locally, without a shell.
@@ -113,34 +136,55 @@ func (t *LocalTarget) Run(ctx context.Context, argv []string) ([]byte, []byte, i
 // Local is true: bytes read here stay on this host.
 func (t *LocalTarget) Local() bool { return true }
 
-// ReadFile reads a local file of at most 10 MiB. A larger file is
+// readWindow opens path as a regular file (never blocking on a FIFO swapped
+// in after the check) and reads at most limit bytes. It returns the bytes and
+// the file's size.
+func readWindow(path string, limit int64) ([]byte, int64, error) {
+	f, size, err := openRegular(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, 0, mapOSError(path, err)
+	}
+	return b, size, nil
+}
+
+// ReadFile reads a local file within the read bound. A larger file is
 // [ErrFileTooLarge], not a truncated read: a cut-off PEM bundle parses and is
 // silently short.
 func (t *LocalTarget) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path) //nolint:gosec // reading the host's files is this package's purpose
+	b, size, err := readWindow(path, t.maxBytes+1)
 	if err != nil {
-		return nil, mapOSError(path, err)
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	if fi, err := f.Stat(); err == nil {
-		if fi.IsDir() {
-			return nil, fmt.Errorf("hostcrypto: %s is a directory", path)
-		}
-		if fi.Size() > defaultMaxFileBytes {
-			return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
-		}
-	}
-	b, err := io.ReadAll(io.LimitReader(f, defaultMaxFileBytes+1))
-	if err != nil {
-		return nil, mapOSError(path, err)
-	}
-	if len(b) > defaultMaxFileBytes {
+	if size > t.maxBytes || int64(len(b)) > t.maxBytes {
+		clear(b)
 		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
 	return b, nil
+}
+
+// ReadText reads a configuration file and redacts it with [RedactText], the
+// same rule a remote host applies, so a parser sees the same bytes in both
+// modes. A file with a NUL byte or a keystore's magic is not text and is
+// refused with ErrNotPublic.
+func (t *LocalTarget) ReadText(ctx context.Context, path string) ([]byte, int, error) {
+	b, err := t.ReadFile(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer clear(b)
+	if textRefused(b) {
+		return nil, 0, fmt.Errorf("%s: %w (not text)", path, ErrNotPublic)
+	}
+	out, n := RedactText(b)
+	return out, n, nil
 }
 
 // Stat describes path itself, not what a link points at.
@@ -157,55 +201,56 @@ func (t *LocalTarget) Stat(ctx context.Context, path string) (FileInfo, error) {
 
 // fileInfo turns an os.FileInfo into this package's, with the platform's
 // ownership and permission reading (target_local_unix.go,
-// target_local_windows.go).
+// target_local_windows.go). A Windows junction, which Go reports as an
+// irregular file rather than a link, is reported as a link when it can be
+// read as one.
 func (t *LocalTarget) fileInfo(path string, fi os.FileInfo) FileInfo {
 	out := FileInfo{
 		Path:       path,
 		Size:       fi.Size(),
 		ModifiedAt: fi.ModTime().UTC().Format(time.RFC3339),
 		IsDir:      fi.IsDir(),
-		IsSymlink:  fi.Mode()&fs.ModeSymlink != 0,
 	}
-	if out.IsSymlink {
+	if isLinkLike(fi) {
 		if target, err := os.Readlink(path); err == nil {
-			out.LinkTarget = target
+			out.IsSymlink, out.LinkTarget, out.IsDir = true, target, false
+		} else if fi.Mode()&fs.ModeSymlink != 0 {
+			out.IsSymlink = true
 		}
 	}
 	localOwnership(path, fi, &out, t.ids)
 	return out
 }
 
-// Identify reads the first [MagicBytes] of path and looks for PEM labels in
-// its first 1 MiB. It follows a symbolic link, as a read would.
+// isLinkLike is a symbolic link, or an irregular entry that may be a
+// junction or mount point.
+func isLinkLike(fi fs.FileInfo) bool {
+	return fi.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
+// Identify inspects the first read-bound bytes of path: the same window a
+// remote target scans, so both modes see the same labels and flags. It
+// follows a symbolic link, as a read would, and refuses anything that is not
+// a regular file without opening it.
 func (t *LocalTarget) Identify(ctx context.Context, path string) (Identity, error) {
 	if err := ctx.Err(); err != nil {
 		return Identity{}, err
 	}
-	f, err := os.Open(path) //nolint:gosec // identifying the host's files is this package's purpose
+	buf, size, err := readWindow(path, t.maxBytes)
 	if err != nil {
-		return Identity{}, mapOSError(path, err)
+		return Identity{}, err
 	}
-	defer func() { _ = f.Close() }()
-	if fi, err := f.Stat(); err == nil && fi.IsDir() {
-		return Identity{}, fmt.Errorf("hostcrypto: %s is a directory", path)
-	}
-	buf, err := io.ReadAll(io.LimitReader(f, identifyScanBytes))
-	if err != nil {
-		return Identity{}, mapOSError(path, err)
-	}
-	magic := buf
-	if len(magic) > MagicBytes {
-		magic = magic[:MagicBytes]
-	}
-	return identityFrom(path, magic, ScanPEMLabels(buf, maxPEMLabels), hasPrivateMarker(buf)), nil
+	defer clear(buf)
+	return identityFrom(path, inspect(buf, size)), nil
 }
 
 // List walks root with filepath.WalkDir, which never follows a symbolic link:
-// a link is reported as itself (IsSymlink, LinkTarget) and never descended.
+// a link (or junction) is reported as itself and never descended.
 //
-// Unreadable directories do not stop the walk; they are collected into a
-// [ListError] returned with the files that were seen. A cancelled context
-// returns what was seen and the context's error.
+// Unreadable directories and entries do not stop the walk; they are counted
+// into a [ListError] returned with the files that were seen, as are files
+// skipped for size. A cancelled context returns what was seen and the
+// context's error.
 func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) ([]FileInfo, error) {
 	root = filepath.Clean(root)
 	rootInfo, err := os.Lstat(root)
@@ -226,12 +271,24 @@ func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) (
 	var out []FileInfo
 	lerr := &ListError{}
 
+	// keep applies the Names and size filters, counting size skips.
+	keep := func(path string, info fs.FileInfo) bool {
+		if len(opts.Names) > 0 && !matchAnyName(filepath.Base(path), opts.Names) {
+			return false
+		}
+		if info.Mode().IsRegular() && info.Size() > maxSize {
+			lerr.OverSize++
+			return false
+		}
+		return true
+	}
+
 	// A root that is itself a file or a link is its own listing.
 	if !rootInfo.IsDir() {
-		if keep := listKeep(root, rootInfo, opts.Names, maxSize); keep {
+		if (rootInfo.Mode().IsRegular() || isLinkLike(rootInfo)) && keep(root, rootInfo) {
 			out = append(out, t.fileInfo(root, rootInfo))
 		}
-		return out, nil
+		return out, lerr.orNil()
 	}
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -242,11 +299,14 @@ func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) (
 			if path == root {
 				return mapOSError(root, err)
 			}
-			if errors.Is(err, fs.ErrPermission) {
+			switch {
+			case errors.Is(err, fs.ErrPermission):
 				lerr.addDenied(path)
+			case errors.Is(err, fs.ErrNotExist):
+				// Removed mid-walk: the host changed under us, not a gap.
+			default:
+				lerr.Unreadable++
 			}
-			// Anything else (a file removed mid-walk) is the host changing
-			// under us, not a gap in what we were allowed to see.
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -267,6 +327,7 @@ func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) (
 		}
 		depth := strings.Count(rel, string(filepath.Separator))
 
+		typ := d.Type()
 		switch {
 		case d.IsDir():
 			if depth >= opts.MaxDepth {
@@ -280,12 +341,22 @@ func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) (
 				}
 			}
 			return nil
-		case d.Type()&fs.ModeSymlink != 0, d.Type().IsRegular():
+		case typ&fs.ModeSymlink != 0, typ.IsRegular(), typ&fs.ModeIrregular != 0:
 			info, ierr := d.Info()
 			if ierr != nil {
+				if !errors.Is(ierr, fs.ErrNotExist) {
+					lerr.Unreadable++
+				}
 				return nil
 			}
-			if !listKeep(path, info, opts.Names, maxSize) {
+			if typ&fs.ModeIrregular != 0 {
+				// A junction is reported as a link; any other irregular
+				// entry is not a file.
+				if _, lerr2 := os.Readlink(path); lerr2 != nil {
+					return nil
+				}
+			}
+			if !keep(path, info) {
 				return nil
 			}
 			if len(out) >= maxFiles {
@@ -295,8 +366,8 @@ func (t *LocalTarget) List(ctx context.Context, root string, opts ListOptions) (
 			out = append(out, t.fileInfo(path, info))
 			return nil
 		default:
-			// Devices, sockets, FIFOs, Windows junctions: not files, and a
-			// FIFO opened to identify it would block.
+			// Devices, sockets, FIFOs: not files, and a FIFO opened to
+			// identify it would block.
 			return nil
 		}
 	})
@@ -327,18 +398,6 @@ func (c *idCache) lookup(key string, fn func() string) string {
 	v := fn()
 	c.names[key] = v
 	return v
-}
-
-// listKeep applies the Names and size filters to one entry. Symbolic links
-// are kept regardless of size: their size is the link's, not the file's.
-func listKeep(path string, info fs.FileInfo, names []string, maxSize int64) bool {
-	if len(names) > 0 && !matchAnyName(filepath.Base(path), names) {
-		return false
-	}
-	if info.Mode().IsRegular() && info.Size() > maxSize {
-		return false
-	}
-	return true
 }
 
 // matchAnyName reports whether base matches one of the glob patterns. A

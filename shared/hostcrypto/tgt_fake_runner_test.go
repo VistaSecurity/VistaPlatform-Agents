@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"unicode/utf16"
@@ -103,30 +103,69 @@ func (r *tgtRecordingRunner) ReadFile(ctx context.Context, path string) ([]byte,
 	return r.inner.ReadFile(ctx, path)
 }
 
-// tgtPSArgsRE finds the base64 argument literal in a decoded script.
-var tgtPSArgsRE = regexp.MustCompile(`FromBase64String\('([A-Za-z0-9+/=]*)'\)`)
+// tgtFakeInputRunner is tgtFakeRunner with stdin: it implements
+// hostinventory.InputRunner, as the SSH and local runners do, and records
+// what was sent on stdin beside each argv.
+type tgtFakeInputRunner struct {
+	*tgtFakeRunner
+	inputHandler func(argv []string, stdin []byte) tgtResult
+	stdins       [][]byte
+}
 
-// tgtDecodePS takes a PowerShell argv as RemoteWindowsTarget builds it and
-// returns the script and its decoded $a arguments. It fails the test when the
-// argv is not exactly the five-element -EncodedCommand form.
-func tgtDecodePS(t *testing.T, argv []string) (script string, args map[string]any) {
+func newTgtFakeInputRunner(h func(argv []string, stdin []byte) tgtResult) *tgtFakeInputRunner {
+	return &tgtFakeInputRunner{tgtFakeRunner: newTgtFakeRunner(nil), inputHandler: h}
+}
+
+func (f *tgtFakeInputRunner) RunInput(_ context.Context, argv []string, stdin []byte) ([]byte, []byte, int, error) {
+	f.mu.Lock()
+	f.runs = append(f.runs, append([]string(nil), argv...))
+	f.stdins = append(f.stdins, append([]byte(nil), stdin...))
+	f.mu.Unlock()
+	r := f.inputHandler(argv, stdin)
+	return []byte(r.stdout), []byte(r.stderr), r.exit, r.err
+}
+
+var _ hostinventory.InputRunner = (*tgtFakeInputRunner)(nil)
+
+var (
+	tgtPSStdinRE = regexp.MustCompile(`^iex \(\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([A-Za-z0-9+/=]*)'\)\)\)\r\n$`)
+	tgtPSArgsRE  = regexp.MustCompile(`^\$vistaArgs = '([A-Za-z0-9+/=]*)'\n`)
+)
+
+// tgtDecodePS takes what RemoteWindowsTarget sent (argv, and stdin on the
+// InputRunner path) and returns the script body (without its argument line)
+// and its decoded $a arguments. It fails the test when the shape is not
+// exactly one of the two forms.
+func tgtDecodePS(t *testing.T, argv []string, stdin []byte) (script string, args map[string]any) {
 	t.Helper()
-	if len(argv) != 5 || argv[0] != "powershell" || argv[1] != "-NoProfile" ||
-		argv[2] != "-NonInteractive" || argv[3] != "-EncodedCommand" {
-		t.Fatalf("not a PowerShell -EncodedCommand argv: %q", argv)
+	var full string
+	switch {
+	case reflect.DeepEqual(argv, psStdinArgv):
+		m := tgtPSStdinRE.FindSubmatch(stdin)
+		if m == nil {
+			t.Fatalf("stdin is not the one-line bootstrap")
+		}
+		raw, err := base64.StdEncoding.DecodeString(string(m[1]))
+		if err != nil {
+			t.Fatalf("stdin script is not base64")
+		}
+		full = string(raw)
+	case len(argv) == 5 && argv[0] == "powershell" && argv[1] == "-NoProfile" && argv[2] == "-NonInteractive" && argv[3] == "-EncodedCommand":
+		raw, err := base64.StdEncoding.DecodeString(argv[4])
+		if err != nil || len(raw)%2 != 0 {
+			t.Fatalf("encoded command is not UTF-16LE base64")
+		}
+		units := make([]uint16, len(raw)/2)
+		for i := range units {
+			units[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
+		}
+		full = string(utf16.Decode(units))
+	default:
+		t.Fatalf("not a PowerShell invocation this target sends: %q", argv)
 	}
-	raw, err := base64.StdEncoding.DecodeString(argv[4])
-	if err != nil || len(raw)%2 != 0 {
-		t.Fatalf("encoded command is not UTF-16LE base64")
-	}
-	units := make([]uint16, len(raw)/2)
-	for i := range units {
-		units[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
-	}
-	script = string(utf16.Decode(units))
-	m := tgtPSArgsRE.FindStringSubmatch(script)
+	m := tgtPSArgsRE.FindStringSubmatch(full)
 	if m == nil {
-		t.Fatalf("script carries no argument literal")
+		t.Fatalf("script does not start with its argument line")
 	}
 	j, err := base64.StdEncoding.DecodeString(m[1])
 	if err != nil {
@@ -135,19 +174,21 @@ func tgtDecodePS(t *testing.T, argv []string) (script string, args map[string]an
 	if err := json.Unmarshal(j, &args); err != nil {
 		t.Fatalf("argument literal is not JSON: %v", err)
 	}
-	return script, args
+	return full[len(m[0]):], args
 }
 
 // tgtPSKind names which of the target's scripts a decoded script is.
 func tgtPSKind(script string) string {
-	switch {
-	case strings.Contains(script, "ToBase64String([System.IO.File]::ReadAllBytes"):
+	switch script {
+	case psRead:
 		return "read"
-	case strings.Contains(script, "Select-String"):
+	case psReadText:
+		return "readtext"
+	case psIdentify:
 		return "identify"
-	case strings.Contains(script, "$stack"):
+	case psList:
 		return "list"
-	case strings.Contains(script, "psAcl $i.FullName"):
+	case psStat:
 		return "stat"
 	}
 	return "unknown"

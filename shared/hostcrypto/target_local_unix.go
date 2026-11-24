@@ -8,7 +8,9 @@
 package hostcrypto
 
 import (
+	"fmt"
 	"io/fs"
+	"os"
 	"os/user"
 	"strconv"
 	"syscall"
@@ -67,4 +69,32 @@ func localDevice(_ string, fi fs.FileInfo) (uint64, bool) {
 		return 0, false
 	}
 	return uint64(st.Dev), true //nolint:unconvert // Dev is int32 on darwin, uint64 on linux
+}
+
+// openRegular opens path for reading only if it is a regular file. It checks
+// with stat (following links, as the read will) before opening, and opens
+// with O_NONBLOCK so a FIFO swapped in between the check and the open cannot
+// block; the open file is checked again, and blocking mode does not matter
+// for a regular file.
+func openRegular(path string) (*os.File, int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, mapOSError(path, err)
+	}
+	if fi.IsDir() {
+		return nil, 0, fmt.Errorf("hostcrypto: %s is a directory", path)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // reading the host's files is this package's purpose
+	if err != nil {
+		return nil, 0, mapOSError(path, err)
+	}
+	fi, err = f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	return f, fi.Size(), nil
 }

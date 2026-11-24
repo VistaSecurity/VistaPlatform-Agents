@@ -14,11 +14,18 @@ import (
 // lets its bytes cross the connection ([Identity.Public]). Every rule below is
 // therefore written to fail towards "not public":
 //
-//   - A label this file does not recognise makes the file ClassUnknown, even
-//     beside certificate labels. "OpenVPN Static key V1" is a secret that
-//     carries a PEM-shaped header; a list of known public labels is an
-//     allowlist, and anything off it is not public.
-//   - Any label containing PRIVATE is a private key, whatever else it says.
+//   - Public is decided by an exact allowlist of labels (publicPEMLabels in
+//     redact.go), never by the absence of a private match. A label off the
+//     list is not public; one that says PRIVATE, SECRET or KEY in any case is
+//     a private key. "OpenVPN Static key V1" is a secret with a PEM-shaped
+//     header.
+//   - A BEGIN line that does not parse (lowercase, a dot, over 64
+//     characters, text after the dashes) makes the file not public, and its
+//     label is not returned: a label is shown only when it is 1 to 64
+//     characters of [A-Z0-9 -].
+//   - A public-looking file is still not public when anything outside its
+//     public blocks carries a long base64 run (a certificate with a secret
+//     pasted after it), when a block is unterminated, or when it holds a NUL.
 //   - A file name can make a file LESS public (a .p12 that looks like DER is a
 //     keystore) but never MORE: no name turns an unidentified file into a
 //     public one. The one name rule that yields a public class, an OpenSSH
@@ -34,7 +41,7 @@ import (
 const maxPEMLabels = 64
 
 // maxPEMLabelLen bounds one label. Real labels are under 40 characters.
-const maxPEMLabelLen = 80
+const maxPEMLabelLen = 64
 
 // pemLabelKind is what one PEM label says on its own.
 type pemLabelKind int
@@ -55,19 +62,22 @@ const (
 // public allowlist (OpenSSL writes them in capitals) and case-insensitive for
 // PRIVATE, so an oddly cased private label still fails closed.
 func classifyPEMLabel(label string) pemLabelKind {
-	l := strings.TrimSpace(label)
-	upper := strings.ToUpper(l)
-	switch {
-	case strings.HasPrefix(upper, "PGP "):
-		// PGP PRIVATE KEY BLOCK, PGP PUBLIC KEY BLOCK, PGP MESSAGE, PGP
-		// SIGNATURE: an armoured OpenPGP block. Checked before PRIVATE so a
-		// secret key block is reported as PGP, which is still not public.
-		return pemPGP
-	case strings.Contains(upper, "PRIVATE"):
-		return pemPrivate
+	l := label
+	upper := asciiUpper(l)
+	if !isPublicLabel(l) {
+		switch {
+		case strings.HasPrefix(upper, "PGP "):
+			// PGP PRIVATE KEY BLOCK, PGP PUBLIC KEY BLOCK, PGP MESSAGE: an
+			// armoured OpenPGP block. Checked first so a secret key block is
+			// reported as PGP, which is still not public.
+			return pemPGP
+		case strings.Contains(upper, "PRIVATE"), strings.Contains(upper, "SECRET"), strings.Contains(upper, "KEY"):
+			return pemPrivate
+		}
+		return pemOther
 	}
 	switch l {
-	case "CERTIFICATE", "TRUSTED CERTIFICATE", "X509 CERTIFICATE", "X.509 CERTIFICATE":
+	case "CERTIFICATE", "TRUSTED CERTIFICATE", "X509 CERTIFICATE":
 		return pemCertificate
 	case "PUBLIC KEY", "RSA PUBLIC KEY", "SSH2 PUBLIC KEY":
 		return pemPublicKey
@@ -75,7 +85,7 @@ func classifyPEMLabel(label string) pemLabelKind {
 		return pemCSR
 	case "X509 CRL":
 		return pemCRL
-	case "DH PARAMETERS", "X9.42 DH PARAMETERS":
+	case "DH PARAMETERS":
 		return pemDHParams
 	case "EC PARAMETERS":
 		return pemNeutral
@@ -331,97 +341,57 @@ func isPrintableText(b []byte) bool {
 	return true
 }
 
-// ScanPEMLabels returns the labels of the PEM headers in b, in order, at most
-// max of them (max <= 0 means the package bound of 64). It recognises the
-// RFC 7468 form "-----BEGIN X-----" and the RFC 4716 form "---- BEGIN X ----"
-// used by SSH2 public keys. It is pure and reads nothing outside b.
-//
-// The remote targets run the same two patterns on the host (see
-// [remotePEMPattern]), so a file is labelled the same way whichever side looks.
+// ScanPEMLabels returns the labels of the valid PEM BEGIN lines in b, in
+// order, at most max of them (max <= 0, or over 64, means 64). A valid line is
+// "-----BEGIN <label>-----" (RFC 7468) or "---- BEGIN <label> ----" (RFC
+// 4716, SSH2 public keys) with a label of 1 to 64 characters of [A-Z0-9 -];
+// anything else is not returned (and makes the file not public, which
+// Identify decides from the whole window, not from this list). Pure.
 func ScanPEMLabels(b []byte, max int) []string {
 	if max <= 0 || max > maxPEMLabels {
 		max = maxPEMLabels
 	}
-	var out []string
-	for len(b) > 0 && len(out) < max {
-		i5 := bytes.Index(b, []byte("-----BEGIN "))
-		i4 := bytes.Index(b, []byte("---- BEGIN "))
-		var start int
-		var closer []byte
-		switch {
-		case i5 < 0 && i4 < 0:
-			return out
-		case i4 < 0 || (i5 >= 0 && i5 < i4):
-			start, closer = i5+len("-----BEGIN "), []byte("-----")
-		default:
-			start, closer = i4+len("---- BEGIN "), []byte(" ----")
-		}
-		rest := b[start:]
-		label, ok := pemLabelAt(rest, closer)
-		if ok {
-			out = append(out, label)
-			b = rest[len(label)+len(closer):]
-			continue
-		}
-		b = rest
+	labels := inspect(b, int64(len(b))).labels
+	if len(labels) > max {
+		labels = labels[:max]
 	}
-	return out
+	return labels
 }
 
-// pemLabelAt reads a label from the start of b up to closer: one to 80 bytes,
-// none of them a dash or a line break, as the remote grep pattern requires.
-func pemLabelAt(b, closer []byte) (string, bool) {
-	end := bytes.Index(b, closer)
-	if end <= 0 || end > maxPEMLabelLen {
-		return "", false
+// identityFrom is how every target turns an inspection into an Identity:
+// classify by name, magic and labels, let a BEGIN line naming private
+// material make the file a private key, then refuse public status for any of
+// the reasons inspection found. It is the one place this rule lives; the
+// remote programs return inspection fields and Go decides here.
+func identityFrom(name string, in inspection) Identity {
+	labels := in.labels
+	if len(labels) > maxPEMLabels {
+		labels = labels[:maxPEMLabels]
 	}
-	label := b[:end]
-	if bytes.ContainsAny(label, "-\r\n") {
-		return "", false
-	}
-	return string(label), true
-}
-
-// hasPrivateMarker reports whether b contains a PEM header naming private
-// material anywhere, beyond the label bound. A bundle of 64 certificates
-// followed by a private key would otherwise identify as a certificate file.
-// The remote targets compute the same answer on the host.
-func hasPrivateMarker(b []byte) bool {
-	upper := bytes.ToUpper(b)
-	for {
-		i := bytes.Index(upper, []byte("BEGIN "))
-		if i < 0 {
-			return false
-		}
-		line := upper[i:]
-		if j := bytes.IndexAny(line, "\r\n"); j >= 0 {
-			line = line[:j]
-		}
-		// The label runs to the next dash, as in the remote pattern.
-		label := line[len("BEGIN "):]
-		if j := bytes.IndexByte(label, '-'); j >= 0 {
-			label = label[:j]
-		}
-		if bytes.Contains(label, []byte("PRIVATE")) {
-			return true
-		}
-		upper = upper[i+len("BEGIN "):]
-	}
-}
-
-// identityFrom is how every target assembles an Identity: classify by name and
-// markers, then let a private marker the label bound missed demote a public
-// answer. It is the one place this rule lives.
-func identityFrom(name string, magic []byte, labels []string, privateMarker bool) Identity {
-	id := ClassifyNamed(name, magic, labels)
-	if privateMarker {
+	id := ClassifyNamed(name, in.magic, labels)
+	if in.private {
 		switch id.Class {
+		case ClassPrivateKey, ClassMixed, ClassPGP, ClassKeystore:
 		case ClassCertificate:
 			id.Class = ClassMixed
-		case ClassPrivateKey, ClassMixed, ClassPGP, ClassKeystore:
 		default:
 			id.Class = ClassPrivateKey
 		}
+	}
+	if !id.Public() {
+		return id
+	}
+	switch {
+	case in.nul, in.bad, in.nonPublic, in.unterminated, in.truncated:
+		id.Class = ClassUnknown
+	case in.nLabel == 0:
+		// Public without a PEM label: only an OpenSSH .pub file, and only
+		// when every line is a public key line.
+		if id.Class != ClassPublicKey || in.sshBad || in.sshLines == 0 {
+			id.Class = ClassUnknown
+		}
+	case in.outsideRun:
+		id.Class = ClassUnknown
 	}
 	return id
 }

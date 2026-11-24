@@ -96,7 +96,8 @@ func TestClassifyLabels(t *testing.T) {
 		// Public classes together stay public, the strongest named.
 		{[]string{"CERTIFICATE", "X509 CRL"}, ClassCertificate},
 		// An unrecognised label is not public, even beside a certificate.
-		{[]string{"OpenVPN Static key V1"}, ClassUnknown},
+		{[]string{"OpenVPN Static key V1"}, ClassPrivateKey}, // says KEY, not on the allowlist
+		{[]string{"PKCS7"}, ClassUnknown},
 		{[]string{"CERTIFICATE", "PKCS7"}, ClassUnknown},
 		{[]string{"EC PARAMETERS"}, ClassUnknown},
 	}
@@ -278,32 +279,93 @@ func TestScanPEMLabels(t *testing.T) {
 	}
 }
 
-// TestPrivateMarkerBeyondLabelBound: 64 certificates followed by a private
-// key are labelled as certificates only, and the private marker demotes the
-// file. Without the marker the file would be public.
-func TestPrivateMarkerBeyondLabelBound(t *testing.T) {
+// tgtID classifies whole-file content as every target does.
+func tgtID(name string, b []byte) Identity {
+	return identityFrom(name, inspect(b, int64(len(b))))
+}
+
+// TestPublicIsAnAllowlist: items 2 and 13 of the review. Public is decided by
+// exact labels; anything else, however it is spelled, is not public, and a
+// malformed label is never returned.
+func TestPublicIsAnAllowlist(t *testing.T) {
 	certPEM, keyPEM, _, _ := tgtMaterial(t)
+	body := "MIIBkTCB+wIJAKHHIG...\n"
+	block := func(label string) string {
+		return "-----BEGIN " + label + "-----\n" + body + "-----END " + label + "-----\n"
+	}
+	cases := []struct {
+		name    string
+		content string
+		public  bool
+		class   Class
+		labels  string
+	}{
+		{"certificate", string(certPEM), true, ClassCertificate, "CERTIFICATE"},
+		{"dashed private label", block("X-PRIVATE KEY"), false, ClassPrivateKey, "X-PRIVATE KEY"},
+		{"secret label", block("MY SECRET"), false, ClassPrivateKey, "MY SECRET"},
+		{"key label", block("HMAC KEY"), false, ClassPrivateKey, "HMAC KEY"},
+		{"unlisted public-sounding key", block("EC PUBLIC KEY"), false, ClassPrivateKey, "EC PUBLIC KEY"},
+		{"lowercase label", "-----BEGIN OpenVPN Static key V1-----\n0123\n-----END OpenVPN Static key V1-----\n", false, ClassPrivateKey, ""},
+		{"lowercase begin word", string(certPEM) + "-----begin private key-----\n", true, ClassCertificate, "CERTIFICATE"},
+		{"dotted label", block("X9.42 DH PARAMETERS"), false, ClassText, ""},
+		{"base64 label", "-----BEGIN YY99uuY1gWotaYup510A3QVEZh0RN8YzrOkWD0reoNvzXMhgs5UEoQn1CmXQ-----\n", false, ClassText, ""},
+		{"label over 64", block(strings.Repeat("A", 65)), false, ClassText, ""},
+		{"text after the dashes", "-----BEGIN CERTIFICATE----- x\n" + body + "-----END CERTIFICATE-----\n", false, ClassText, ""},
+		{"cert then pasted secret", string(certPEM) + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", false, ClassUnknown, "CERTIFICATE"},
+		{"unterminated cert", "-----BEGIN CERTIFICATE-----\n" + body, false, ClassUnknown, "CERTIFICATE"},
+		{"cert with nested key, no END", "-----BEGIN CERTIFICATE-----\n" + body + string(keyPEM), false, ClassMixed, "CERTIFICATE,PRIVATE KEY"},
+		{"cert with NUL", string(certPEM) + "\x00", false, ClassUnknown, "CERTIFICATE"},
+		{"unknown label beside cert", string(certPEM) + block("PKCS7"), false, ClassUnknown, "CERTIFICATE,PKCS7"},
+		{"crlf certificate", strings.ReplaceAll(string(certPEM), "\n", "\r\n"), true, ClassCertificate, "CERTIFICATE"},
+		{"bag attributes before cert", "Bag Attributes\n    friendlyName: web\nsubject=/CN=x\n" + string(certPEM), true, ClassCertificate, "CERTIFICATE"},
+		{"ssh2 public key", "---- BEGIN SSH2 PUBLIC KEY ----\nComment: x\nAAAA\n---- END SSH2 PUBLIC KEY ----\n", true, ClassPublicKey, "SSH2 PUBLIC KEY"},
+	}
+	for _, tc := range cases {
+		id := tgtID("/x/f.pem", []byte(tc.content))
+		if id.Public() != tc.public || id.Class != tc.class || strings.Join(id.PEMLabels, ",") != tc.labels {
+			t.Errorf("%s: public=%v class=%q labels=%q, want %v %q %q", tc.name, id.Public(), id.Class, id.PEMLabels, tc.public, tc.class, tc.labels)
+		}
+		for _, l := range id.PEMLabels {
+			if len(l) > 64 || strings.Trim(l, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -") != "" {
+				t.Errorf("%s: returned label %q", tc.name, l)
+			}
+		}
+	}
+
+	// Past the 64-label bound a private key still makes the file not public.
 	var b []byte
-	for i := 0; i < maxPEMLabels; i++ {
+	for i := 0; i < maxPEMLabels+6; i++ {
 		b = append(b, certPEM...)
 	}
 	b = append(b, keyPEM...)
-	labels := ScanPEMLabels(b, 0)
-	if Classify(b[:MagicBytes], labels).Class != ClassCertificate {
-		t.Fatal("precondition: the labels alone should read as certificates")
+	id := tgtID("/x/bundle.pem", b)
+	if id.Public() || id.Class != ClassMixed || len(id.PEMLabels) != maxPEMLabels {
+		t.Fatalf("bundle: %q, %d labels", id.Class, len(id.PEMLabels))
 	}
-	if !hasPrivateMarker(b) {
-		t.Fatal("hasPrivateMarker missed the key")
+}
+
+// TestSSHPublicKeyFileRule: an OpenSSH .pub file is public only when every
+// line is a public key line.
+func TestSSHPublicKeyFileRule(t *testing.T) {
+	line := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC3x9g5sQ1oB7g5rQ8a8d7a3r0C2bWq3pXvJb2bq9N7a user@host\n"
+	cases := []struct {
+		content string
+		public  bool
+	}{
+		{line, true},
+		{"# comment\n\n" + line, false}, // public by content, but the magic is not a key type: Go is stricter than the host here
+		{line + line, true},
+		{line + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", false},
+		{"ssh-ed25519 AAAA " + strings.Repeat("Q", 44) + "\n", false},
+		{"ssh-ed25519  AAAA\n", false},
+		{"ssh-rsa AAAA==x\n", false},
 	}
-	id := identityFrom("/x/bundle.pem", b[:MagicBytes], labels, true)
-	if id.Public() || id.Class != ClassMixed {
-		t.Fatalf("identityFrom = %q, want mixed", id.Class)
+	for _, tc := range cases {
+		if got := tgtID("/home/u/.ssh/id.pub", []byte(tc.content)).Public(); got != tc.public {
+			t.Errorf("%q: public=%v", tc.content, got)
+		}
 	}
-	if hasPrivateMarker(certPEM) {
-		t.Fatal("hasPrivateMarker fired on a certificate")
-	}
-	// A text file is demoted too.
-	if id := identityFrom("/x/a.conf", []byte("# config"), nil, true); id.Public() {
-		t.Fatal("text with a private marker stayed public")
+	if tgtID("/x/id.txt", []byte(line)).Public() {
+		t.Error("an SSH key line in a non-.pub file is public")
 	}
 }

@@ -98,7 +98,14 @@ func TestLocalTargetListBounds(t *testing.T) {
 				}
 				return
 			}
-			if err != nil {
+			var lerr *ListError
+			switch {
+			case tc.name == "size":
+				// The file over the bound is counted, not dropped silently.
+				if !errors.As(err, &lerr) || lerr.OverSize != 1 || errors.Is(err, ErrListTruncated) || errors.Is(err, ErrPermission) {
+					t.Fatalf("err = %v, want OverSize 1", err)
+				}
+			case err != nil:
 				t.Fatalf("err = %v", err)
 			}
 			if got := tgtRels(t, dir, files); strings.Join(got, ",") != strings.Join(tc.want, ",") {

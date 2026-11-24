@@ -16,21 +16,27 @@ import (
 //
 //   - Paths are slash-separated and absolute. Parents are created on demand.
 //   - Identify classifies the stored bytes exactly as the real targets do
-//     (identityFrom over the first 8 bytes, the PEM labels and the private
-//     marker).
+//     (identityFrom over inspect of the read-bound window).
 //   - A REMOTE fake (local=false) refuses ReadFile of anything not public with
 //     ErrNotPublic, as RemoteUnixTarget and RemoteWindowsTarget do, so a pass
-//     tested on it meets the same guard it meets in production.
+//     tested on it meets the same guard it meets in production. Both kinds
+//     refuse a file over the read bound with ErrFileTooLarge.
+//   - ReadText refuses a file that is not text and redacts with RedactText,
+//     the rule every real target applies.
+//   - A FIFO (fifo) is not a regular file: Identify and the reads return
+//     errNotRegular, as the real targets do, and List skips it.
 //   - List honours MaxDepth, MaxFiles, MaxSizeBytes, Exclude and Names, never
-//     descends a symlink, and reports denied directories and truncation
-//     through a *ListError.
+//     descends a symlink, and reports denied directories, unreadable entries
+//     (unreadable), files over the size bound and truncation through a
+//     *ListError.
 //   - Run answers from a table keyed by the argv joined with spaces; an
 //     unscripted command is "not installed" (exit 127).
 //
 // Every call is recorded as "<op> <path>" (ops: run, read, read-refused,
-// stat, list, identify) so a test can assert what a pass asked for.
+// readtext, stat, list, identify) so a test can assert what a pass asked for.
 type tgtFakeTarget struct {
-	local bool
+	local    bool
+	maxBytes int64
 
 	mu    sync.Mutex
 	nodes map[string]*tgtNode
@@ -44,12 +50,14 @@ type tgtNode struct {
 	content []byte
 	link    string // symlink target when non-empty
 	denied  bool   // every operation on it is ErrPermission
+	fifo    bool   // not a regular file
+	unread  bool   // stat works, but List counts it unreadable
 	mode    uint32
 	owner   string
 }
 
 func newTgtFakeTarget(local bool) *tgtFakeTarget {
-	t := &tgtFakeTarget{local: local, nodes: map[string]*tgtNode{}, runs: map[string]tgtResult{}}
+	t := &tgtFakeTarget{local: local, maxBytes: defaultMaxFileBytes, nodes: map[string]*tgtNode{}, runs: map[string]tgtResult{}}
 	t.nodes["/"] = &tgtNode{dir: true, mode: 0o755, owner: "root"}
 	return t
 }
@@ -95,6 +103,35 @@ func (t *tgtFakeTarget) symlink(p, target string) *tgtFakeTarget {
 	t.ensureParents(p)
 	t.nodes[p] = &tgtNode{link: target, mode: 0o777, owner: "root"}
 	return t
+}
+
+// fifo adds a named pipe.
+func (t *tgtFakeTarget) fifo(p string) *tgtFakeTarget {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ensureParents(p)
+	t.nodes[p] = &tgtNode{fifo: true, mode: 0o644, owner: "root"}
+	return t
+}
+
+// unreadable marks an existing path as one List counts but cannot return.
+func (t *tgtFakeTarget) unreadable(p string) *tgtFakeTarget {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n, ok := t.nodes[p]; ok {
+		n.unread = true
+	}
+	return t
+}
+
+// SetMaxFileBytes is the real targets' setter, so Collect threads the bound.
+func (t *tgtFakeTarget) SetMaxFileBytes(n int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n <= 0 {
+		n = defaultMaxFileBytes
+	}
+	t.maxBytes = n
 }
 
 // deny makes an existing path unreadable.
@@ -162,22 +199,34 @@ func (t *tgtFakeTarget) lookup(p string) (*tgtNode, error) {
 	return n, nil
 }
 
-func (t *tgtFakeTarget) identifyLocked(p string) (Identity, error) {
+// regularLocked follows links to a regular file's node.
+func (t *tgtFakeTarget) regularLocked(p string) (*tgtNode, error) {
 	n, err := t.lookup(p)
+	for hops := 0; err == nil && n.link != ""; hops++ {
+		if hops > 8 {
+			return nil, fmt.Errorf("%s: %w", p, ErrNotExist)
+		}
+		n, err = t.lookup(n.link)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if n.dir {
+		return nil, fmt.Errorf("hostcrypto: %s is a directory", p)
+	}
+	if n.fifo {
+		return nil, fmt.Errorf("%s: %w", p, errNotRegular)
+	}
+	return n, nil
+}
+
+func (t *tgtFakeTarget) identifyLocked(p string) (Identity, error) {
+	n, err := t.regularLocked(p)
 	if err != nil {
 		return Identity{}, err
 	}
-	if n.link != "" {
-		return t.identifyLocked(n.link)
-	}
-	if n.dir {
-		return Identity{}, fmt.Errorf("hostcrypto: %s is a directory", p)
-	}
-	magic := n.content
-	if len(magic) > MagicBytes {
-		magic = magic[:MagicBytes]
-	}
-	return identityFrom(p, magic, ScanPEMLabels(n.content, maxPEMLabels), hasPrivateMarker(n.content)), nil
+	w := n.content[:min(int64(len(n.content)), t.maxBytes)]
+	return identityFrom(p, inspect(w, int64(len(n.content)))), nil
 }
 
 func (t *tgtFakeTarget) Identify(_ context.Context, p string) (Identity, error) {
@@ -190,6 +239,10 @@ func (t *tgtFakeTarget) Identify(_ context.Context, p string) (Identity, error) 
 func (t *tgtFakeTarget) ReadFile(_ context.Context, p string) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	n, err := t.regularLocked(p)
+	if err != nil {
+		return nil, err
+	}
 	if !t.local {
 		id, err := t.identifyLocked(p)
 		if err != nil {
@@ -200,20 +253,29 @@ func (t *tgtFakeTarget) ReadFile(_ context.Context, p string) ([]byte, error) {
 			return nil, fmt.Errorf("%s: %w", p, ErrNotPublic)
 		}
 	}
+	if int64(len(n.content)) > t.maxBytes {
+		return nil, fmt.Errorf("%s: %w", p, ErrFileTooLarge)
+	}
 	t.record("read", p)
-	n, err := t.lookup(p)
-	if err != nil {
-		return nil, err
-	}
-	if n.link != "" {
-		if n, err = t.lookup(n.link); err != nil {
-			return nil, err
-		}
-	}
-	if n.dir {
-		return nil, fmt.Errorf("hostcrypto: %s is a directory", p)
-	}
 	return append([]byte(nil), n.content...), nil
+}
+
+func (t *tgtFakeTarget) ReadText(_ context.Context, p string) ([]byte, int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.record("readtext", p)
+	n, err := t.regularLocked(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(n.content)) > t.maxBytes {
+		return nil, 0, fmt.Errorf("%s: %w", p, ErrFileTooLarge)
+	}
+	if textRefused(n.content) {
+		return nil, 0, fmt.Errorf("%s: %w (not text)", p, ErrNotPublic)
+	}
+	out, k := RedactText(n.content)
+	return out, k, nil
 }
 
 func (t *tgtFakeTarget) infoLocked(p string, n *tgtNode) FileInfo {
@@ -295,10 +357,18 @@ func (t *tgtFakeTarget) List(ctx context.Context, root string, opts ListOptions)
 			}
 			continue
 		}
+		if n.fifo {
+			continue
+		}
+		if n.unread {
+			lerr.Unreadable++
+			continue
+		}
 		if len(opts.Names) > 0 && !matchAnyName(path.Base(p), opts.Names) {
 			continue
 		}
 		if n.link == "" && int64(len(n.content)) > maxSize {
+			lerr.OverSize++
 			continue
 		}
 		if len(out) >= maxFiles {
