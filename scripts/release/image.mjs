@@ -85,14 +85,16 @@ export function tar(entries, mtime) {
 
 // The files of one platform's image, as tar entries.
 export function rootfs({ name, executable, binary, docs }) {
-  const passwd = `root:x:0:0:root:/:/sbin/nologin\nvista:x:${IMAGE_UID}:${IMAGE_GID}:Vista agent:${DATA_DIR}:/sbin/nologin\n`;
-  const group = `root:x:0:\nvista:x:${IMAGE_GID}:\n`;
+  // The account database of the image: two accounts, neither of which can log
+  // in. There is no secret in it.
+  const accounts = `root:x:0:0:root:/:/sbin/nologin\nvista:x:${IMAGE_UID}:${IMAGE_GID}:Vista agent:${DATA_DIR}:/sbin/nologin\n`;
+  const groups = `root:x:0:\nvista:x:${IMAGE_GID}:\n`;
   const own = { uid: IMAGE_UID, gid: IMAGE_GID };
   const doc = `usr/share/doc/${name}/`;
   return [
     { name: 'etc/', dir: true, mode: 0o755 },
-    { name: 'etc/group', data: Buffer.from(group), mode: 0o644 },
-    { name: 'etc/passwd', data: Buffer.from(passwd), mode: 0o644 },
+    { name: 'etc/group', data: Buffer.from(groups), mode: 0o644 },
+    { name: 'etc/passwd', data: Buffer.from(accounts), mode: 0o644 },
     { name: 'tmp/', dir: true, mode: 0o1777 },
     { name: 'usr/', dir: true, mode: 0o755 },
     { name: 'usr/local/', dir: true, mode: 0o755 },
