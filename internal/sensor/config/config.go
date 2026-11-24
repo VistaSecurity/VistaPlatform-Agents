@@ -221,6 +221,13 @@ type StorageConfig struct {
 
 // CaptureConfig represents packet capture configuration
 type CaptureConfig struct {
+	// Disabled turns passive capture off: the sensor opens no interface and
+	// runs the platform's scan jobs only. It is how the sensor runs in a
+	// Kubernetes pod (capture there would need a privileged pod on every
+	// node), and it is forced on in a build without a capture library. Set by
+	// capture.disabled in the config file or CAPTURE_DISABLED in the
+	// environment; never sent to the platform.
+	Disabled      bool     `json:"-"`
 	Interfaces    []string `json:"interfaces"`
 	ActiveProbing bool     `json:"active_probing"`
 	// ThirdPartyTLSEnrichment lets the TLS enricher actively handshake with
@@ -396,6 +403,7 @@ type ConfigFile struct {
 		DataPath string `yaml:"dataPath"`
 	} `yaml:"storage"`
 	Capture struct {
+		Disabled                     bool     `yaml:"disabled"`
 		Interfaces                   []string `yaml:"interfaces"`
 		ActiveProbing                bool     `yaml:"activeProbing"`
 		ThirdPartyTLSEnrichment      bool     `yaml:"thirdPartyTLSEnrichment"`
@@ -484,6 +492,7 @@ func LoadFromFile(filePath string) (*Config, error) {
 			DataPath: cfgFile.Storage.DataPath,
 		},
 		Capture: CaptureConfig{
+			Disabled:                     cfgFile.Capture.Disabled,
 			Interfaces:                   cfgFile.Capture.Interfaces,
 			ActiveProbing:                cfgFile.Capture.ActiveProbing,
 			ThirdPartyTLSEnrichment:      cfgFile.Capture.ThirdPartyTLSEnrichment,
@@ -694,6 +703,9 @@ func mergeEnvVars(cfg *Config) {
 	if owned := getStringSliceEnv("OWNED_NETWORKS", nil); len(owned) > 0 {
 		cfg.Capture.OwnedNetworks = owned
 	}
+	if v := os.Getenv("CAPTURE_DISABLED"); v != "" {
+		cfg.Capture.Disabled = getBoolEnv("CAPTURE_DISABLED", false)
+	}
 	if dataPath := sharedconfig.GetEnv("DATA_PATH", ""); dataPath != "" {
 		if cfg.Storage.DataPath != dataPath {
 			fmt.Printf("⚠️  Environment variable DATA_PATH=%s overriding config file value\n", dataPath)
@@ -769,6 +781,7 @@ func Load() *Config {
 			DataPath: sharedconfig.GetEnv("DATA_PATH", getDefaultDataPath()),
 		},
 		Capture: CaptureConfig{
+			Disabled:                     getBoolEnv("CAPTURE_DISABLED", false),
 			Interfaces:                   getStringSliceEnv("INTERFACES", []string{"eth0"}),
 			ActiveProbing:                getBoolEnv("ACTIVE_PROBING", true),
 			ThirdPartyTLSEnrichment:      getBoolEnv("THIRD_PARTY_TLS_ENRICHMENT", false),

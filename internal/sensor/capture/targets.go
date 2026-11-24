@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/gopacket/gopacket/pcap"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/capture/ifselect"
 )
 
@@ -16,7 +15,7 @@ var (
 	listHostAdapters   = hostAdapters
 	// probeDevice opens a capture device and closes it again.
 	probeDevice = func(device string) error {
-		h, err := pcap.OpenLive(device, 128, true, pcap.BlockForever)
+		h, err := pcapOpenLive(device, 128, true, pcapBlockForever)
 		if err != nil {
 			return err
 		}

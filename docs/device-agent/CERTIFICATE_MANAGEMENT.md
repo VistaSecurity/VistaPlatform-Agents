@@ -141,6 +141,10 @@ A few settings can also come from the environment, which overrides the file:
 `PLATFORM_URL_OVERRIDE=1` is also set), `AGENT_ID`, `REGISTRATION_KEY`,
 `HEARTBEAT_INTERVAL`, `DATA_PATH`, `HOST_INVENTORY_ENABLED`,
 `HOST_INVENTORY_CONNECTIONS_ENABLED` and `HOST_INVENTORY_INTERVAL`.
+`PLATFORM_CA_FINGERPRINT` is the default of `-ca-fingerprint`. With
+`DATA_PATH` set, the agent looks there for its saved enrollment when it
+starts, which is what lets it run in a container with its data directory on a
+volume.
 
 ## Best practices
 

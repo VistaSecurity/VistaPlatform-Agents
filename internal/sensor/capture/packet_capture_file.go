@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gopacket/gopacket"
-	"github.com/gopacket/gopacket/pcap"
 )
 
 // fileFlushEvery is how many packets RunFile reads between evictions of the
@@ -35,7 +34,7 @@ const fileFlushEvery = 1024
 // stops reading; what was read is still flushed.
 func (pc *PacketCapture) RunFile(ctx context.Context, path string) error {
 	defer pc.Stop()
-	handle, err := pcap.OpenOffline(path)
+	handle, err := pcapOpenOffline(path)
 	if err != nil {
 		return fmt.Errorf("cannot open capture file %s: %w", path, err)
 	}

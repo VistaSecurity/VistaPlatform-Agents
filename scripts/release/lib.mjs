@@ -120,6 +120,29 @@ export function packageRoot(agent, version, os, arch) {
   return `${agent.asset_prefix}_${version}_${os}_${arch}`;
 }
 
+// The container image of an agent: one OCI image layout archive holding every
+// platform of the image (scripts/release/image.mjs).
+export function imageAsset(agent, version) {
+  return `${agent.image.name}_${version}_linux.oci.tar`;
+}
+
+// The SBOM of the executable inside one platform of an image.
+export function imageSbomAsset(agent, version, arch) {
+  return `${agent.image.name}_${version}_linux_${arch}.image.cdx.json`;
+}
+
+// The directory a container build leg uploads (build-agents.yml).
+export function containerBuildDir(agent, arch) {
+  return `build-${agent.kind}-container-linux-${arch}`;
+}
+
+// Every container image a release of this surface publishes.
+export function expectedImages(surface, version) {
+  return surface.agents.filter((a) => a.image).map((a) => ({
+    kind: a.kind, name: a.image.name, file: imageAsset(a, version), arches: a.image.arches,
+  }));
+}
+
 export function sbomAsset(binaryFile) {
   return `${binaryFile}.cdx.json`;
 }
