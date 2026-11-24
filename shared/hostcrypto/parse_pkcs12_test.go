@@ -289,6 +289,12 @@ func ksEncryptedPart(t testing.TB, password string, iters int, bags ...ksSafeBag
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ksEncryptedBytes(t, password, iters, sc)
+}
+
+// ksEncryptedBytes encrypts any plaintext as an encryptedData part.
+func ksEncryptedBytes(t testing.TB, password string, iters int, sc []byte) ksContentInfo {
+	sc = append([]byte{}, sc...)
 	iv := make([]byte, 16)
 	_, _ = rand.Read(iv)
 	key, err := pbkdf2.Key(sha256.New, password, []byte("saltsalt"), iters, 32)
@@ -484,6 +490,44 @@ func TestParsePKCS12_NothingToCheck(t *testing.T) {
 	got, err := ParsePKCS12(b, true)
 	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedNoCheck || got.Keystore.Opened != OpenedWithoutPassword {
 		t.Errorf("%v %q %+v", err, got.DefaultsNotTried, got.Keystore)
+	}
+}
+
+// Without a MAC a wrong password is caught by the padding AND the structure:
+// here the part decrypts under "changeit" to valid padding around bytes that
+// are not a SafeContents, so only the structure check refuses it.
+func TestParsePKCS12_NoMACNeedsValidStructure(t *testing.T) {
+	b := ksBuildPFX(t, nil, ksEncryptedBytes(t, "changeit", 1, []byte("not a SafeContents, just bytes")))
+	got, err := ParsePKCS12(b, true)
+	if err != nil || got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword {
+		t.Errorf("%v %q %+v", err, got.DefaultsNotTried, got.Keystore)
+	}
+}
+
+func TestKsCBCDecrypt_Padding(t *testing.T) {
+	key := make([]byte, 16)
+	blk, _ := aes.NewCipher(key)
+	iv := make([]byte, 16)
+	enc := func(pt []byte) []byte {
+		ct := append([]byte{}, pt...)
+		cipher.NewCBCEncrypter(blk, iv).CryptBlocks(ct, ct)
+		return ct
+	}
+	good := append([]byte("0123456789ab"), 4, 4, 4, 4)
+	if pt, ok := ksCBCDecrypt(blk, iv, enc(good)); !ok || string(pt) != "0123456789ab" {
+		t.Errorf("good padding: %v %q", ok, pt)
+	}
+	for name, pt := range map[string][]byte{
+		"zero":      append([]byte("0123456789abcde"), 0),
+		"too large": append([]byte("0123456789abcde"), 17),
+		"mixed":     append([]byte("0123456789ab"), 1, 4, 4, 4),
+	} {
+		if _, ok := ksCBCDecrypt(blk, iv, enc(pt)); ok {
+			t.Errorf("%s padding accepted", name)
+		}
+	}
+	if _, ok := ksCBCDecrypt(blk, iv, []byte("short")); ok {
+		t.Error("partial block accepted")
 	}
 }
 
