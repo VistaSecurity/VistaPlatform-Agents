@@ -1,0 +1,392 @@
+{
+  "schema": "vista.agent-compatibility/v1",
+  "record_id": "agents-6.1.0-c2",
+  "issued_at": "2026-11-24T16:41:54Z",
+  "supersedes": "agents-6.1.0-c1",
+  "agents_release": {
+    "version": "6.1.0",
+    "tag": "v6.1.0",
+    "channel": "stable",
+    "nightly_id": null,
+    "source_repo": "https://github.com/VistaSecurity/VistaPlatform-Agents",
+    "source_sha": "3cf7fa43f45490537d2c1980a83f200215565c20",
+    "metadata": {
+      "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/agents-release.json",
+      "sha256": "d86c12a5a4bd5d9149a9f5f51e4076ad33774ecc8ef3be839b860bf0d42946e4"
+    }
+  },
+  "agents": [
+    {
+      "kind": "sensor",
+      "variant": "default",
+      "version": "6.1.0",
+      "artifacts": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-sensor_6.1.0_linux_amd64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_linux_amd64",
+          "sha256": "d4d11371759fa79a0aca5eb3b18d8ba5a4c3fbfb2d053c2a7a432adecd8fcf2a",
+          "size": 16070328,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_linux_amd64.sigstore.json",
+            "sha256": "fb3463ec958371168a69c14ab1877db62809b9afad0c7cdf805540f09512c6e5"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "libpcap"
+          ],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_linux_amd64.cdx.json",
+            "sha256": "e2b53bd82c2567377a71cebf0305c7b1757a65cdc2b5497a92471a7b291a62d0",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "type": "binary",
+          "file": "vista-sensor_6.1.0_darwin_arm64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_darwin_arm64",
+          "sha256": "7d9df2174714bd086909a78ff7f39773e37e332a43bb7b407a282ffc1d56689d",
+          "size": 15789282,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_darwin_arm64.sigstore.json",
+            "sha256": "1886671bbeb88c04c282b23e152589a68ca8252b20c1d369f13cbaabb9c01749"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "libpcap"
+          ],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_darwin_arm64.cdx.json",
+            "sha256": "733ad10fd8754adf83a25113715614c212d15453bdd63d55a3d24cdc40067022",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "windows",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-sensor_6.1.0_windows_amd64.exe",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_windows_amd64.exe",
+          "sha256": "836f7d6c9cbe223617542a054da303fb83fc3e172b558c1b0e6adaf3fbdbbc02",
+          "size": 16508416,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_windows_amd64.exe.sigstore.json",
+            "sha256": "f7c30aeac2c942f20c3fad8d553b2f1c169c65659b8a5480e17de346e4b0024a"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "npcap"
+          ],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-sensor_6.1.0_windows_amd64.exe.cdx.json",
+            "sha256": "81e44650360031265423ada026cb848a3e45718355d8103faaba72c5e90fb279",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "linux",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-sensor.sh",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor.sh",
+          "sha256": "ebe1be2075a13ea517c5bcd5e72ca64ad3d8cf5f746d3ec2602a14c53b41985f",
+          "size": 42983,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor.sh.sigstore.json",
+            "sha256": "19b71389d4bb4c7193c17cd1daaec7e279f1c8e36dbe247301f0f2464bab3a61"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "libpcap"
+          ]
+        },
+        {
+          "os": "darwin",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-sensor-macos.sh",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor-macos.sh",
+          "sha256": "9ce278d41b5cc4298311bbcbdb818c1b1384327e1e4bc97e468080ea0a89ea13",
+          "size": 31191,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor-macos.sh.sigstore.json",
+            "sha256": "de259bce5d40be45dc581026ff435f506866d7ceb3548dde852abe5bc75220a5"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "libpcap"
+          ]
+        },
+        {
+          "os": "windows",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-sensor.ps1",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor.ps1",
+          "sha256": "c2d03d5f1e6c12257f2831d6eeae2351681aac9ab9ff7e1d2a021509749b9d19",
+          "size": 31738,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-sensor.ps1.sigstore.json",
+            "sha256": "936608d6ff489a2bbc31c769b7bd9c9818930ec4863c7bd7d35639b2dc05bbde"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [
+            "npcap"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "device-agent",
+      "variant": "default",
+      "version": "6.1.0",
+      "artifacts": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-device-agent_6.1.0_linux_amd64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_linux_amd64",
+          "sha256": "6e3c75f56e107ad6d6a6eb5134bf5723ddb2335c9b216aecf9b69d9223911a93",
+          "size": 17981878,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_linux_amd64.sigstore.json",
+            "sha256": "b86d0680be5ea123d805a43f6a829e5e962066fada1d42ab301da65b1539a3b7"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_linux_amd64.cdx.json",
+            "sha256": "5651d544c9c3ea8a15a1a0d8136d7800e1f26f6c4ebacbe0b197f88d07f71353",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "type": "binary",
+          "file": "vista-device-agent_6.1.0_darwin_arm64",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_darwin_arm64",
+          "sha256": "0ee3717bc1aa32eb21481cb808590a43b3d0a4edcdf5d479a10baa676178f97e",
+          "size": 17214050,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_darwin_arm64.sigstore.json",
+            "sha256": "73c98b43c61dcd7af525e763688647b9deecd7c9d0db20b31c3dc53f5e8a4907"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_darwin_arm64.cdx.json",
+            "sha256": "192b1788f671e1f9a07315a4130d6621aafaf7448dc16afdd919049c760671cc",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "windows",
+          "arch": "amd64",
+          "type": "binary",
+          "file": "vista-device-agent_6.1.0_windows_amd64.exe",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_windows_amd64.exe",
+          "sha256": "751dfe26a603825fcba3773df62337c00413400d29cc4ee5db042d211a4cf78f",
+          "size": 18381824,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_windows_amd64.exe.sigstore.json",
+            "sha256": "2c87e590a9c8b48371533aa4c0d3739b0a7fa4a42fb6e1b90ea2437895b06687"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": [],
+          "sbom": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/vista-device-agent_6.1.0_windows_amd64.exe.cdx.json",
+            "sha256": "e12ed4e7589f46696f8dad1cc642b80257b3f43aad144a8bc2872529c75d3602",
+            "format": "CycloneDX-1.6-json"
+          }
+        },
+        {
+          "os": "linux",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-device-agent.sh",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent.sh",
+          "sha256": "6aeac9d422bfaf20c947d56338c7772159eadd38620edeace924043b781af510",
+          "size": 29940,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent.sh.sigstore.json",
+            "sha256": "ae31618e26242feeb577afc776622fa5700891660233c4de91e778b38d92fb2e"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": []
+        },
+        {
+          "os": "darwin",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-device-agent-macos.sh",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent-macos.sh",
+          "sha256": "44670e34a081039f0d56b975e225960989a9a70049c48648bbe232039e6a706c",
+          "size": 29278,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent-macos.sh.sigstore.json",
+            "sha256": "9cc32e12351a2ca87485aa1a11890011a043d724303e8d2cc7ab4fdb0cc1a1f8"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": []
+        },
+        {
+          "os": "windows",
+          "arch": "any",
+          "type": "installer",
+          "file": "install-device-agent.ps1",
+          "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent.ps1",
+          "sha256": "d27ffbe704eebaa51b12a56c8a3e380f2a74040e5d78ef387c5155ddc2a5856e",
+          "size": 26800,
+          "signature": {
+            "bundle_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/install-device-agent.ps1.sigstore.json",
+            "sha256": "d48b4370a5d1b0771b60c1ae59e7026a602f659a320236cd82a3e9aef6855956"
+          },
+          "provenance": {
+            "url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/provenance.intoto.jsonl",
+            "sha256": "960c0759ed891df5c3397d177a3f069b1f28e58dcf65c7e3a6ef92a00157c5ac",
+            "predicate_type": "https://slsa.dev/provenance/v1"
+          },
+          "runtime_qualified": true,
+          "native_signing": "none",
+          "requires": []
+        }
+      ]
+    }
+  ],
+  "protocol": {
+    "managed_versions": [
+      1
+    ],
+    "capabilities": {
+      "sensor": [
+        "identity_dns_v1",
+        "scan_plan_v1",
+        "verify_certificate_v1"
+      ],
+      "device-agent": [
+        "device_discovery"
+      ]
+    },
+    "output_versions": []
+  },
+  "modes": {
+    "managed": "pending",
+    "standalone": "none"
+  },
+  "platform_compatibility": [
+    {
+      "editions": [
+        "core"
+      ],
+      "platform_versions": [
+        "6.1.0"
+      ],
+      "status": "tested",
+      "tested_at": "2026-11-24T16:41:33Z",
+      "qualification_ref": "qual-core-6.1.0-cfaaf9641533"
+    },
+    {
+      "editions": [
+        "enterprise"
+      ],
+      "platform_versions": [
+        "6.1.0"
+      ],
+      "status": "pending",
+      "tested_at": null,
+      "qualification_ref": null
+    },
+    {
+      "editions": [
+        "msp"
+      ],
+      "platform_versions": [
+        "6.1.0"
+      ],
+      "status": "pending",
+      "tested_at": null,
+      "qualification_ref": null
+    }
+  ],
+  "signer": {
+    "issuer": "https://token.actions.githubusercontent.com",
+    "identity": "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/compatibility.yml@refs/heads/main"
+  },
+  "notices": {
+    "license": "Apache-2.0",
+    "third_party_notices_url": "https://github.com/VistaSecurity/VistaPlatform-Agents/releases/download/v6.1.0/THIRD_PARTY_LICENSES",
+    "third_party_notices_sha256": "abdff6f2b8801a2ebf0c1ded083768ce6585322ce0b916431a9049e4171c2c57"
+  }
+}
