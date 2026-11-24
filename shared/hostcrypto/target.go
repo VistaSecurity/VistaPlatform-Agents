@@ -13,10 +13,13 @@ import (
 // file's permissions, and learning what a file IS without reading it.
 //
 // The parsers take bytes and nothing else, exactly as host inventory's do.
-// What differs between the modes is which bytes the collector may ask for,
-// and that rule lives in one place: [Target.ReadFile] on a remote target
-// refuses any path whose [Identity] is not public, and [Target.ReadText]
-// redacts on the host.
+// What differs between the modes is which bytes the collector may ask for.
+// On a remote target [Target.ReadFile] does not return a file: it returns the
+// public PEM blocks in it (or its SSH public key lines) and nothing around
+// them, decided and printed on the host from one read of the file. A file
+// with no such content is refused with ErrNotPublic. Configuration is read
+// through [Target.ReadText], which narrows on the host to the lines a parser
+// asked for.
 type Target interface {
 	hostinventory.Runner
 
@@ -42,20 +45,26 @@ type Target interface {
 	// [MagicBytes] bytes from the start of the file and the label lines.
 	Identify(ctx context.Context, path string) (Identity, error)
 
-	// ReadText returns a configuration file a pass has named, with anything
-	// that could be key material taken out ON THE HOST before the bytes
-	// leave it: every PEM block whose label is not on the public list is
-	// dropped, and every run of [RedactRunLength] or more base64 or
-	// hexadecimal characters is replaced by [RedactedMarker]. redactions
-	// counts what was removed. A file that is not text is refused with
-	// ErrNotPublic.
+	// ReadText returns the lines of a configuration file that a parser has
+	// asked for, and nothing else. It is the only way configuration text is
+	// read, in both modes, and the narrowing happens ON THE HOST before any
+	// byte leaves it:
 	//
-	// Local and remote targets apply the SAME redaction, so a parser sees
-	// the same bytes in both modes. A caller uses ReadText only for a path
-	// a pass has a reason to treat as configuration (a known location, or a
-	// file another configuration includes); it is never the way to look
-	// inside a file the sweep merely found.
-	ReadText(ctx context.Context, path string) (text []byte, redactions int, err error)
+	//   1. A line is kept only when its first word is in keep (compared
+	//      without regard to case), or it is structure (a section header, a
+	//      brace, an opening or closing tag), or it continues a kept line.
+	//      Every other line is dropped. keep is the directive allowlist of
+	//      the parser that will read the result ([ConfigKeepWords]), so a
+	//      line such as "password = ..." never crosses, whatever its length
+	//      or alphabet.
+	//   2. Of what is kept, every PEM block is dropped and every run of
+	//      [RedactRunLength] or more base64 or hexadecimal characters is
+	//      replaced by [RedactedMarker]. redactions counts those.
+	//
+	// An empty keep is refused with ErrNotPublic, and so is a file that is
+	// not text. Local and remote targets apply the SAME rules through
+	// [FilterConfigText], so a parser sees the same bytes in both modes.
+	ReadText(ctx context.Context, path string, keep []string) (text []byte, redactions int, err error)
 }
 
 // RedactRunLength is the length of an unbroken run of base64 or hexadecimal
