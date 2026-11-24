@@ -45,26 +45,40 @@ func describeState(h *Handshake, state *tls.ConnectionState, certs *certTable, r
 	}
 }
 
-// probeTLS completes one TLS handshake with address:port and closes the
-// connection. It sends no request and presents no client certificate. The
-// server's certificate is recorded, not trusted: verification is off because
-// the point is to read whatever is served, a self-signed kubelet certificate
-// included, and nothing is sent over the connection.
+// probeTLS makes one TLS handshake with address:port and closes the
+// connection. It sends no request and presents no client certificate.
+//
+// Verification stays on: the handshake is checked against the cluster CA, as
+// any client of the kubelet should check it. A kubelet whose certificate does
+// not verify (a self-signed serving certificate is the default) fails the
+// handshake, and that failure carries the certificates the kubelet served,
+// which is all this is here to read. So the certificate of a kubelet that
+// would not be trusted is still recorded, and nothing is ever sent over a
+// connection that did not verify.
 func probeTLS(ctx context.Context, address string, port int, certs *certTable, roots *x509.CertPool) Handshake {
 	h := Handshake{Address: address, Port: port}
 	ctx, cancel := context.WithTimeout(ctx, kubeletDialTimeout)
 	defer cancel()
-	dialer := &tls.Dialer{
-		NetDialer: &net.Dialer{},
-		Config:    &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10}, //nolint:gosec // posture read: the certificate is recorded, nothing is sent
-	}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(address, strconv.Itoa(port)))
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(address, strconv.Itoa(port)))
 	if err != nil {
 		h.Status = classifyDialError(err)
 		return h
 	}
-	defer func() { _ = conn.Close() }()
-	state := conn.(*tls.Conn).ConnectionState()
+	defer func() { _ = raw.Close() }()
+	conn := tls.Client(raw, &tls.Config{RootCAs: roots, ServerName: address, MinVersion: tls.VersionTLS12})
+	err = conn.HandshakeContext(ctx)
+	state := conn.ConnectionState()
+	var unverified *tls.CertificateVerificationError
+	switch {
+	case err == nil:
+	case errors.As(err, &unverified):
+		// What was negotiated before the certificate was refused is still
+		// known; the certificates are the ones in the error.
+		state.PeerCertificates = unverified.UnverifiedCertificates
+	default:
+		h.Status = classifyDialError(err)
+		return h
+	}
 	describeState(&h, &state, certs, roots)
 	return h
 }

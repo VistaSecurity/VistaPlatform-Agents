@@ -61,7 +61,10 @@ writes the record to a file with no platform involved.
    can place.
 6. **The agent connects only to the API server and to kubelets.** It makes TLS
    handshakes with the API server (the connection it already has) and with
-   each node's kubelet port, and with nothing else. Ingress hosts, Gateway
+   each node's kubelet port, and with nothing else. The kubelet handshake is
+   verified against the cluster CA like any other and sends nothing; a kubelet
+   whose certificate does not verify is still recorded, from the certificates
+   the failed handshake reports. Ingress hosts, Gateway
    listeners, Services and pods are scanned by the sensor.
 
 ## How it runs

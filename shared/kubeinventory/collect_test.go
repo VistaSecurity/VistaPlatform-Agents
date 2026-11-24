@@ -325,7 +325,11 @@ func TestCollectFullCluster(t *testing.T) {
 	if len(inv.Kubelets) != 2 {
 		t.Fatalf("kubelets: %+v", inv.Kubelets)
 	}
-	if k := inv.Kubelets[0]; k.Node != "node-a" || k.Status != handshakeOK || k.CertificateChain[0] != cl.Fingerprint("kubelet-node-a") || *k.ChainsToClusterCA {
+	// node-a's kubelet serves a self-signed certificate. The handshake is
+	// verified against the cluster CA and so does not complete; what the
+	// kubelet served and what was negotiated are recorded all the same.
+	if k := inv.Kubelets[0]; k.Node != "node-a" || k.Status != handshakeOK || k.CertificateChain[0] != cl.Fingerprint("kubelet-node-a") || *k.ChainsToClusterCA ||
+		k.TLSVersion != "TLS 1.3" || !strings.HasPrefix(k.CipherSuite, "TLS_") {
 		t.Errorf("node-a kubelet (self-signed): %+v", k)
 	}
 	if k := inv.Kubelets[1]; k.Node != "node-b" || k.Status != handshakeRefused || k.CertificateChain != nil {
