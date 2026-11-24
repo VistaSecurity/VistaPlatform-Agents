@@ -48,6 +48,12 @@ enforced whatever else an answer carries.
   metadata envelope (`defs/envelope.json`). Everything a device collector
   returns has passed the agent's projection allowlists and redaction before it
   is sent: the agents collect posture, never key material.
+- **A Kubernetes inventory carries no credentials.** A `kubernetes_inventory`
+  job (capability `kubernetes_inventory_v1`, offered only by a device agent
+  running in a cluster) describes the cluster the agent runs in through the
+  agent's own service account. Its result is the typed, closed record of
+  `defs/kubernetes-inventory.json`, sent as one job result per part. See
+  [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md).
 - **Certificate rotation** happens when the client certificate has under 30 days
   left: a fresh key, a new certificate, a new agent secret, and the old
   certificate is revoked.
