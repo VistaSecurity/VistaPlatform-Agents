@@ -6,7 +6,11 @@
 //
 //   node scripts/release/metadata.mjs --assets DIR --state DIR --repo OWNER/REPO \
 //        --run-url URL --smoke DIR --provenance attested|unavailable \
-//        [--provenance-reason TEXT] --issued-at RFC3339
+//        [--provenance-reason TEXT] --issued-at RFC3339 [--images-pushed]
+//
+// --images-pushed says this run pushed the container images to the registry
+// the package step named and signed them by digest; the metadata then names
+// that registry. Without it (a nightly) an image is a release asset only.
 //
 // --smoke holds the smoke legs' results (smoke-<os>-<arch>.json). An
 // artefact is runtime_qualified only if a smoke leg of this run executed it;
@@ -97,6 +101,34 @@ export function buildMetadata(opts) {
       return out;
     }),
   }));
+  // The container images, from what the packaging step recorded about them.
+  const images = (state.images || []).map((img) => {
+    if (!need(img.file) || !need(bundleAsset(img.file))) return null;
+    const out = {
+      kind: img.kind,
+      name: img.name,
+      version: tag.version,
+      file: img.file,
+      url: url(img.file),
+      sha256: sha256File(at(img.file)),
+      size: sizeOf(at(img.file)),
+      signature: { bundle_url: url(bundleAsset(img.file)), sha256: sha256File(at(bundleAsset(img.file))) },
+      provenance: provenance === undefined ? null : provenance,
+      digest: img.digest,
+      media_type: 'application/vnd.oci.image.index.v1+json',
+      platforms: img.platforms.map((p) => ({
+        os: p.os, arch: p.arch, digest: p.digest, executable_sha256: p.executable_sha256,
+        sbom: need(p.sbom_file) ? { url: url(p.sbom_file), sha256: sha256File(at(p.sbom_file)), format: 'CycloneDX-1.6-json' } : null,
+      })),
+      // The release run starts no container; see docs/releasing.md.
+      runtime_qualified: false,
+    };
+    if (opts.imagesPushed) {
+      if (!img.repository) errors.push(`image ${img.name}: --images-pushed, but the package step was given no --image-repository`);
+      else out.registry = { repository: img.repository, tag: tag.version, reference: `${img.repository}@${img.digest}` };
+    }
+    return out;
+  });
   for (const f of ['THIRD_PARTY_LICENSES']) need(f);
   if (errors.length) return { errors };
 
@@ -121,6 +153,7 @@ export function buildMetadata(opts) {
       workflow: { identity, run_url: opts.runUrl },
     },
     agents,
+    ...(images.length ? { images } : {}),
     protocol,
     modes: surface.modes,
     checksums: { file: 'SHA256SUMS', url: url('SHA256SUMS'), signature_url: url(bundleAsset('SHA256SUMS')) },
@@ -199,7 +232,7 @@ function main() {
     options: {
       assets: { type: 'string' }, state: { type: 'string' }, repo: { type: 'string' }, 'run-url': { type: 'string' },
       smoke: { type: 'string' }, provenance: { type: 'string' }, 'provenance-reason': { type: 'string' },
-      'issued-at': { type: 'string' }, root: { type: 'string' },
+      'issued-at': { type: 'string' }, root: { type: 'string' }, 'images-pushed': { type: 'boolean', default: false },
     },
   });
   for (const k of ['assets', 'state', 'repo', 'run-url', 'smoke', 'provenance', 'issued-at']) {
@@ -210,7 +243,7 @@ function main() {
     res = writeMetadata({
       assets: values.assets, state: values.state, repo: values.repo, runUrl: values['run-url'], smoke: values.smoke,
       provenance: values.provenance, provenanceReason: values['provenance-reason'], issuedAt: values['issued-at'],
-      root: values.root || REPO_ROOT,
+      root: values.root || REPO_ROOT, imagesPushed: values['images-pushed'],
     });
   } catch (e) {
     console.error(`metadata.mjs: ${e.message}`);

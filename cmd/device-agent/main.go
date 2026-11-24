@@ -108,7 +108,7 @@ func main() {
 		// installs that cannot answer a prompt. The agent pins the platform CA
 		// only if it hashes to this value — which, unlike the interactive
 		// prompt, is not trust-on-first-use.
-		caFingerprint = flag.String("ca-fingerprint", "",
+		caFingerprint = flag.String("ca-fingerprint", os.Getenv("PLATFORM_CA_FINGERPRINT"),
 			"Expected SHA-256 fingerprint of the platform's CA certificate. Required for unattended "+
 				"enrollment against a platform whose certificate is signed by a private CA this host does not trust.")
 		// hostInventoryOnce is a SUPPORT flag: collect this host once, print
@@ -512,13 +512,26 @@ func isFlagSet(name string) bool {
 func findDefaultConfigFile() string {
 	for _, path := range []string{
 		"agent-config.yaml",
-		filepath.Join(getDefaultDataPath(), "agent-config.yaml"),
+		filepath.Join(configuredDataPath(), "agent-config.yaml"),
 	} {
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}
 	}
 	return ""
+}
+
+// configuredDataPath is where this agent keeps its enrollment: DATA_PATH when
+// the environment sets it (a container, where the data directory is a mounted
+// volume), else the platform default. Without this an agent started with
+// DATA_PATH enrolled, saved its identity there, and on its next start looked
+// for it in the default directory, found nothing, and tried to enroll again
+// with a spent key.
+func configuredDataPath() string {
+	if p := strings.TrimSpace(os.Getenv("DATA_PATH")); p != "" {
+		return p
+	}
+	return getDefaultDataPath()
 }
 
 // shouldRunInteractive decides whether to open the configuration dialogue.

@@ -3,8 +3,10 @@
 Status: the protocol schema
 ([`schemas/managed/v1/defs/kubernetes-inventory.json`](../../schemas/managed/v1/defs/kubernetes-inventory.json))
 and the collector (`shared/kubeinventory`, the `kubernetes_inventory` job and
-`device-agent kubernetes-inventory`) are in this repository. The container
-images, the manifest and the user guide follow in their own changes.
+`device-agent kubernetes-inventory`) are in this repository, with the
+container images of both agents ([`../verify-release.md`](../verify-release.md),
+"Container images"). The manifest and the user guide follow in their own
+changes.
 
 ## What it is
 

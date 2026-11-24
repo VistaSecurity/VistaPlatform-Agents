@@ -53,6 +53,17 @@ export function downloadTable(meta) {
   return lines;
 }
 
+// The container images: what to pull (when the release pushed them), the
+// digest to pin, and the archive for a registry of one's own.
+export function imageTable(meta) {
+  const lines = ['| Image | Agent | Pull by digest | Platforms | Archive |', '|---|---|---|---|---|'];
+  for (const img of meta.images || []) {
+    const ref = img.registry ? `\`${img.registry.reference}\`` : `not pushed to a registry by this release; digest \`${img.digest}\``;
+    lines.push(`| \`${img.name}\` | ${AGENT_NAMES[img.kind] || img.kind} | ${ref} | ${img.platforms.map((p) => `${p.os}/${p.arch}`).join(', ')} | ${link(img)} |`);
+  }
+  return lines;
+}
+
 export function releaseNotes(meta) {
   const r = meta.release;
   const slug = slugFromRepoUrl(r.source_repo);
@@ -61,6 +72,13 @@ export function releaseNotes(meta) {
   lines.push('', 'Download the archive for your agent and system: it holds the binary, the installer for that system where there is one, `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`. ' +
     'The installers accept the loose binary under its release name too. ' +
     'The other files of this release are for verification and tooling: `*.sigstore.json` signature bundles, `*.cdx.json` SBOMs, `SHA256SUMS`, `agents-release.json` (the release metadata) and the compatibility records.');
+  if ((meta.images || []).length) {
+    lines.push('', '## Container images', '', ...imageTable(meta));
+    lines.push('', 'For running the agents in a Kubernetes cluster (`docs/device-agent/KUBERNETES.md`). Each image holds one static executable and no operating system, runs as user 65532 and needs no capability. ' +
+      'The sensor image runs scans only: it has no packet capture. ' +
+      'Refer to an image by its digest, never by a tag alone. The archive is the same image as an OCI image layout, for loading into a registry of your own; it is signed like every other file of this release. ' +
+      'The images were built and checked by this run but not started in it.');
+  }
   lines.push('', '## About this release', '');
   if (r.channel === 'nightly') {
     lines.push(`**Nightly build ${r.tag}** of \`${r.source_sha}\`. A prerelease: not supported, not offered by any platform release, and pruned after the retention period unless a compatibility record names it.`);

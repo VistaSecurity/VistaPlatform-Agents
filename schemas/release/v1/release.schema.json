@@ -286,6 +286,13 @@
           "$ref": "#/$defs/asset_url"
         }
       }
+    },
+    "images": {
+      "description": "The container images of this release, one per agent that has one. Optional: a release older than the images, or of a tree without them, has no such member. An image is a release asset like any other (an OCI image layout archive, signed with its own bundle and listed in SHA256SUMS); `digest` is the digest a registry reports for the same image.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/image"
+      }
     }
   },
   "allOf": [
@@ -818,6 +825,191 @@
             "preview",
             "supported"
           ]
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "version",
+        "file",
+        "url",
+        "sha256",
+        "size",
+        "signature",
+        "provenance",
+        "digest",
+        "media_type",
+        "platforms",
+        "runtime_qualified"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "sensor",
+            "device-agent"
+          ]
+        },
+        "name": {
+          "description": "The image name without a registry.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "version": {
+          "$ref": "#/$defs/semver"
+        },
+        "file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._+-]+$"
+        },
+        "url": {
+          "$ref": "#/$defs/asset_url"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "signature": {
+          "description": "The cosign bundle of this file, a release asset of the same release.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bundle_url",
+            "sha256"
+          ],
+          "properties": {
+            "bundle_url": {
+              "$ref": "#/$defs/asset_url"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "provenance": {
+          "description": "The SLSA build-provenance attestation naming this file. null only where the release metadata says provenance was unavailable (a nightly or a release candidate built while the repository was private).",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "url",
+                "sha256",
+                "predicate_type"
+              ],
+              "properties": {
+                "url": {
+                  "$ref": "#/$defs/asset_url"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "predicate_type": {
+                  "const": "https://slsa.dev/provenance/v1"
+                }
+              }
+            }
+          ]
+        },
+        "digest": {
+          "description": "The digest of the image index: what a registry reports and what a pull by digest names.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "media_type": {
+          "const": "application/vnd.oci.image.index.v1+json"
+        },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "os",
+              "arch",
+              "digest",
+              "executable_sha256",
+              "sbom"
+            ],
+            "properties": {
+              "os": {
+                "const": "linux"
+              },
+              "arch": {
+                "enum": [
+                  "amd64",
+                  "arm64"
+                ]
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "executable_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "sbom": {
+                "description": "CycloneDX SBOM of a binary, generated from the module list compiled into it.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "url",
+                  "sha256",
+                  "format"
+                ],
+                "properties": {
+                  "url": {
+                    "$ref": "#/$defs/asset_url"
+                  },
+                  "sha256": {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  "format": {
+                    "const": "CycloneDX-1.6-json"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "registry": {
+          "description": "Where this release's workflow pushed the image and signed it by digest. Absent when the release did not push (a nightly).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "tag",
+            "reference"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$"
+            },
+            "tag": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"
+            },
+            "reference": {
+              "description": "repository@digest: the only form a manifest should use.",
+              "type": "string",
+              "pattern": "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "runtime_qualified": {
+          "description": "true only when this release's workflow started the image. The release run does not, so this is false; the images are started in a cluster by the repository's pull-request tests.",
+          "type": "boolean"
         }
       }
     }
