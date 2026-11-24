@@ -225,3 +225,19 @@ func FuzzParsePEMFile(f *testing.F) {
 		_, _ = ParsePuTTYKey(b)
 	})
 }
+
+// Self-signature checks are budgeted per file; beyond the budget the name
+// comparison decides, so a self-signed certificate still reads as one.
+func TestParsePEMFile_VerificationBudget(t *testing.T) {
+	keys := keyTestKeys(t)
+	one := keyTestPEM("CERTIFICATE", keyTestSelfSigned(t, keys[4].priv, "budget"))
+	pc := ParsePEMFile(bytes.Repeat(one, keyMaxVerificationsPerFile+100), PEMLimits{})
+	if len(pc.Certificates) != keyMaxVerificationsPerFile+100 {
+		t.Fatalf("%d certificates", len(pc.Certificates))
+	}
+	for i, c := range pc.Certificates {
+		if !c.SelfSigned {
+			t.Fatalf("certificate %d read as not self-signed", i)
+		}
+	}
+}

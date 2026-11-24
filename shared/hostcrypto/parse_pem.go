@@ -31,19 +31,19 @@ type PEMLimits struct {
 // PEMContents is what one PEM file holds. Location is left zero on every
 // record for the caller to fill.
 type PEMContents struct {
-	Certificates []Certificate
-	PrivateKeys  []PrivateKey
-	PublicKeys   []PublicKeyInfo
+	Certificates []Certificate   `json:"certificates,omitempty"`
+	PrivateKeys  []PrivateKey    `json:"private_keys,omitempty"`
+	PublicKeys   []PublicKeyInfo `json:"public_keys,omitempty"`
 	// Other counts the blocks that are neither certificates nor keys, by
 	// label: "CERTIFICATE REQUEST", "X509 CRL", "DH PARAMETERS", "EC
 	// PARAMETERS".
-	Other map[string]int
+	Other map[string]int `json:"other,omitempty"`
 	// Malformed counts blocks that did not decode or did not parse as what
 	// their label says. Nothing of them is kept.
-	Malformed int
+	Malformed int `json:"malformed"`
 	// Truncated is true when MaxBlocks stopped the walk, so a caller can
 	// record the bound in [Report.Limits].
-	Truncated bool
+	Truncated bool `json:"truncated"`
 }
 
 // PublicKeyInfo is a bare public key ("PUBLIC KEY", "RSA PUBLIC KEY"). No
@@ -77,6 +77,7 @@ func ParsePEMFile(b []byte, limits PEMLimits) PEMContents {
 	begin := []byte(keyPEMBegin)
 	pos := 0
 	blocks := 0
+	budget := newKeyBudget()
 	for {
 		i := bytes.Index(b[pos:], begin)
 		if i < 0 {
@@ -98,15 +99,15 @@ func ParsePEMFile(b []byte, limits PEMLimits) PEMContents {
 			out.Malformed++
 			continue
 		}
-		keyPEMBlock(&out, block)
+		keyPEMBlock(&out, block, budget)
 	}
 	return out
 }
 
-func keyPEMBlock(out *PEMContents, block *pem.Block) {
+func keyPEMBlock(out *PEMContents, block *pem.Block, budget *keyBudget) {
 	switch block.Type {
 	case "CERTIFICATE", "TRUSTED CERTIFICATE", "X509 CERTIFICATE":
-		c, err := ParseCertificateDER(block.Bytes)
+		c, err := keyParseCertificateDER(block.Bytes, budget)
 		if err != nil {
 			out.Malformed++
 			return
@@ -117,7 +118,7 @@ func keyPEMBlock(out *PEMContents, block *pem.Block) {
 			out.PrivateKeys = append(out.PrivateKeys, k)
 			return
 		}
-		k, ok := ParsePrivateKeyDER(block.Bytes)
+		k, ok := keyParsePrivateKeyDER(block.Bytes, budget)
 		if !ok {
 			out.Malformed++
 			return

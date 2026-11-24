@@ -26,6 +26,15 @@ import (
 // parser uses. That is what guarantees a key and the certificate made from it
 // agree on algorithm, size, curve and PublicKeySHA256, which is how the
 // platform pairs them.
+//
+// Work is bounded by the input's shape, never by a number in it: no
+// computation runs over a size the file chooses except the two public-key
+// derivations below, and those are capped per key ([keyMaxDSAPBits],
+// [keyMaxDSAQBits]) and per file ([keyBudget]).
+//
+// Known limitation: an Ed448 or X448 key in PKCS#8 v1 (no stored public key)
+// is named but its public key is not derived, because the standard library
+// has no Ed448/X448; its PublicKeySHA256 stays empty.
 
 // The OIDs this package names. Dotted strings, because a map keyed by
 // asn1.ObjectIdentifier is not possible and the dotted form is what the
@@ -43,11 +52,61 @@ const (
 	keyOIDPBKDF2   = "1.2.840.113549.1.5.12"
 	keyOIDScrypt   = "1.3.6.1.4.1.11591.4.11"
 	keyMaxElements = 16
-	// keyMaxDSABits bounds the one computation this file does with a private
-	// value (a DSA public key from a PKCS#8 file, which stores only x). A
-	// hostile file cannot make it exponentiate a million-bit modulus.
-	keyMaxDSABits = 16384
+	// keyMaxDSAPBits and keyMaxDSAQBits bound the one exponentiation this
+	// file does (a DSA public key from PKCS#8, which stores only x < q): at
+	// most a 512-bit exponent over an 8192-bit modulus, a few milliseconds.
+	// FIPS 186 DSA never exceeds 3072/256.
+	keyMaxDSAPBits = 8192
+	keyMaxDSAQBits = 512
+	// keyMaxDerivationsPerFile caps the public-key derivations (DSA
+	// exponentiation, EC scalar multiplication) one file may cause, so a
+	// 10 MiB file of crafted keys costs a bounded amount of CPU.
+	keyMaxDerivationsPerFile = 16
+	// keyMaxOIDText is the longest dotted OID repeated into a report field.
+	keyMaxOIDText = 64
+	// keyNotDerived is the Unknown text for a key whose public half is not in
+	// the file and is not computed.
+	keyNotDerived = "public key not stored in the file; not derived"
 )
+
+// keyBudget counts the expensive operations left for one file: public-key
+// derivations and certificate self-signature checks. A single-item parse
+// gets a fresh one.
+type keyBudget struct{ derivations, verifications int }
+
+func newKeyBudget() *keyBudget {
+	return &keyBudget{derivations: keyMaxDerivationsPerFile, verifications: keyMaxVerificationsPerFile}
+}
+
+func (b *keyBudget) takeVerification() bool {
+	if b.verifications <= 0 {
+		return false
+	}
+	b.verifications--
+	return true
+}
+
+func (b *keyBudget) take() bool {
+	if b.derivations <= 0 {
+		return false
+	}
+	b.derivations--
+	return true
+}
+
+// keyUnrecognised renders an unknown OID into a report field: "unrecognised
+// <what> <oid>", the OID only when its dotted form is short. An OID is
+// chosen by whoever wrote the file and may have a hundred thousand arcs.
+func keyUnrecognised(what, oid string) string {
+	out := "unrecognised"
+	if what != "" {
+		out += " " + what
+	}
+	if len(oid) <= keyMaxOIDText {
+		out += " " + oid
+	}
+	return out
+}
 
 // keyAlg is a catalogue name and, where the algorithm fixes it, a size.
 type keyAlg struct {
@@ -115,6 +174,10 @@ var keyCurves = map[string]keyAlg{
 // It reports false when the bytes are none of these. Location is left zero
 // for the caller.
 func ParsePrivateKeyDER(der []byte) (PrivateKey, bool) {
+	return keyParsePrivateKeyDER(der, newKeyBudget())
+}
+
+func keyParsePrivateKeyDER(der []byte, budget *keyBudget) (PrivateKey, bool) {
 	_, el, ok := keySequence(der)
 	if !ok || len(el) < 2 {
 		return PrivateKey{}, false
@@ -123,7 +186,7 @@ func ParsePrivateKeyDER(der []byte) (PrivateKey, bool) {
 	case len(el) == 2 && keyIsSeq(el[0]) && keyIsOctet(el[1]):
 		return keyEncryptedPKCS8(el[0])
 	case len(el) >= 3 && keyIsInt(el[0]) && keyIsSeq(el[1]) && keyIsOctet(el[2]):
-		return keyPKCS8(der, el)
+		return keyPKCS8(der, el, budget)
 	case keyIsInt(el[0]) && keyIsOctet(el[1]):
 		k := keyNew(KeyFormatSEC1, false)
 		keySEC1(&k, el, "")
@@ -145,7 +208,7 @@ func keyNew(format string, encrypted bool) PrivateKey {
 
 // keyPKCS8 handles PrivateKeyInfo (RFC 5208) and OneAsymmetricKey (RFC 5958):
 // version, algorithm, privateKey, [0] attributes, [1] publicKey.
-func keyPKCS8(der []byte, el []asn1.RawValue) (PrivateKey, bool) {
+func keyPKCS8(der []byte, el []asn1.RawValue, budget *keyBudget) (PrivateKey, bool) {
 	k := keyNew(KeyFormatPKCS8, false)
 	oid, params, ok := keyAlgorithmID(el[1])
 	if !ok {
@@ -195,14 +258,19 @@ func keyPKCS8(der []byte, el []asn1.RawValue) (PrivateKey, bool) {
 			}
 		}
 		keySEC1(&k, ecEl, curve)
-		if k.PublicKeySHA256 == "" {
+		if k.PublicKeySHA256 == "" && k.Curve != "" {
 			// SEC1 inside PKCS#8 without its optional public key: let the
-			// standard library compute it for the curves it knows.
-			keyApplyStdlibPKCS8(&k, der)
+			// standard library compute it for the curves it knows. A scalar
+			// multiplication, so it counts against the file's budget.
+			if budget.take() {
+				keyApplyStdlibPKCS8(&k, der)
+			} else {
+				k.Unknown = "public key not derived: per-file derivation limit reached"
+			}
 		}
 		return k, true
 	case keyOIDDSA:
-		keyPKCS8DSA(&k, params, inner)
+		keyPKCS8DSA(&k, params, inner, budget)
 		return k, true
 	case keyOIDEd25519, keyOIDX25519:
 		if keyApplyStdlibPKCS8(&k, der) {
@@ -218,12 +286,12 @@ func keyPKCS8(der []byte, el []asn1.RawValue) (PrivateKey, bool) {
 		}
 	}
 	if !known {
-		k.Unknown = "unrecognised key algorithm " + oid
+		k.Unknown = keyUnrecognised("key algorithm", oid)
 		return k, true
 	}
 	k.Algorithm = info.name
 	k.SizeBits = info.bits
-	k.Unknown = "public key not stored in the file and not derivable for " + info.name
+	k.Unknown = keyNotDerived
 	return k, true
 }
 
@@ -366,8 +434,8 @@ func keyLegacyDSA(el []asn1.RawValue) (PrivateKey, bool) {
 // keyPKCS8DSA handles a DSA key in PKCS#8, which stores the parameters in the
 // AlgorithmIdentifier and only x in the key: y = g^x mod p is computed here
 // so the key can be paired with its certificate. The computation is bounded
-// by keyMaxDSABits.
-func keyPKCS8DSA(k *PrivateKey, params asn1.RawValue, inner []byte) {
+// by keyMaxDSAPBits, keyMaxDSAQBits (x < q) and the file's budget.
+func keyPKCS8DSA(k *PrivateKey, params asn1.RawValue, inner []byte, budget *keyBudget) {
 	k.Algorithm = "DSA"
 	_, pe, ok := keySequence(params.FullBytes)
 	if !ok || len(pe) != 3 || !keyAllInts(pe) {
@@ -382,13 +450,17 @@ func keyPKCS8DSA(k *PrivateKey, params asn1.RawValue, inner []byte) {
 		return
 	}
 	k.SizeBits = p.BitLen()
-	if p.BitLen() > keyMaxDSABits || g.Cmp(big.NewInt(1)) <= 0 || g.Cmp(p) >= 0 {
+	if p.BitLen() > keyMaxDSAPBits || q.Sign() <= 0 || q.BitLen() > keyMaxDSAQBits || g.Cmp(big.NewInt(1)) <= 0 || g.Cmp(p) >= 0 {
 		k.Unknown = "the DSA public key was not derived: parameters out of range"
 		return
 	}
 	x := new(big.Int)
-	if rest, err := asn1.Unmarshal(inner, &x); err != nil || len(rest) != 0 || x.Sign() <= 0 || x.Cmp(p) >= 0 {
+	if rest, err := asn1.Unmarshal(inner, &x); err != nil || len(rest) != 0 || x.Sign() <= 0 || x.Cmp(q) >= 0 {
 		k.Unknown = "the DSA key value could not be read"
+		return
+	}
+	if !budget.take() {
+		k.Unknown = "public key not derived: per-file derivation limit reached"
 		return
 	}
 	y := new(big.Int).Exp(g, x, p)
@@ -492,7 +564,7 @@ func keyDescribePBE(alg asn1.RawValue) string {
 		return name
 	}
 	if oid != keyOIDPBES2 {
-		return "unrecognised scheme " + oid
+		return keyUnrecognised("scheme", oid)
 	}
 	_, pe, ok := keySequence(params.FullBytes)
 	if !ok || len(pe) != 2 {
@@ -504,7 +576,7 @@ func keyDescribePBE(alg asn1.RawValue) string {
 		if c, ok := keyCiphers[cOID]; ok {
 			cipher = c
 		} else {
-			cipher = "cipher " + cOID
+			cipher = keyUnrecognised("cipher", cOID)
 		}
 	}
 	return fmt.Sprintf("PBES2 (%s, %s)", kdf, cipher)
@@ -531,7 +603,7 @@ func keyDescribeKDF(alg asn1.RawValue) string {
 						if name, ok := keyPRFs[pOID]; ok {
 							prf = name
 						} else {
-							prf = "PRF " + pOID
+							prf = keyUnrecognised("PRF", pOID)
 						}
 					}
 				}
@@ -550,7 +622,7 @@ func keyDescribeKDF(alg asn1.RawValue) string {
 		}
 		return "scrypt"
 	}
-	return "KDF " + oid
+	return keyUnrecognised("KDF", oid)
 }
 
 // keySPKIInfo reads a DER SubjectPublicKeyInfo: algorithm, size and curve in

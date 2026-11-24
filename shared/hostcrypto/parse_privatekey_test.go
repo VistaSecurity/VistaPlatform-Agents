@@ -493,7 +493,7 @@ func TestParsePrivateKeyDER_PostQuantumByOID(t *testing.T) {
 		if !ok || k.Algorithm != c.want || k.Format != KeyFormatPKCS8 {
 			t.Errorf("%s v1: %+v", c.want, k)
 		}
-		if k.PublicKeySHA256 != "" || k.Unknown == "" {
+		if k.PublicKeySHA256 != "" || k.Unknown != "public key not stored in the file; not derived" {
 			t.Errorf("%s v1: hash %q with Unknown %q", c.want, k.PublicKeySHA256, k.Unknown)
 		}
 		if strings.HasPrefix(c.want, "ML-") && k.SizeBits != 0 {
@@ -551,17 +551,148 @@ func TestParsePrivateKeyDER_DSA(t *testing.T) {
 	keyAssertNoLeak(t, "dsa legacy", a, x.Bytes())
 	keyAssertNoLeak(t, "dsa pkcs8", b, x.Bytes())
 
-	// A hostile modulus is not exponentiated.
-	huge := new(big.Int).Lsh(big.NewInt(1), keyMaxDSABits+8)
-	hostile := keyTestMarshal(t, struct {
+	// x must be below q: an x in [q, p) is refused, not exponentiated.
+	aboveQ := keyTestDSAPKCS8(t, p, q, g, new(big.Int).Sub(p, big.NewInt(5)))
+	if h, ok := ParsePrivateKeyDER(aboveQ); !ok || h.PublicKeySHA256 != "" || h.Unknown == "" {
+		t.Errorf("an x above q was used: %+v", h)
+	}
+}
+
+func keyTestDSAPKCS8(t testing.TB, p, q, g, x *big.Int) []byte {
+	return keyTestMarshal(t, struct {
 		Version int
 		Alg     keyTestAlg
 		Key     []byte
-	}{0, keyTestAlg{keyMustOID(keyOIDDSA), keyTestRaw(keyTestMarshal(t, struct{ P, Q, G *big.Int }{huge, q, g}))}, keyTestMarshal(t, x)})
-	h, ok := ParsePrivateKeyDER(hostile)
-	if !ok || h.PublicKeySHA256 != "" || h.Unknown == "" {
-		t.Errorf("an oversized DSA modulus was used: %+v", h)
+	}{0, keyTestAlg{keyMustOID(keyOIDDSA), keyTestRaw(keyTestMarshal(t, struct{ P, Q, G *big.Int }{p, q, g}))}, keyTestMarshal(t, x)})
+}
+
+// The reviewer's input: p = 2^16383+12345, q = 7, g = 3, x = p-5 cost 1.6 s
+// per key before the bounds.
+func keyTestReviewerDSA(t testing.TB) []byte {
+	p := new(big.Int).Lsh(big.NewInt(1), 16383)
+	p.Add(p, big.NewInt(12345))
+	return keyTestDSAPKCS8(t, p, big.NewInt(7), big.NewInt(3), new(big.Int).Sub(p, big.NewInt(5)))
+}
+
+func TestParsePrivateKeyDER_DSAHostileIsCheap(t *testing.T) {
+	der := keyTestReviewerDSA(t)
+	start := time.Now()
+	k, ok := ParsePrivateKeyDER(der)
+	if d := time.Since(start); d > 50*time.Millisecond {
+		t.Errorf("one hostile DSA key took %v", d)
 	}
+	if !ok || k.Algorithm != "DSA" || k.PublicKeySHA256 != "" || k.Unknown == "" {
+		t.Errorf("hostile DSA: %+v", k)
+	}
+
+	// Each bound on its own: a p over 8192 bits, a q over 512 bits, an x not
+	// below q. Every one is refused before any exponentiation.
+	q512 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 512), big.NewInt(1))
+	p16k := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 16383), big.NewInt(12345))
+	p2k := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 2047), big.NewInt(12345))
+	q2k := new(big.Int).Sub(p2k, big.NewInt(100))
+	for name, in := range map[string][]byte{
+		"p too large": keyTestDSAPKCS8(t, p16k, q512, big.NewInt(3), new(big.Int).Sub(q512, big.NewInt(1))),
+		"q too large": keyTestDSAPKCS8(t, p2k, q2k, big.NewInt(3), new(big.Int).Sub(q2k, big.NewInt(1))),
+		"x not < q":   keyTestDSAPKCS8(t, p2k, big.NewInt(7), big.NewInt(3), new(big.Int).Sub(p2k, big.NewInt(5))),
+	} {
+		if k, ok := ParsePrivateKeyDER(in); !ok || k.PublicKeySHA256 != "" || k.Unknown == "" {
+			t.Errorf("%s: derived anyway: %+v", name, k)
+		}
+	}
+
+	// 2000 of them in one file.
+	block := keyTestPEM("PRIVATE KEY", der)
+	file := bytes.Repeat(block, 2000)
+	start = time.Now()
+	pc := ParsePEMFile(file, PEMLimits{})
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("2000 hostile DSA keys (%d MiB) took %v", len(file)>>20, d)
+	}
+	if len(pc.PrivateKeys) != 2000 {
+		t.Errorf("%d keys", len(pc.PrivateKeys))
+	}
+
+	// The worst case the bounds still allow: an 8192-bit p, a 512-bit q and
+	// x just below q. Only keyMaxDerivationsPerFile of them are computed.
+	p, _ := new(big.Int).SetString("1"+strings.Repeat("0", 2466), 10) // > 2^8191
+	p.Add(p, big.NewInt(1))
+	for p.BitLen() > keyMaxDSAPBits {
+		p.Rsh(p, 1)
+	}
+	q := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), keyMaxDSAQBits), big.NewInt(1))
+	g := new(big.Int).Sub(p, big.NewInt(2))
+	x := new(big.Int).Sub(q, big.NewInt(1))
+	worst := keyTestPEM("PRIVATE KEY", keyTestDSAPKCS8(t, p, q, g, x))
+	start = time.Now()
+	pc = ParsePEMFile(bytes.Repeat(worst, 2000), PEMLimits{})
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("2000 worst-case DSA keys took %v", d)
+	}
+	derived := 0
+	for _, k := range pc.PrivateKeys {
+		if k.PublicKeySHA256 != "" {
+			derived++
+		} else if !strings.Contains(k.Unknown, "per-file derivation limit") {
+			t.Fatalf("an underived key says %q", k.Unknown)
+		}
+	}
+	if derived != keyMaxDerivationsPerFile {
+		t.Errorf("%d derivations in one file, want %d", derived, keyMaxDerivationsPerFile)
+	}
+}
+
+// A 100,000-arc OID must not be repeated into the report.
+func TestKeyLongOIDsAreNotRepeated(t *testing.T) {
+	long := make(asn1.ObjectIdentifier, 100000)
+	long[0], long[1] = 1, 2
+	for i := 2; i < len(long); i++ {
+		long[i] = 1
+	}
+	short := keyMustOID("1.2.3.4.5")
+	check := func(label string, v any) {
+		t.Helper()
+		blob, _ := json.Marshal(v)
+		if len(blob) > 4096 || bytes.Contains(blob, []byte("1.1.1.1.1.1.1.1")) {
+			t.Errorf("%s: the long OID reached the record (%d bytes)", label, len(blob))
+		}
+	}
+	k, _ := ParsePrivateKeyDER(keyTestMarshal(t, struct {
+		Version int
+		Alg     keyTestAlg
+		Key     []byte
+	}{0, keyTestAlg{OID: long}, keyTestMarshal(t, []byte{1})}))
+	if k.Unknown != "unrecognised key algorithm" {
+		t.Errorf("long key OID: Unknown %q", k.Unknown)
+	}
+	check("pkcs8", k)
+	k, _ = ParsePrivateKeyDER(keyTestMarshal(t, struct {
+		Version int
+		Alg     keyTestAlg
+		Key     []byte
+	}{0, keyTestAlg{OID: short}, keyTestMarshal(t, []byte{1})}))
+	if k.Unknown != "unrecognised key algorithm 1.2.3.4.5" {
+		t.Errorf("short key OID: Unknown %q", k.Unknown)
+	}
+	e, _ := ParsePrivateKeyDER(keyTestEPKI(t, keyTestAlg{OID: long}, keyTestRandom(32)))
+	if e.Encryption != "unrecognised scheme" {
+		t.Errorf("long scheme OID: %q", e.Encryption)
+	}
+	check("epki", e)
+	e, _ = ParsePrivateKeyDER(keyTestEPKI(t, keyTestPBES2(t, keyTestAlg{OID: long}, long), keyTestRandom(32)))
+	if e.Encryption != "PBES2 (unrecognised KDF, unrecognised cipher)" {
+		t.Errorf("long KDF/cipher OIDs: %q", e.Encryption)
+	}
+	check("pbes2", e)
+	c, err := ParseCertificateDER(keyTestHandCertOID(t, long))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SignatureAlg != "unrecognised" || c.KeyAlgorithm != "" {
+		t.Errorf("long signature OID: %q / %q", c.SignatureAlg, c.KeyAlgorithm)
+	}
+	c.CertificatePEM = "" // the certificate itself is public and carries the OID
+	check("certificate", c)
 }
 
 func TestParsePrivateKeyDER_RejectsNonKeys(t *testing.T) {

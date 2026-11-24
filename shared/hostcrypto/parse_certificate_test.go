@@ -54,8 +54,8 @@ func TestParseCertificateDER_MatchesSharedSpelling(t *testing.T) {
 	if c.CertificatePEM != shared.CertificatePEM {
 		t.Error("CertificatePEM differs from the shared encoding")
 	}
-	if c.SerialNumber != "1f2e3d" {
-		t.Errorf("serial %q, want lowercase hex without prefix", c.SerialNumber)
+	if c.SerialNumber != "2043453" || c.SerialNumber != shared.SerialNumber {
+		t.Errorf("serial %q, want decimal %q as the shared entry spells it", c.SerialNumber, shared.SerialNumber)
 	}
 	if !c.IsCA || !c.SelfSigned || c.Curve != "P-256" {
 		t.Errorf("IsCA=%v SelfSigned=%v Curve=%q", c.IsCA, c.SelfSigned, c.Curve)
@@ -117,6 +117,17 @@ func TestParseCertificateDER_SelfSigned(t *testing.T) {
 // crypto/x509 cannot create (or parse).
 func keyTestHandCert(t testing.TB, spkiAlg keyTestAlg, pub []byte, sigOID string, serial *big.Int, cn string) []byte {
 	t.Helper()
+	return keyTestHandCertFull(t, spkiAlg, pub, keyMustOID(sigOID), serial, cn, nil)
+}
+
+// keyTestHandCertOID is a hand-made certificate signed under an arbitrary
+// (unknown) OID, which also serves as its key algorithm.
+func keyTestHandCertOID(t testing.TB, oid asn1.ObjectIdentifier) []byte {
+	return keyTestHandCertFull(t, keyTestAlg{OID: oid}, keyTestRandom(32), oid, big.NewInt(1), "long oid", nil)
+}
+
+func keyTestHandCertFull(t testing.TB, spkiAlg keyTestAlg, pub []byte, sigOID asn1.ObjectIdentifier, serial *big.Int, cn string, exts []pkix.Extension) []byte {
+	t.Helper()
 	name := keyTestMarshal(t, pkix.Name{CommonName: cn}.ToRDNSequence())
 	type validity struct{ NotBefore, NotAfter time.Time }
 	tbs := keyTestMarshal(t, struct {
@@ -130,21 +141,23 @@ func keyTestHandCert(t testing.TB, spkiAlg keyTestAlg, pub []byte, sigOID string
 			Alg keyTestAlg
 			Pub asn1.BitString
 		}
+		Extensions []pkix.Extension `asn1:"optional,explicit,tag:3"`
 	}{
-		2, serial, keyTestAlg{OID: keyMustOID(sigOID)}, keyTestRaw(name),
+		2, serial, keyTestAlg{OID: sigOID}, keyTestRaw(name),
 		validity{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)},
 		keyTestRaw(name),
 		struct {
 			Alg keyTestAlg
 			Pub asn1.BitString
 		}{spkiAlg, asn1.BitString{Bytes: pub, BitLength: 8 * len(pub)}},
+		exts,
 	})
 	sig := keyTestRandom(64)
 	return keyTestMarshal(t, struct {
 		TBS asn1.RawValue
 		Alg keyTestAlg
 		Sig asn1.BitString
-	}{keyTestRaw(tbs), keyTestAlg{OID: keyMustOID(sigOID)}, asn1.BitString{Bytes: sig, BitLength: 512}})
+	}{keyTestRaw(tbs), keyTestAlg{OID: sigOID}, asn1.BitString{Bytes: sig, BitLength: 512}})
 }
 
 func keyTestSPKIOf(t testing.TB, der []byte) string {
@@ -181,7 +194,7 @@ func TestParseCertificateDER_MLDSA(t *testing.T) {
 	if c.FingerprintSHA256 != hex.EncodeToString(sum[:]) || c.PublicKeySHA256 != keyTestSPKIOf(t, der) {
 		t.Errorf("fingerprint %q / spki %q", c.FingerprintSHA256, c.PublicKeySHA256)
 	}
-	if c.SubjectDN != "CN=ml-dsa test" || !c.SelfSigned || c.SerialNumber != "2a" {
+	if c.SubjectDN != "CN=ml-dsa test" || !c.SelfSigned || c.SerialNumber != "42" {
 		t.Errorf("subject %q self-signed %v serial %q", c.SubjectDN, c.SelfSigned, c.SerialNumber)
 	}
 }
@@ -210,8 +223,8 @@ func TestParseCertificateDER_FallbackWhenX509Refuses(t *testing.T) {
 		if c.SubjectDN != "CN=k1 test" || c.IssuerDN != "CN=k1 test" || !c.SelfSigned || c.NotAfter != "2027-01-01T00:00:00Z" {
 			t.Errorf("subject %q issuer %q self %v notAfter %q", c.SubjectDN, c.IssuerDN, c.SelfSigned, c.NotAfter)
 		}
-		if c.SerialNumber != serial.Text(16) {
-			t.Errorf("serial %q, want %q", c.SerialNumber, serial.Text(16))
+		if c.SerialNumber != serial.String() {
+			t.Errorf("serial %q, want %q", c.SerialNumber, serial.String())
 		}
 	}
 }
@@ -237,5 +250,58 @@ func TestParseCertificateDER_TrailingDataAndErrors(t *testing.T) {
 		} else if strings.Contains(err.Error(), secret) || err.Error() != "hostcrypto: not a certificate" {
 			t.Errorf("error %q is not the generic one", err)
 		}
+	}
+}
+
+// The fallback reads basicConstraints and subjectAltName itself.
+func TestParseCertificateDER_FallbackExtensions(t *testing.T) {
+	point := append([]byte{4}, keyTestRandom(64)...)
+	alg := keyTestAlg{OID: keyMustOID(keyOIDEC), Params: keyTestRaw(keyTestMarshal(t, keyMustOID("1.3.132.0.10")))}
+	bc := keyTestMarshal(t, struct {
+		IsCA bool
+	}{true})
+	san := keyTestMarshal(t, []asn1.RawValue{
+		{Class: asn1.ClassContextSpecific, Tag: 2, Bytes: []byte("ca.example.test")},
+		{Class: asn1.ClassContextSpecific, Tag: 1, Bytes: []byte("someone@example.com")},
+		{Class: asn1.ClassContextSpecific, Tag: 7, Bytes: []byte{192, 0, 2, 7}},
+		{Class: asn1.ClassContextSpecific, Tag: 2, Bytes: []byte(strings.Repeat("a", 300))},
+	})
+	exts := []pkix.Extension{
+		{Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Critical: true, Value: bc},
+		{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: san},
+	}
+	der := keyTestHandCertFull(t, alg, point, keyMustOID("1.2.840.10045.4.3.2"), big.NewInt(9), "k1 ca", exts)
+	if _, err := x509.ParseCertificate(der); err == nil {
+		t.Fatal("the fixture parses with crypto/x509; it no longer tests the fallback")
+	}
+	c, err := ParseCertificateDER(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.IsCA || strings.Join(c.DNSNames, ",") != "ca.example.test" || strings.Join(c.IPAddresses, ",") != "192.0.2.7" {
+		t.Errorf("IsCA %v DNS %v IP %v", c.IsCA, c.DNSNames, c.IPAddresses)
+	}
+	// Without the extensions it is not a CA.
+	plain, _ := ParseCertificateDER(keyTestHandCertFull(t, alg, point, keyMustOID("1.2.840.10045.4.3.2"), big.NewInt(9), "k1 leaf", nil))
+	if plain.IsCA || plain.DNSNames != nil {
+		t.Errorf("leaf: IsCA %v DNS %v", plain.IsCA, plain.DNSNames)
+	}
+}
+
+func TestParseCertificateDER_DNIsCapped(t *testing.T) {
+	keys := keyTestKeys(t)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: strings.Repeat("x", 5000)},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, keys[5].priv.Public(), keys[5].priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := ParseCertificateDER(der)
+	if len(c.SubjectDN) > keyMaxDNText || len(c.IssuerDN) > keyMaxDNText || len(c.SubjectDN) < 1000 {
+		t.Errorf("DN lengths %d / %d", len(c.SubjectDN), len(c.IssuerDN))
 	}
 }

@@ -231,8 +231,8 @@ func TestParseAuthorizedKeys(t *testing.T) {
 		keyTestAuthorizedLine(t, pub(1), `Command="/bin/backup"`, "") + "\r",
 	}, "\n")
 
-	got, malformed := ParseAuthorizedKeys([]byte(file), 0)
-	if len(got) != 6 || malformed != 1 {
+	got, malformed, truncated := ParseAuthorizedKeys([]byte(file), 0)
+	if len(got) != 6 || malformed != 1 || truncated {
 		t.Fatalf("got %d keys, %d malformed: %+v", len(got), malformed, got)
 	}
 	want := []struct {
@@ -264,13 +264,19 @@ func TestParseAuthorizedKeys(t *testing.T) {
 		}
 	}
 
-	if got, _ := ParseAuthorizedKeys([]byte(file), 2); len(got) != 2 {
-		t.Errorf("max 2 gave %d keys", len(got))
+	if got, _, truncated := ParseAuthorizedKeys([]byte(file), 2); len(got) != 2 || !truncated {
+		t.Errorf("max 2 gave %d keys, truncated %v", len(got), truncated)
+	}
+	if got, _, truncated := ParseAuthorizedKeys([]byte(file), 6); len(got) != 6 || truncated {
+		t.Errorf("max exactly 6 gave %d keys, truncated %v", len(got), truncated)
+	}
+	if _, _, truncated := ParseAuthorizedKeys([]byte(file+"\n# trailing comment\n\n"), 6); truncated {
+		t.Error("a trailing comment counted as an unread entry")
 	}
 
 	// A single pathological line is malformed, not a crash.
 	long := bytes.Repeat([]byte("A"), 10<<20)
-	if got, bad := ParseAuthorizedKeys(append([]byte("ssh-rsa "), long...), 0); len(got) != 0 || bad != 1 {
+	if got, bad, _ := ParseAuthorizedKeys(append([]byte("ssh-rsa "), long...), 0); len(got) != 0 || bad != 1 {
 		t.Errorf("10 MiB line: %d keys, %d malformed", len(got), bad)
 	}
 }
@@ -379,5 +385,59 @@ func TestParseOpenSSH_DSAPairsWithPEM(t *testing.T) {
 	}
 	if _, ok := ParseSSHPublicKeyLine([]byte("ssh-dss " + base64.StdEncoding.EncodeToString(blob[:20]))); ok {
 		t.Error("a truncated ssh-dss blob was accepted")
+	}
+	trailing := append(append([]byte{}, blob...), 0, 0, 0, 1, 9)
+	if _, ok := ParseSSHPublicKeyLine([]byte("ssh-dss " + base64.StdEncoding.EncodeToString(trailing))); ok {
+		t.Error("an ssh-dss blob with trailing bytes was accepted")
+	}
+	// A quoted option that contains " ssh-dss <key> " must not be taken for
+	// the key: the real key type here is one nothing knows.
+	misleading := `command="echo ssh-dss ` + b64 + ` done" ssh-unknown AAAA`
+	if k, ok := ParseSSHPublicKeyLine([]byte(misleading)); ok {
+		t.Errorf("the key was read out of a quoted option: %+v", k)
+	}
+	quotedOK := `command="echo ssh-dss here",no-pty ssh-dss ` + b64
+	if k, ok := ParseSSHPublicKeyLine([]byte(quotedOK)); !ok || k.Restricted == nil || !*k.Restricted {
+		t.Errorf("quoted option before a real ssh-dss key: %+v ok=%v", k, ok)
+	}
+}
+
+// An SSH certificate is fingerprinted by the key it certifies, as
+// `ssh-keygen -lf` does, in every path.
+func TestSSHCertificateFingerprintIsTheCertifiedKey(t *testing.T) {
+	keys := keyTestKeys(t)
+	userPub, _ := ssh.NewPublicKey(keys[5].priv.Public())
+	caSigner, err := ssh.NewSignerFromSigner(keys[2].priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &ssh.Certificate{
+		Key:             userPub,
+		Serial:          1,
+		CertType:        ssh.UserCert,
+		KeyId:           "alice",
+		ValidPrincipals: []string{"alice"},
+		ValidBefore:     ssh.CertTimeInfinity,
+	}
+	if err := cert.SignCert(rand.Reader, caSigner); err != nil {
+		t.Fatal(err)
+	}
+	want := ssh.FingerprintSHA256(userPub)
+	if want == ssh.FingerprintSHA256(cert) {
+		t.Fatal("fixture: certificate and key fingerprints coincide")
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(cert)))
+
+	pubFile, ok := ParseSSHPublicKeyFile([]byte(line + " alice@example.com\n"))
+	if !ok || pubFile.Fingerprint != want || pubFile.Algorithm != ssh.CertAlgoED25519v01 || pubFile.SizeBits != 256 {
+		t.Errorf(".pub: %+v", pubFile)
+	}
+	auth, ok := ParseSSHPublicKeyLine([]byte(line))
+	if !ok || auth.Fingerprint != want {
+		t.Errorf("authorized_keys: %+v", auth)
+	}
+	keysOut, ok := ParseOpenSSHPrivateKey(append(keyTestContainer("none", "none", nil, 1, [][]byte{cert.Marshal()}), keyTestSSHString(keyTestRandom(32))...))
+	if !ok || len(keysOut) != 1 || keysOut[0].SSHFingerprint != want || keysOut[0].PublicKeySHA256 != keyTestSPKIHash(t, keys[5].priv.Public()) {
+		t.Errorf("container: %+v", keysOut)
 	}
 }

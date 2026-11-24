@@ -172,7 +172,10 @@ func keyDescribeSSHPublic(pub ssh.PublicKey) keySSHDescription {
 	if c, ok := pub.(*ssh.Certificate); ok {
 		pub = c.Key
 	}
-	d := keySSHDescription{typ: outer.Type(), fingerprint: ssh.FingerprintSHA256(outer)}
+	// The fingerprint of a certificate is the certified key's, as
+	// `ssh-keygen -lf` prints it: that is what pairs the certificate with the
+	// key it certifies. The type stays the certificate's, as the file spells it.
+	d := keySSHDescription{typ: outer.Type(), fingerprint: ssh.FingerprintSHA256(pub)}
 	t := pub.Type()
 	cpk, ok := pub.(ssh.CryptoPublicKey)
 	if !ok {
@@ -218,7 +221,8 @@ func keyDescribeSSHBlob(blob []byte) (keySSHDescription, bool) {
 	r := keySSHReader{b: blob}
 	if t := r.str(); !r.bad && string(t) == keySSHDSS {
 		p, q, g, y := r.mpint(), r.mpint(), r.mpint(), r.mpint()
-		if r.bad || p.Sign() <= 0 {
+		// Exactly four mpints: trailing bytes mean this is not a DSA key.
+		if r.bad || len(r.b) != 0 || p.Sign() <= 0 {
 			return keySSHDescription{}, false
 		}
 		sum := sha256.Sum256(blob)
@@ -249,27 +253,24 @@ func keySSHPublicKey(d keySSHDescription) SSHPublicKey {
 
 // keyParseKeyLine reads "[options] type base64 [comment]". x/crypto/ssh
 // does it for every type it knows; a line it refuses is tried as ssh-dss,
-// which it no longer knows.
+// which it no longer knows, after tokenising the line the way sshd does:
+// whitespace inside a quoted option does not separate tokens, so a quoted
+// command containing " ssh-dss " cannot be taken for the key.
 func keyParseKeyLine(line []byte) (keySSHDescription, []string, bool) {
 	if pub, _, options, _, err := ssh.ParseAuthorizedKey(line); err == nil {
 		return keyDescribeSSHPublic(pub), options, true
 	}
-	s := string(line)
-	var opts string
+	tok := keyTokens(string(line), 3)
+	var opts, b64 string
 	switch {
-	case strings.HasPrefix(s, keySSHDSS+" "):
+	case len(tok) >= 2 && tok[0] == keySSHDSS:
+		b64 = tok[1]
+	case len(tok) >= 3 && tok[1] == keySSHDSS:
+		opts, b64 = tok[0], tok[2]
 	default:
-		i := strings.Index(s, " "+keySSHDSS+" ")
-		if i < 0 {
-			return keySSHDescription{}, nil, false
-		}
-		opts, s = s[:i], s[i+1:]
-	}
-	fields := strings.Fields(s)
-	if len(fields) < 2 {
 		return keySSHDescription{}, nil, false
 	}
-	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	blob, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return keySSHDescription{}, nil, false
 	}
@@ -278,6 +279,42 @@ func keyParseKeyLine(line []byte) (keySSHDescription, []string, bool) {
 		return keySSHDescription{}, nil, false
 	}
 	return d, keySplitOptions(opts), true
+}
+
+// keyTokens splits s on spaces and tabs outside double quotes, returning at
+// most max tokens (the rest of the line is not needed: it is the comment).
+func keyTokens(s string, max int) []string {
+	var out []string
+	inQuote, start := false, -1
+	for i := 0; i < len(s) && len(out) < max; i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && inQuote:
+			if start < 0 {
+				start = i
+			}
+			i++
+		case c == '"':
+			if start < 0 {
+				start = i
+			}
+			inQuote = !inQuote
+		case (c == ' ' || c == '\t') && !inQuote:
+			if start >= 0 {
+				out = append(out, s[start:i])
+				start = -1
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 && len(out) < max {
+		end := len(s)
+		out = append(out, s[start:end])
+	}
+	return out
 }
 
 // keySplitOptions splits an authorized_keys option list on the commas that
@@ -359,9 +396,9 @@ func ParseSSHPublicKeyLine(line []byte) (SSHPublicKey, bool) {
 
 // ParseAuthorizedKeys reads an authorized_keys file, at most max keys (0
 // means the package's 2000). Blank lines and comments are skipped; a line that
-// is neither and does not parse counts as malformed. When len(keys) == max
-// the file may hold more.
-func ParseAuthorizedKeys(b []byte, max int) (keys []SSHPublicKey, malformed int) {
+// is neither and does not parse counts as malformed. truncated is true when
+// max stopped the walk with entries left unread.
+func ParseAuthorizedKeys(b []byte, max int) (keys []SSHPublicKey, malformed int, truncated bool) {
 	if max <= 0 {
 		max = keyDefaultMaxRecords
 	}
@@ -383,7 +420,24 @@ func ParseAuthorizedKeys(b []byte, max int) (keys []SSHPublicKey, malformed int)
 		}
 		keys = append(keys, k)
 	}
-	return keys, malformed
+	return keys, malformed, keyHasEntry(b)
+}
+
+// keyHasEntry reports whether b holds a line that is neither blank nor a
+// comment.
+func keyHasEntry(b []byte) bool {
+	for len(b) > 0 {
+		var line []byte
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			line, b = b[:i], b[i+1:]
+		} else {
+			line, b = b, nil
+		}
+		if t := bytes.TrimSpace(line); len(t) > 0 && t[0] != '#' {
+			return true
+		}
+	}
+	return false
 }
 
 // SummariseKnownHosts counts a known_hosts file's entries and says whether
