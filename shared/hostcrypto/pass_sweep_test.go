@@ -2,6 +2,7 @@ package hostcrypto
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -188,4 +189,78 @@ func TestSweepBudget(t *testing.T) {
 			t.Fatalf("excluded path swept: %s", h.Info.Path)
 		}
 	}
+}
+
+// TestSweepCountsWhatItSkips: files over the size bound and unreadable
+// entries make the sweep partial with a LimitHit each (review item 7).
+func TestSweepCountsWhatItSkips(t *testing.T) {
+	certPEM, _, _, _ := tgtMaterial(t)
+	ft := newTgtFakeTarget(true).
+		file("/srv/a.pem", certPEM).
+		file("/srv/huge.pem", make([]byte, 2048)).
+		file("/srv/odd.pem", certPEM).unreadable("/srv/odd.pem").
+		fifo("/srv/pipe.pem")
+	c := tgtCollection(ft, Options{MaxFileBytes: 1024})
+	hits := sweep(context.Background(), c, []string{"/srv"})
+	if len(hits) != 1 || c.report.SectionState(SectionSweep) != SectionPartial {
+		t.Fatalf("hits %d, sweep %q", len(hits), c.report.SectionState(SectionSweep))
+	}
+	got := map[string]bool{}
+	for _, l := range c.report.Limits {
+		got[l.Limit] = l.Section == SectionSweep
+	}
+	// The fake refuses a FIFO as the real targets do.
+	if _, err := ft.Identify(context.Background(), "/srv/pipe.pem"); !errors.Is(err, errNotRegular) {
+		t.Fatalf("fake FIFO: %v", err)
+	}
+	if !got["max_file_bytes"] || !got["unreadable"] {
+		t.Fatalf("limits: %+v", c.report.Limits)
+	}
+}
+
+// TestSweepRemoteNamesAndHitStat (review item 11): a remote sweep identifies
+// the default SSH key names, which have no extension, and Stats each hit
+// whose listing carried no permissions (remote Windows) — each hit, not each
+// file.
+func TestSweepRemoteNamesAndHitStat(t *testing.T) {
+	_, keyPEM, _, _ := tgtMaterial(t)
+	ft := newTgtFakeTarget(false).
+		file("/home/u/.ssh/id_ed25519", keyPEM).
+		file("/etc/ssh/ssh_host_rsa_key", keyPEM).
+		file("/home/u/.ssh/config", []byte("Host x\n")).
+		file("/home/u/notes", keyPEM)
+	c := tgtCollection(ft, Options{})
+	hits := sweep(context.Background(), c, []string{"/home", "/etc"})
+	var paths []string
+	for _, h := range hits {
+		paths = append(paths, h.Info.Path)
+	}
+	if strings.Join(paths, ",") != "/etc/ssh/ssh_host_rsa_key,/home/u/.ssh/id_ed25519" {
+		t.Fatalf("hits %q", paths)
+	}
+	if ft.called("identify", "/home/u/notes") || ft.called("identify", "/home/u/.ssh/config") {
+		t.Fatal("a remote sweep identified a file by content")
+	}
+
+	// A listing without WorldReadable: the hit is Stat'ed, the rest are not.
+	nl := &tgtNoACLTarget{tgtFakeTarget: newTgtFakeTarget(false).file("/c/a.pfx", []byte{0x30, 0x82, 1, 2}).file("/c/readme.txt", []byte("x"))}
+	c = tgtCollection(nl, Options{})
+	hits = sweep(context.Background(), c, []string{"/c"})
+	if len(hits) != 1 || hits[0].Info.WorldReadable == nil {
+		t.Fatalf("hits %+v", hits)
+	}
+	if !nl.called("stat", "/c/a.pfx") || nl.called("stat", "/c/readme.txt") {
+		t.Fatalf("stat calls: %q", nl.recorded())
+	}
+}
+
+// tgtNoACLTarget lists like the remote Windows target: no permissions.
+type tgtNoACLTarget struct{ *tgtFakeTarget }
+
+func (t *tgtNoACLTarget) List(ctx context.Context, root string, opts ListOptions) ([]FileInfo, error) {
+	files, err := t.tgtFakeTarget.List(ctx, root, opts)
+	for i := range files {
+		files[i].WorldReadable, files[i].GroupReadable = nil, nil
+	}
+	return files, err
 }

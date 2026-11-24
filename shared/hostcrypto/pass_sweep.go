@@ -41,8 +41,19 @@ var sweepExtensions = map[string]bool{
 	".pub": true,
 }
 
+// sweepNames are extensionless names worth identifying remotely: the
+// default names of SSH keys. ssh_host_*_key is matched by pattern.
+var sweepNames = map[string]bool{
+	"id_rsa": true, "id_dsa": true, "id_ecdsa": true, "id_ed25519": true, "id_xmss": true,
+	"id_ecdsa_sk": true, "id_ed25519_sk": true, "identity": true,
+}
+
 func interestingName(path string) bool {
-	return sweepExtensions[extOf(strings.ToLower(baseName(path)))]
+	base := strings.ToLower(baseName(path))
+	if sweepExtensions[extOf(base)] || sweepNames[base] {
+		return true
+	}
+	return strings.HasPrefix(base, "ssh_host_") && strings.HasSuffix(base, "_key")
 }
 
 // sweep walks roots within the run's budget and returns the hits, sorted by
@@ -89,6 +100,12 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			if lerr.Truncated {
 				c.limit(SectionSweep, "max_files", fmt.Sprintf("stopped after %d files", c.opts.maxFiles()))
 			}
+			if lerr.OverSize > 0 {
+				c.limit(SectionSweep, "max_file_bytes", fmt.Sprintf("skipped files over %d bytes", c.opts.maxFileBytes()))
+			}
+			if lerr.Unreadable > 0 {
+				c.limit(SectionSweep, "unreadable", fmt.Sprintf("%d entries could not be read", lerr.Unreadable))
+			}
 		case errors.Is(err, ErrNotExist):
 			continue
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -107,7 +124,9 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 		for _, fi := range files {
 			if fi.IsSymlink || fi.IsDir {
 				// A link is the file it points at, which a pass reaches by
-				// its own path; following it here could leave the root.
+				// its own path; following it here could leave the root. It
+				// is remembered, so the registry knows the two are one.
+				c.registry.addLink(fi.Path, fi.LinkTarget)
 				continue
 			}
 			if ctx.Err() != nil {
@@ -121,6 +140,13 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			}
 			if !ok {
 				continue
+			}
+			if fi.WorldReadable == nil {
+				// A remote Windows listing carries no ACL (one Get-Acl per
+				// file is too slow): Stat each HIT, not each file.
+				if st, serr := c.target.Stat(ctx, fi.Path); serr == nil {
+					fi = st
+				}
 			}
 			hits = append(hits, sweepHit{Info: fi, Identity: id})
 		}

@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -399,4 +403,69 @@ func TestCollectionWrappers(t *testing.T) {
 	if c.report.SectionState(SectionCertificates) != SectionFailed || c.report.SectionState(SectionKeystores) != SectionPartial || len(c.report.Errors) != 15 {
 		t.Fatalf("sections %v, %d errors", c.report.Sections, len(c.report.Errors))
 	}
+}
+
+// TestRegistryRealPath (review item 12): one file reached by a link and by its
+// own path is one item, recorded under the shorter path.
+func TestRegistryRealPath(t *testing.T) {
+	// Remote: links learnt from listings.
+	r := newRegistry(0)
+	r.addLink("/etc/ssl/certs/abcd1234.0", "../../pki/tls/certs/ca-bundle.crt")
+	r.addLink("/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt")
+	for _, p := range []string{"/etc/ssl/certs/abcd1234.0", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"} {
+		r.addCertificate(Certificate{Location: Location{Path: p, FoundBy: FoundByKnownLocation}, FingerprintSHA256: "f"})
+	}
+	rep := &Report{}
+	r.finish(rep)
+	if len(rep.Certificates) != 1 || rep.Certificates[0].Location.Path != "/etc/ssl/cert.pem" {
+		t.Fatalf("remote: %+v", rep.Certificates)
+	}
+	if got := joinLinkTarget(`C:\certs\link.pem`, "real.pem"); got != `C:\certs\real.pem` {
+		t.Fatalf("windows relative target: %q", got)
+	}
+
+	// Local: resolved through the filesystem.
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir := t.TempDir()
+	real := filepath.Join(dir, "deep", "real-bundle.pem")
+	tgtWrite(t, dir, "deep/real-bundle.pem", []byte("x"), 0o644)
+	link := filepath.Join(dir, "c.pem")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	lr := newRegistry(0)
+	lr.resolve = localRealPath
+	lr.addCertificate(Certificate{Location: Location{Path: real, FoundBy: FoundBySweep}, FingerprintSHA256: "f"})
+	lr.addCertificate(Certificate{Location: Location{Path: link, FoundBy: FoundByConfig}, FingerprintSHA256: "f"})
+	rep = &Report{}
+	lr.finish(rep)
+	if len(rep.Certificates) != 1 || rep.Certificates[0].Location.Path != link || rep.Certificates[0].Location.FoundBy != FoundByConfig {
+		t.Fatalf("local: %+v", rep.Certificates)
+	}
+}
+
+// TestCollectThreadsMaxFileBytes: Options.MaxFileBytes reaches the target.
+func TestCollectThreadsMaxFileBytes(t *testing.T) {
+	ft := newTgtFakeTarget(true).file("/x.conf", make([]byte, 100))
+	if _, err := Collect(context.Background(), ft, Options{Platform: "linux", MaxFileBytes: 50}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ft.ReadText(context.Background(), "/x.conf"); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("bound not threaded: %v", err)
+	}
+}
+
+// TestLocalRunnerRunInput: the InputRunner the Windows target relies on.
+func TestLocalRunnerRunInput(t *testing.T) {
+	if _, err := exec.LookPath("cat"); err != nil {
+		t.Skip("no cat")
+	}
+	var ir hostinventory.InputRunner = hostinventory.NewLocalRunner()
+	out, _, exit, err := ir.RunInput(context.Background(), []string{"cat"}, []byte("line one\nline two\n"))
+	if err != nil || exit != 0 || string(out) != "line one\nline two\n" {
+		t.Fatalf("RunInput: %q %d %v", out, exit, err)
+	}
+	var _ hostinventory.InputRunner = (*hostinventory.SSHRunner)(nil)
 }

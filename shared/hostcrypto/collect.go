@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -416,12 +419,22 @@ func Collect(ctx context.Context, t Target, opts Options) (*Report, error) {
 	rep.mark(SectionPlatform, SectionOK)
 	opts.Platform = rep.Platform
 
+	// The read bound reaches the target, so Identify's window and every read
+	// honour Options.MaxFileBytes.
+	if b, ok := t.(interface{ SetMaxFileBytes(int64) }); ok {
+		b.SetMaxFileBytes(opts.maxFileBytes())
+	}
+
 	deadline, _ := ctx.Deadline()
+	reg := newRegistry(opts.maxRecordsPerSection())
+	if t.Local() {
+		reg.resolve = localRealPath
+	}
 	c := &collection{
 		target:   t,
 		opts:     opts,
 		report:   rep,
-		registry: newRegistry(opts.maxRecordsPerSection()),
+		registry: reg,
 		budget:   newBudget(opts.maxFiles(), deadline, nil),
 	}
 	for _, p := range passes {
@@ -474,9 +487,77 @@ func mergeLocation(dst *Location, src Location) {
 	}
 }
 
-// locKey is a Location's identity as a de-duplication key.
-func locKey(l Location) string {
-	return l.Path + "\x00" + l.Store + "\x00" + l.Container + "\x00" + l.Alias
+// localRealPath resolves a local path through every symbolic link, or
+// returns it unchanged when it cannot.
+func localRealPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// realPath is the path an item is de-duplicated on: resolved through the
+// filesystem on a local target, through the links the passes have seen
+// (FileInfo.LinkTarget) on a remote one, at most eight hops.
+func (r *registry) realPath(p string) string {
+	if p == "" {
+		return p
+	}
+	if r.resolve != nil {
+		return r.resolve(p)
+	}
+	for i := 0; i < 8; i++ {
+		t, ok := r.links[p]
+		if !ok {
+			break
+		}
+		p = t
+	}
+	return p
+}
+
+// addLink records that path is a link to target, as a remote listing
+// reported it. A relative target is resolved against the link's directory,
+// in the link's own separator style.
+func (r *registry) addLink(linkPath, target string) {
+	if linkPath == "" || target == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.links == nil {
+		r.links = map[string]string{}
+	}
+	r.links[linkPath] = joinLinkTarget(linkPath, target)
+}
+
+// joinLinkTarget resolves a link target the way the far host would.
+func joinLinkTarget(linkPath, target string) string {
+	if strings.HasPrefix(target, "/") || strings.HasPrefix(target, `\`) || (len(target) > 2 && target[1] == ':') {
+		return target
+	}
+	if strings.Contains(linkPath, `\`) && !strings.Contains(linkPath, "/") {
+		i := strings.LastIndexByte(linkPath, '\\')
+		return linkPath[:i+1] + target
+	}
+	return path.Join(path.Dir(linkPath), target)
+}
+
+// key is a Location's identity as a de-duplication key: its REAL path, so
+// /etc/ssl/certs/abcd.0 and the bundle file it links to are one item.
+func (r *registry) key(l Location) string {
+	return r.realPath(l.Path) + "\x00" + l.Store + "\x00" + l.Container + "\x00" + l.Alias
+}
+
+// mergeInto folds a second sighting of an item into the first and keeps the
+// shortest literal path it was reached by (ties: the lexically first), so the
+// record names the path a person would recognise and the output is the same
+// whatever order the passes ran in.
+func mergeInto(dst *Location, src Location) {
+	mergeLocation(dst, src)
+	if src.Path != "" && (len(src.Path) < len(dst.Path) || len(src.Path) == len(dst.Path) && src.Path < dst.Path) {
+		dst.Path = src.Path
+	}
 }
 
 // keyed is one section's items, by key, in first-seen order.
@@ -530,6 +611,11 @@ type registry struct {
 	sshCount int
 	// limited records which sections hit the bound, for finish.
 	limited map[string]bool
+
+	// resolve, when set, resolves a path to its real path (a local target);
+	// otherwise links (from remote listings) are followed.
+	resolve func(string) string
+	links   map[string]string
 }
 
 func newRegistry(maxRecords int) *registry {
@@ -553,9 +639,9 @@ func (r *registry) admit(section string, n int) bool {
 func (r *registry) addCertificate(c Certificate) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(c.Location) + "\x00" + c.FingerprintSHA256
+	key := r.key(c.Location) + "\x00" + c.FingerprintSHA256
 	if have, ok := r.certs.get(key); ok {
-		mergeLocation(&have.Location, c.Location)
+		mergeInto(&have.Location, c.Location)
 		return true
 	}
 	if !r.admit(SectionCertificates, len(r.certs.items)) {
@@ -570,9 +656,9 @@ func (r *registry) addCertificate(c Certificate) bool {
 func (r *registry) addPrivateKey(k PrivateKey) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(k.Location) + "\x00" + k.PublicKeySHA256 + "\x00" + k.SSHFingerprint
+	key := r.key(k.Location) + "\x00" + k.PublicKeySHA256 + "\x00" + k.SSHFingerprint
 	if have, ok := r.keys.get(key); ok {
-		mergeLocation(&have.Location, k.Location)
+		mergeInto(&have.Location, k.Location)
 		return true
 	}
 	if !r.admit(SectionPrivateKeys, len(r.keys.items)) {
@@ -586,9 +672,9 @@ func (r *registry) addPrivateKey(k PrivateKey) bool {
 func (r *registry) addKeystore(k Keystore) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(k.Location)
+	key := r.key(k.Location)
 	if have, ok := r.keystores.get(key); ok {
-		mergeLocation(&have.Location, k.Location)
+		mergeInto(&have.Location, k.Location)
 		return true
 	}
 	if !r.admit(SectionKeystores, len(r.keystores.items)) {
@@ -603,9 +689,9 @@ func (r *registry) addKeystore(k Keystore) bool {
 func (r *registry) addConfig(cfg CryptoConfig) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(cfg.Location) + "\x00" + cfg.Product + "\x00" + cfg.Context
+	key := r.key(cfg.Location) + "\x00" + cfg.Product + "\x00" + cfg.Context
 	if have, ok := r.configs.get(key); ok {
-		mergeLocation(&have.Location, cfg.Location)
+		mergeInto(&have.Location, cfg.Location)
 		return true
 	}
 	if !r.admit(SectionConfigs, len(r.configs.items)) {
@@ -640,9 +726,9 @@ func (r *registry) addLibrary(l CryptoLibrary) bool {
 func (r *registry) addAuthorizedKeys(a AuthorizedKeysFile) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(a.Location)
+	key := r.key(a.Location)
 	if have, ok := r.authKeys.get(key); ok {
-		mergeLocation(&have.Location, a.Location)
+		mergeInto(&have.Location, a.Location)
 		return true
 	}
 	if !r.admit(SectionSSH, r.sshCount) {
@@ -657,9 +743,9 @@ func (r *registry) addAuthorizedKeys(a AuthorizedKeysFile) bool {
 func (r *registry) addKnownHosts(k KnownHostsFile) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := locKey(k.Location)
+	key := r.key(k.Location)
 	if have, ok := r.known.get(key); ok {
-		mergeLocation(&have.Location, k.Location)
+		mergeInto(&have.Location, k.Location)
 		return true
 	}
 	if !r.admit(SectionSSH, r.sshCount) {
