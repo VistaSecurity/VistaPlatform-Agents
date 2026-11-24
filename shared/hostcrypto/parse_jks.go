@@ -150,7 +150,7 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 						entry.Algorithm = cert.KeyAlgorithm
 						entry.SizeBits = cert.KeySize
 						entry.PublicKeySHA256 = cert.PublicKeySHA256
-						_ = cert.Curve // TODO(merge): set Curve
+						entry.Curve = cert.Curve
 					}
 				}
 				if parsed {
@@ -169,7 +169,7 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 				entry.Algorithm = cert.KeyAlgorithm
 				entry.SizeBits = cert.KeySize
 				entry.PublicKeySHA256 = cert.PublicKeySHA256
-				_ = cert.Curve // TODO(merge): set Curve
+				entry.Curve = cert.Curve
 				cert = ksTrustAnchor(cert)
 				cert.Location.Alias = alias
 				out.Certificates = append(out.Certificates, cert)

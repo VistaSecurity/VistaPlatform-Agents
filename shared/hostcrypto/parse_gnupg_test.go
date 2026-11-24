@@ -151,7 +151,7 @@ func ksWantRing(fx ksPGPFixture) []KeystoreEntry {
 		{Alias: fx.rsaFP, Kind: "pgp_public_key", Algorithm: "RSA", SizeBits: 2048},
 		{Alias: fx.edFP, Kind: "pgp_public_key", Algorithm: "Ed25519", SizeBits: 256},
 		{Alias: fx.cvFP, Kind: "pgp_public_subkey", Algorithm: "X25519", SizeBits: 256},
-		{Alias: fx.p256FP, Kind: "pgp_public_key", Algorithm: "ECDSA", SizeBits: 256},
+		{Alias: fx.p256FP, Kind: "pgp_public_key", Algorithm: "ECDSA", SizeBits: 256, Curve: "P-256"},
 		{Alias: fx.v6, Kind: "pgp_public_key", Algorithm: "Ed25519", SizeBits: 256},
 	}
 }

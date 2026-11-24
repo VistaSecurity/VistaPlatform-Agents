@@ -281,9 +281,7 @@ func ksPGPPublicKey(body []byte) (KeystoreEntry, bool) {
 	default:
 		return KeystoreEntry{}, false
 	}
-	var curve string
-	e.Algorithm, e.SizeBits, curve = ksPGPAlgorithm(algo, material)
-	_ = curve // TODO(merge): set Curve
+	e.Algorithm, e.SizeBits, e.Curve = ksPGPAlgorithm(algo, material)
 	return e, true
 }
 

@@ -728,11 +728,11 @@ func ksP12Build(bags []ksP12Bag, maxEntries int) (entries []KeystoreEntry, certs
 				if pc[leaf].x != nil {
 					c := pc[leaf].c
 					e.Algorithm, e.SizeBits, e.PublicKeySHA256 = c.KeyAlgorithm, c.KeySize, c.PublicKeySHA256
-					_ = c.Curve // TODO(merge): set Curve
+					e.Curve = c.Curve
 				}
 			} else if bag.plainAlg != "" {
 				e.Algorithm, e.SizeBits = bag.plainAlg, bag.plainBits
-				_ = bag.plainCurve // TODO(merge): set Curve
+				e.Curve = bag.plainCurve
 			}
 			add(e)
 		case "secret_key":
@@ -745,7 +745,7 @@ func ksP12Build(bags []ksP12Bag, maxEntries int) (entries []KeystoreEntry, certs
 			if pc[i].x != nil {
 				c := pc[i].c
 				e.Algorithm, e.SizeBits, e.PublicKeySHA256 = c.KeyAlgorithm, c.KeySize, c.PublicKeySHA256
-				_ = c.Curve // TODO(merge): set Curve
+				e.Curve = c.Curve
 			}
 			add(e)
 		}

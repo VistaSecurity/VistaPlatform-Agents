@@ -4,10 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
-	"time"
-
-	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 )
 
 // KeystoreContents is what one keystore file yielded.
@@ -47,76 +43,20 @@ var DefaultKeystorePasswords = []string{"changeit", "changeme", "password", ""}
 // it claims, so a reader can see the list is cut short.
 const DefaultMaxKeystoreEntries = 5000
 
-// ksCertificate describes one DER certificate found inside a keystore.
-// Location is left zero: the caller sets Location.Alias, and the collector the
-// rest. It reports false when the bytes are not a certificate.
-//
-// The fingerprint and DN spelling come from shared/certificates, exactly as
-// hostinventory's summariseCert takes them, so the same certificate found in a
-// keystore, in a trust store and on the wire carries the same identity.
-//
-// TODO(merge): replace with ParseCertificateDER
+// ksCertificate describes one DER certificate found inside a keystore, through
+// the package's one certificate parser, so the same certificate found in a
+// keystore, in a file and on the wire carries the same identity. Location is
+// left zero: the caller sets Location.Alias, and the collector the rest. It
+// reports false when the bytes are not a certificate.
 func ksCertificate(der []byte) (Certificate, bool) {
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return Certificate{}, false
-	}
-	return ksCertificateFrom(cert), true
+	c, err := ParseCertificateDER(der)
+	return c, err == nil
 }
 
 // ksCertificateFrom is ksCertificate for a certificate already parsed.
-//
-// TODO(merge): replace with the shared certificate parser
 func ksCertificateFrom(cert *x509.Certificate) Certificate {
-	info := certificates.ExtractCertificatesFromX509([]*x509.Certificate{cert})[0]
-	out := Certificate{
-		SubjectDN:         info.SubjectDN,
-		IssuerDN:          info.IssuerDN,
-		SerialNumber:      info.SerialNumber,
-		FingerprintSHA256: info.FingerprintSHA256,
-		NotBefore:         cert.NotBefore.UTC().Format(time.RFC3339),
-		NotAfter:          cert.NotAfter.UTC().Format(time.RFC3339),
-		KeyAlgorithm:      ksKeyAlgorithmName(cert.PublicKeyAlgorithm),
-		KeySize:           certificates.CalculateKeySize(cert.PublicKey),
-		Curve:             certificates.PublicKeyCurve(cert.PublicKey),
-		SignatureAlg:      info.SignatureAlg,
-		IsCA:              cert.IsCA,
-		SelfSigned:        ksSelfSigned(cert),
-		DNSNames:          cert.DNSNames,
-		PublicKeySHA256:   certificates.PublicKeyFingerprintSHA256(cert),
-		CertificatePEM:    string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})),
-	}
-	for _, ip := range cert.IPAddresses {
-		out.IPAddresses = append(out.IPAddresses, ip.String())
-	}
-	return out
-}
-
-// ksKeyAlgorithmName spells a certificate's key algorithm the catalogue's way.
-func ksKeyAlgorithmName(a x509.PublicKeyAlgorithm) string {
-	switch a {
-	case x509.RSA:
-		return "RSA"
-	case x509.ECDSA:
-		return "ECDSA"
-	case x509.Ed25519:
-		return "Ed25519"
-	case x509.DSA:
-		return "DSA"
-	default:
-		return ""
-	}
-}
-
-// ksSelfSigned is true when the certificate names itself as issuer and its
-// own key verifies its signature. CheckSignatureFrom is not used: it also
-// demands the issuer be a CA, and a self-signed leaf is exactly what a
-// keystore often holds.
-func ksSelfSigned(cert *x509.Certificate) bool {
-	if string(cert.RawIssuer) != string(cert.RawSubject) {
-		return false
-	}
-	return cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil
+	c, _ := ksCertificate(cert.Raw)
+	return c
 }
 
 // ksDERFingerprint is the SHA-256 of bytes that should be a certificate, in
