@@ -15,7 +15,8 @@ import (
 // The parsers take bytes and nothing else, exactly as host inventory's do.
 // What differs between the modes is which bytes the collector may ask for,
 // and that rule lives in one place: [Target.ReadFile] on a remote target
-// refuses any path whose [Identity] is not public.
+// refuses any path whose [Identity] is not public, and [Target.ReadText]
+// redacts on the host.
 type Target interface {
 	hostinventory.Runner
 
@@ -40,7 +41,32 @@ type Target interface {
 	// answers it runs on the host and returns only those markers: at most
 	// [MagicBytes] bytes from the start of the file and the label lines.
 	Identify(ctx context.Context, path string) (Identity, error)
+
+	// ReadText returns a configuration file a pass has named, with anything
+	// that could be key material taken out ON THE HOST before the bytes
+	// leave it: every PEM block whose label is not on the public list is
+	// dropped, and every run of [RedactRunLength] or more base64 or
+	// hexadecimal characters is replaced by [RedactedMarker]. redactions
+	// counts what was removed. A file that is not text is refused with
+	// ErrNotPublic.
+	//
+	// Local and remote targets apply the SAME redaction, so a parser sees
+	// the same bytes in both modes. A caller uses ReadText only for a path
+	// a pass has a reason to treat as configuration (a known location, or a
+	// file another configuration includes); it is never the way to look
+	// inside a file the sweep merely found.
+	ReadText(ctx context.Context, path string) (text []byte, redactions int, err error)
 }
+
+// RedactRunLength is the length of an unbroken run of base64 or hexadecimal
+// characters at which [Target.ReadText] redacts. Forty is below the shortest
+// encoded secret worth the name (a 32-byte key is 43 base64 or 64 hex
+// characters) and above every cipher, group and algorithm name: those are
+// broken by '-', ':', '_' or '@' long before forty.
+const RedactRunLength = 40
+
+// RedactedMarker replaces a redacted run.
+const RedactedMarker = "[redacted]"
 
 // MagicBytes is how much of a file's start [Target.Identify] may return. Eight
 // bytes name every format this package recognises (JKS FEEDFEED, JCEKS
@@ -54,6 +80,9 @@ var (
 	ErrNotExist      = errors.New("hostcrypto: no such file or directory")
 	ErrPermission    = errors.New("hostcrypto: permission denied")
 	ErrListTruncated = errors.New("hostcrypto: the listing stopped at a bound")
+	// ErrFileTooLarge is returned by a read of a file over the size bound.
+	// Nothing of the file is returned.
+	ErrFileTooLarge = errors.New("hostcrypto: the file is larger than the read bound")
 	// ErrNotPublic is returned by a remote target's ReadFile for a path whose
 	// Identity is not public. It is a programming error for a collector to
 	// reach it: the read was refused, and nothing crossed the connection.
@@ -136,13 +165,15 @@ type Identity struct {
 }
 
 // Public reports whether a file of this identity holds nothing private, so
-// its bytes may cross a remote connection: a certificate, a public key, a
-// request, a revocation list, parameters, or plain text. A file holding a
-// private key in any form is not public, and neither is a keystore, a PGP
-// keyring or anything unidentified.
+// its bytes may cross a remote connection whole: a certificate, a public key,
+// a request, a revocation list or parameters. A file holding a private key in
+// any form is not public, and neither is a keystore, a PGP keyring, anything
+// unidentified, or plain text. Text is not public because a secret needs no
+// marker: a WireGuard key, a kubeconfig and a Tor service key are all
+// printable. A configuration file is read with [Target.ReadText] instead.
 func (i Identity) Public() bool {
 	switch i.Class {
-	case ClassCertificate, ClassPublicKey, ClassCSR, ClassCRL, ClassDHParams, ClassText:
+	case ClassCertificate, ClassPublicKey, ClassCSR, ClassCRL, ClassDHParams:
 		return true
 	default:
 		return false
