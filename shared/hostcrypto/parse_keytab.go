@@ -113,6 +113,7 @@ func ksParseKeytab(b []byte, maxEntries int) (KeystoreContents, error) {
 		}
 		if count >= maxEntries {
 			// Keep counting so EntryCount is honest; stop keeping entries.
+			out.Truncated = true
 			count++
 			continue
 		}

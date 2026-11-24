@@ -11,9 +11,26 @@ import (
 )
 
 // KeystoreContents is what one keystore file yielded.
+//
+// Entries follow keytool's rule in every format, so a JKS and the same store
+// converted to PKCS#12 list alike: ONE ENTRY PER KEY, carrying its
+// certificate chain, and ONE PER TRUSTED CERTIFICATE (a certificate that is
+// in no key's chain). A key's own certificate and its chain are not separate
+// entries; they are in Certificates, under the key's alias. EntryCount counts
+// entries by the same rule.
 type KeystoreContents struct {
 	Keystore     Keystore
 	Certificates []Certificate // certificates inside it; Location.Alias set
+
+	// DefaultsNotTried says, in a few words, why default passwords were not
+	// tried although the operator asked ("iteration count above the limit",
+	// "integrity is by signature"). Empty when they were tried or not asked
+	// for. Keystore.DefaultPassword is nil whenever this is set; the collector
+	// records it as a LimitHit or a reason.
+	DefaultsNotTried string
+	// Truncated is true when the listing stopped before the end: the entry
+	// cap, or a JCEKS secret key that cannot be stepped over.
+	Truncated bool
 }
 
 // DefaultKeystorePasswords are the well-known defaults tried against JKS,
@@ -44,11 +61,14 @@ func ksCertificate(der []byte) (Certificate, bool) {
 	if err != nil {
 		return Certificate{}, false
 	}
-	infos := certificates.ExtractCertificatesFromX509([]*x509.Certificate{cert})
-	if len(infos) == 0 {
-		return Certificate{}, false
-	}
-	info := infos[0]
+	return ksCertificateFrom(cert), true
+}
+
+// ksCertificateFrom is ksCertificate for a certificate already parsed.
+//
+// TODO(merge): replace with the shared certificate parser
+func ksCertificateFrom(cert *x509.Certificate) Certificate {
+	info := certificates.ExtractCertificatesFromX509([]*x509.Certificate{cert})[0]
 	out := Certificate{
 		SubjectDN:         info.SubjectDN,
 		IssuerDN:          info.IssuerDN,
@@ -69,7 +89,7 @@ func ksCertificate(der []byte) (Certificate, bool) {
 	for _, ip := range cert.IPAddresses {
 		out.IPAddresses = append(out.IPAddresses, ip.String())
 	}
-	return out, true
+	return out
 }
 
 // ksKeyAlgorithmName spells a certificate's key algorithm the catalogue's way.

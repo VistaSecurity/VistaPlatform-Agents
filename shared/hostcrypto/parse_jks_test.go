@@ -108,6 +108,9 @@ func TestParseJKS_ListsWithoutAPassword(t *testing.T) {
 				t.Fatal(err)
 			}
 			ks := got.Keystore
+			if got.Truncated || got.DefaultsNotTried != "" {
+				t.Errorf("truncated %v, not tried %q", got.Truncated, got.DefaultsNotTried)
+			}
 			if ks.Type != tc.typ || ks.Protection != tc.prot || ks.Opened != OpenedWithoutPassword {
 				t.Errorf("type/protection/opened: %q %q %q", ks.Type, ks.Protection, ks.Opened)
 			}
@@ -192,8 +195,8 @@ func TestParseJKS_JCEKSSecretKeyStopsTheListing(t *testing.T) {
 	if len(ks.Entries) != 2 || ks.Entries[1].Kind != "secret_key" || ks.Entries[1].Alias != "hmac-key" {
 		t.Fatalf("entries: %+v", ks.Entries)
 	}
-	if ks.EntryCount == nil || *ks.EntryCount != 3 {
-		t.Errorf("EntryCount should keep the header's 3: %v", ks.EntryCount)
+	if ks.EntryCount == nil || *ks.EntryCount != 3 || !got.Truncated {
+		t.Errorf("EntryCount should keep the header's 3 and say the listing stopped: %v %v", ks.EntryCount, got.Truncated)
 	}
 	if ks.DefaultPassword == nil || !*ks.DefaultPassword {
 		t.Error("the digest check does not depend on the listing")
@@ -215,7 +218,7 @@ func TestParseJKS_EntryCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Keystore.Entries) != 5 || *got.Keystore.EntryCount != 7 {
+	if len(got.Keystore.Entries) != 5 || *got.Keystore.EntryCount != 7 || !got.Truncated {
 		t.Errorf("cap: %d entries, count %d", len(got.Keystore.Entries), *got.Keystore.EntryCount)
 	}
 }
@@ -248,6 +251,10 @@ func TestParseJKS_HostileInput(t *testing.T) {
 		if got.Keystore.EntryCount != nil {
 			t.Errorf("%s: claimed a count", name)
 		}
+	}
+	// Too short to hold a digest: not tried, and said so.
+	if got, _ := ParseJKS([]byte{0xfe, 0xed, 0xfe, 0xed, 0, 0, 0, 2, 0, 0, 0, 0}, true); got.Keystore.DefaultPassword != nil || got.DefaultsNotTried == "" {
+		t.Errorf("short store: %+v %q", got.Keystore, got.DefaultsNotTried)
 	}
 	// Zero entries is a valid, empty store.
 	got, err := ParseJKS(ksBuildJKS(ksMagicJKS, 2, "changeit"), true)

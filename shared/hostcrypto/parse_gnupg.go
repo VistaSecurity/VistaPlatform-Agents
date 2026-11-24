@@ -58,9 +58,10 @@ var ksPGPCurves = map[string]struct {
 // (DefaultMaxKeystoreEntries when max <= 0).
 //
 // Each entry's Alias is the key's fingerprint in upper-case hex, which is how
-// GnuPG prints it and how a person looks it up. It stops at the first packet
-// that does not parse and returns what it had.
-func ParseOpenPGPPublicKeyring(b []byte, max int) []KeystoreEntry {
+// GnuPG prints it and how a person looks it up. It stops at max entries or at
+// the first packet (or keybox blob) that does not parse, returns what it had,
+// and says so with truncated.
+func ParseOpenPGPPublicKeyring(b []byte, max int) (entries []KeystoreEntry, truncated bool) {
 	if max <= 0 {
 		max = DefaultMaxKeystoreEntries
 	}
@@ -80,14 +81,18 @@ func ksIsKeybox(b []byte) bool {
 // (u32), type (u8: 1 header, 2 OpenPGP, 3 X.509) and version (u8), flags
 // (u16), and, for the key blobs, the offset and length of the embedded
 // keyblock, relative to the blob's start.
-func ksParseKeybox(b []byte, max int) []KeystoreEntry {
+func ksParseKeybox(b []byte, max int) ([]KeystoreEntry, bool) {
 	var out []KeystoreEntry
+	damaged := false
 	r := &ksReader{b: b}
-	for r.remaining() > 0 && len(out) < max {
+	for r.remaining() > 0 {
+		if len(out) >= max {
+			return out, true
+		}
 		start := r.off
 		blobLen := int(r.u32())
 		if r.bad || blobLen < 6 || blobLen-4 > r.remaining() {
-			break
+			return out, true
 		}
 		blob := b[start : start+blobLen]
 		r.skip(blobLen - 4)
@@ -98,19 +103,30 @@ func ksParseKeybox(b []byte, max int) []KeystoreEntry {
 		off := int(br.u32())
 		n := int(br.u32())
 		if br.bad || off < 0 || n < 0 || off > len(blob) || n > len(blob)-off {
+			// One damaged blob: its length is still good, so go on.
+			damaged = true
 			continue
 		}
-		out = ksParsePGPPackets(blob[off:off+n], max, out)
+		var cut bool
+		if out, cut = ksParsePGPPackets(blob[off:off+n], max, out); cut {
+			if len(out) >= max {
+				return out, true
+			}
+			damaged = true
+		}
 	}
-	return out
+	return out, damaged
 }
 
 // ksParsePGPPackets walks a packet stream and appends the keys it finds.
-func ksParsePGPPackets(b []byte, max int, out []KeystoreEntry) []KeystoreEntry {
-	for len(b) > 0 && len(out) < max {
+func ksParsePGPPackets(b []byte, max int, out []KeystoreEntry) ([]KeystoreEntry, bool) {
+	for len(b) > 0 {
+		if len(out) >= max {
+			return out, true
+		}
 		tag, body, rest, ok := ksPGPPacket(b)
 		if !ok {
-			break
+			return out, true
 		}
 		b = rest
 		if tag != ksPGPTagPublicKey && tag != ksPGPTagPublicSubkey {
@@ -126,7 +142,7 @@ func ksParsePGPPackets(b []byte, max int, out []KeystoreEntry) []KeystoreEntry {
 		}
 		out = append(out, entry)
 	}
-	return out
+	return out, false
 }
 
 // ksPGPPacket splits off one packet in either header format. A packet with
@@ -265,7 +281,9 @@ func ksPGPPublicKey(body []byte) (KeystoreEntry, bool) {
 	default:
 		return KeystoreEntry{}, false
 	}
-	e.Algorithm, e.SizeBits = ksPGPAlgorithm(algo, material)
+	var curve string
+	e.Algorithm, e.SizeBits, curve = ksPGPAlgorithm(algo, material)
+	_ = curve // TODO(merge): set Curve
 	return e, true
 }
 
@@ -305,41 +323,42 @@ func ksMPIBits(b []byte) int {
 	return int(b[0])<<8 | int(b[1])
 }
 
-// ksPGPAlgorithm names a public-key algorithm id and finds its size.
-func ksPGPAlgorithm(algo byte, material []byte) (string, int) {
+// ksPGPAlgorithm names a public-key algorithm id and finds its size and,
+// for the curves that do not name themselves, its curve.
+func ksPGPAlgorithm(algo byte, material []byte) (name string, bits int, curve string) {
 	switch algo {
 	case 1, 2, 3:
-		return "RSA", ksMPIBits(material)
+		return "RSA", ksMPIBits(material), ""
 	case 16, 20:
-		return "ElGamal", ksMPIBits(material)
+		return "ElGamal", ksMPIBits(material), ""
 	case 17:
-		return "DSA", ksMPIBits(material)
+		return "DSA", ksMPIBits(material), ""
 	case 18, 19, 22:
-		name, bits := ksPGPCurve(material)
+		c, bits := ksPGPCurve(material)
 		switch {
-		case algo == 22 && (name == "Ed25519" || name == "Ed448"):
-			return name, bits
+		case algo == 22 && (c == "Ed25519" || c == "Ed448"):
+			return c, bits, ""
 		case algo == 22:
-			return "EdDSA", bits
-		case algo == 18 && name == "Curve25519":
-			return "X25519", bits
-		case algo == 18 && name == "X448":
-			return "X448", bits
+			return "EdDSA", bits, c
+		case algo == 18 && c == "Curve25519":
+			return "X25519", bits, ""
+		case algo == 18 && c == "X448":
+			return "X448", bits, ""
 		case algo == 18:
-			return "ECDH", bits
+			return "ECDH", bits, c
 		default:
-			return "ECDSA", bits
+			return "ECDSA", bits, c
 		}
 	case 25:
-		return "X25519", 256
+		return "X25519", 256, ""
 	case 26:
-		return "X448", 448
+		return "X448", 448, ""
 	case 27:
-		return "Ed25519", 256
+		return "Ed25519", 256, ""
 	case 28:
-		return "Ed448", 448
+		return "Ed448", 448, ""
 	default:
-		return "", 0
+		return "", 0, ""
 	}
 }
 

@@ -158,7 +158,10 @@ func ksWantRing(fx ksPGPFixture) []KeystoreEntry {
 
 func TestParseOpenPGPPublicKeyring(t *testing.T) {
 	fx := ksMakePGPRing(t)
-	got := ParseOpenPGPPublicKeyring(fx.ring, 0)
+	got, truncated := ParseOpenPGPPublicKeyring(fx.ring, 0)
+	if truncated {
+		t.Error("a whole ring reported truncated")
+	}
 	want := ksWantRing(fx)
 	if len(got) != len(want) {
 		t.Fatalf("got %d entries: %+v", len(got), got)
@@ -169,8 +172,8 @@ func TestParseOpenPGPPublicKeyring(t *testing.T) {
 		}
 	}
 	ksAssertNoUserID(t, got)
-	if n := len(ParseOpenPGPPublicKeyring(fx.ring, 2)); n != 2 {
-		t.Errorf("max 2 returned %d", n)
+	if two, cut := ParseOpenPGPPublicKeyring(fx.ring, 2); len(two) != 2 || !cut {
+		t.Errorf("max 2 returned %d, truncated %v", len(two), cut)
 	}
 }
 
@@ -213,9 +216,14 @@ func ksBuildKeybox(keyblocks ...[]byte) []byte {
 
 func TestParseOpenPGPPublicKeyring_Keybox(t *testing.T) {
 	fx := ksMakePGPRing(t)
-	got := ParseOpenPGPPublicKeyring(ksBuildKeybox(fx.ring[:len(fx.ring)/2], fx.ring), 0)
-	if len(got) < len(ksWantRing(fx)) || got[len(got)-1].Alias != fx.v6 {
-		t.Fatalf("keybox: %+v", got)
+	whole, cut := ParseOpenPGPPublicKeyring(ksBuildKeybox(fx.ring), 0)
+	if len(whole) != len(ksWantRing(fx)) || cut {
+		t.Fatalf("keybox: %v %+v", cut, whole)
+	}
+	// A damaged keyblock (cut mid-packet) is reported and the next blob still read.
+	got, cut := ParseOpenPGPPublicKeyring(ksBuildKeybox(fx.ring[:len(fx.ring)/2], fx.ring), 0)
+	if !cut || len(got) < len(ksWantRing(fx)) || got[len(got)-1].Alias != fx.v6 {
+		t.Fatalf("damaged keybox: %v %+v", cut, got)
 	}
 	ksAssertNoUserID(t, got)
 }
@@ -225,7 +233,7 @@ func TestParseOpenPGPPublicKeyring_HostileInput(t *testing.T) {
 	kbx := ksBuildKeybox(fx.ring)
 	for _, b := range [][]byte{fx.ring, kbx} {
 		for n := 0; n < len(b); n++ {
-			if got := ParseOpenPGPPublicKeyring(b[:n], 0); len(got) > 5 {
+			if got, _ := ParseOpenPGPPublicKeyring(b[:n], 0); len(got) > 5 {
 				t.Fatalf("prefix %d grew entries", n)
 			}
 		}
@@ -247,7 +255,10 @@ func TestParseOpenPGPPublicKeyring_HostileInput(t *testing.T) {
 		"empty":              nil,
 		"single header byte": {0xc6},
 	} {
-		got := ParseOpenPGPPublicKeyring(b, 0)
+		got, cut := ParseOpenPGPPublicKeyring(b, 0)
+		if len(b) > 0 && !cut && name != "huge mpi" && name != "huge oid" && name != "unknown version" && name != "huge v6 material" && name != "truncated v4 body" && name != "keybox zero blob" {
+			t.Errorf("%s: damage not reported", name)
+		}
 		for _, e := range got {
 			if e.Kind == "" {
 				t.Errorf("%s: entry without a kind", name)
@@ -276,7 +287,7 @@ func FuzzParseOpenPGP(f *testing.F) {
 	f.Add(ksBuildKeybox(ring))
 	f.Add([]byte("Key: (private-key (rsa (n #00#)))"))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		if got := ParseOpenPGPPublicKeyring(b, 20); len(got) > 20 {
+		if got, _ := ParseOpenPGPPublicKeyring(b, 20); len(got) > 20 {
 			t.Fatal("cap exceeded")
 		}
 		_ = ClassifyGnuPGPrivateKeyFile(b)

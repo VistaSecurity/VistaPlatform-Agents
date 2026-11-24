@@ -156,7 +156,7 @@ func TestParseKeytab_HostileInput(t *testing.T) {
 		recs = append(recs, ksKeytabRec{realm: "R", comps: []string{"p"}, enctype: 18, key: []byte{1, 2}})
 	}
 	got, err = ksParseKeytab(ksBuildKeytab(recs...), 4)
-	if err != nil || len(got.Keystore.Entries) != 4 || *got.Keystore.EntryCount != 9 {
+	if err != nil || len(got.Keystore.Entries) != 4 || *got.Keystore.EntryCount != 9 || !got.Truncated {
 		t.Errorf("cap: %v %d %v", err, len(got.Keystore.Entries), got.Keystore.EntryCount)
 	}
 }

@@ -36,7 +36,7 @@ func ksMarshal(t *testing.T, v any) []byte {
 	return der
 }
 
-func ksPBKDF2(t *testing.T, iters int) ksAlgorithmIdentifier {
+func ksTestPBKDF2Alg(t *testing.T, iters int) ksAlgorithmIdentifier {
 	type p struct {
 		Salt       []byte
 		Iterations int
@@ -51,7 +51,7 @@ func TestParseBCFKS(t *testing.T) {
 		Nonce  []byte
 		ICVLen int
 	}
-	enc := ksAlgID(t, ksOIDPBES2, ksPBES2Params{KDF: ksPBKDF2(t, 51200), Enc: ksAlgID(t, ksOIDAES256CCM, ccm{make([]byte, 12), 16})})
+	enc := ksAlgID(t, ksOIDPBES2, ksPBES2Params{KDF: ksTestPBKDF2Alg(t, 51200), Enc: ksAlgID(t, ksOIDAES256CCM, ccm{make([]byte, 12), 16})})
 	type encStore struct {
 		Alg  ksAlgorithmIdentifier
 		Data []byte
@@ -66,7 +66,7 @@ func TestParseBCFKS(t *testing.T) {
 		kdf  ksAlgorithmIdentifier
 		want string
 	}{
-		{"pbkdf2", ksPBKDF2(t, 51200), "PBES2 (PBKDF2-HMAC-SHA512, 51200 iterations, AES-256-CCM); MAC: HMAC-SHA512 (PBKDF2-HMAC-SHA512, 51200 iterations)"},
+		{"pbkdf2", ksTestPBKDF2Alg(t, 51200), "PBES2 (PBKDF2-HMAC-SHA512, 51200 iterations, AES-256-CCM); MAC: HMAC-SHA512 (PBKDF2-HMAC-SHA512, 51200 iterations)"},
 		{"scrypt", scrypt, "PBES2 (PBKDF2-HMAC-SHA512, 51200 iterations, AES-256-CCM); MAC: HMAC-SHA512 (scrypt N=16384 r=8 p=1)"},
 	} {
 		der := ksMarshal(t, store{

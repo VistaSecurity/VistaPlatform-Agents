@@ -94,6 +94,8 @@ func ParseBKS(b []byte) (KeystoreContents, error) {
 	if r.bad || iterations == 0 || iterations > 1<<24 {
 		return out, errors.New("bks: not a BKS or UBER header")
 	}
+	// TODO(merge): KeystoreUBER exists now, but this header is the same in
+	// both formats; the collector may set it from the file name (.ubr).
 	out.Keystore.Protection = "BKS or UBER (version " + strconv.Itoa(int(version)) + ", " +
 		ksIterations(int(iterations)) + ")"
 	return out, nil

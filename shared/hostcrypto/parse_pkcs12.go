@@ -1,21 +1,24 @@
 package hostcrypto
 
 import (
-	"crypto"
-	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/des" //nolint:gosec // decrypting the format's legacy schemes is not choosing them
+	"crypto/hmac"
+	"crypto/pbkdf2"
+	"crypto/sha1" //nolint:gosec // the format's legacy KDF and MAC
+	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/asn1"
 	"errors"
 	"fmt"
-	"math/big"
+	"hash"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf16"
-
-	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 // PKCS#12 (RFC 7292), the PFX file.
@@ -24,16 +27,25 @@ import (
 // say how the file protects what it holds: the integrity MAC (or PBMAC1) and,
 // for each part of the authenticated safe, whether it is plain data or
 // encrypted and with which scheme and iteration count. All of that is in the
-// clear by design. Where a part is plain data (Java trust stores, OpenSSL's
-// "-certpbe NONE", some appliances) its certificates are listed too, and that
-// read is [OpenedWithoutPassword].
+// clear by design. Whatever sits in a plain part is listed: certificates
+// (Java trust stores, OpenSSL's "-certpbe NONE") and the aliases of the key
+// bags (keytool keeps its shrouded keys in a plain part, with the alias and
+// key id in clear attributes). That read is [OpenedWithoutPassword].
 //
-// With tryDefaults each of [DefaultKeystorePasswords] is tried through
-// software.sslmate.com/src/go-pkcs12, which verifies the MAC before it
-// decrypts anything. A private key it decrypts is used only to find its
-// public half, from which the entry's algorithm, size and public-key hash are
-// taken; the key is then overwritten where Go lets us and dropped. It is
-// never returned.
+// With tryDefaults each of [DefaultKeystorePasswords] is tried, by this file's
+// own code and under a fixed budget of key-derivation work:
+//
+//   - with a MAC, by verifying the MAC (the RFC 7292 appendix B key
+//     derivation and HMAC, or PBMAC1);
+//   - without one, by decrypting an encrypted part and checking that its
+//     padding and ASN.1 are valid.
+//
+// A password that passes opens the encrypted parts (PBES2 with PBKDF2 and
+// AES-CBC or 3DES, and the PKCS#12 schemes 3DES and RC2), whose certificate
+// bags and bag attributes are then read. A PRIVATE KEY IS NEVER DECRYPTED:
+// of a shrouded key bag only its algorithm identifier and attributes are read,
+// and an entry's algorithm, size and public-key hash come from the certificate
+// its key id pairs it with.
 
 var (
 	ksOIDData          = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
@@ -288,115 +300,79 @@ func ksDescribeMac(m ksMacData) string {
 	return ksAlgName(m.Mac.Algorithm.Algorithm) + ", " + ksIterations(m.Iterations)
 }
 
-// ksP12Bag is what one plain safe bag tells without a password.
+// ksP12Bag is what one safe bag tells without decrypting a key.
 type ksP12Bag struct {
 	kind       string // "certificate", "private_key", "secret_key", "crl", "other"
 	alias      string
 	localKeyID []byte
-	trusted    bool
+	trusted    bool // the Java trustedKeyUsage attribute
 	certDER    []byte
-	// keyEncryption describes a shrouded key; empty for a plain key bag.
-	keyEncryption string
-	// plainKey is set for a keyBag: an UNENCRYPTED private key in the file.
-	// It is used only to derive the public half and never leaves this file.
-	plainKey []byte
+	// For an UNENCRYPTED key bag, what its PKCS#8 algorithm identifier says.
+	// The private key inside it is not parsed.
+	plainAlg   string
+	plainBits  int
+	plainCurve string
+}
+
+// ksP12Part is one ContentInfo of the authenticated safe.
+type ksP12Part struct {
+	encrypted bool
+	alg       ksAlgorithmIdentifier
+	content   []byte // the ciphertext of an encryptedData part
+	opened    bool   // plain, or decrypted by a default password
 }
 
 // ksP12Structure is the password-free view of a PFX.
 type ksP12Structure struct {
 	pfx      ksPFX
+	signed   bool   // public-key integrity mode
+	authSafe []byte // the bytes the MAC is computed over
+	parts    []ksP12Part
 	certs    []string // how each certificate-holding part is protected
 	keys     []string // how keys are protected
 	bags     []ksP12Bag
-	hidden   bool // some part is encrypted, so bags is not the whole store
+	shrouded bool // some key bag is encrypted
 	maxed    bool
-	authSafe []ksContentInfo
-	// shrouded is true when a key bag in the clear is itself encrypted.
-	shrouded bool
-	// macCheckable is true when the file has a MAC the library computes, so
-	// a password the MAC accepts is proved right.
-	macCheckable bool
-	// maxIterations is the largest iteration count any part asks for. It
-	// bounds what trying passwords may cost: a hostile file can ask for
-	// billions.
-	maxIterations int
 }
 
-// ksMaxTrialIterations caps the key-derivation work a default-password trial
-// will do per password. Real files ask for 1 to about 600,000 (OpenSSL 2048,
-// Java 10,000, PBMAC1 recommendations 100,000+); a file asking for more is
-// not tried, and DefaultPassword stays nil because nothing was learned.
-const ksMaxTrialIterations = 1_000_000
+// ksMaxTrialWork bounds the key-derivation work a default-password trial does
+// on one file, summed over every password tried and every part opened, in
+// iterations of the underlying KDF (a PBKDF2 output block or a PKCS#12 KDF
+// hash chain counts once per iteration). 4,000,000 is a few hundred
+// milliseconds; real files ask for 1 to 600,000 per derivation. A file that
+// would need more is not tried, and says so in DefaultsNotTried.
+const ksMaxTrialWork = 4_000_000
 
-func (st *ksP12Structure) noteIterations(n int) {
-	if n > st.maxIterations {
-		st.maxIterations = n
+// The reasons a default-password trial did not run.
+const (
+	ksNotTriedSigned      = "integrity is by signature"
+	ksNotTriedUnprotected = "nothing in the file is protected by a password"
+	ksNotTriedCost        = "iteration count above the limit"
+	ksNotTriedNoCheck     = "nothing in the file can verify a password"
+)
+
+// ksMulCost multiplies two non-negative costs, saturating instead of
+// overflowing.
+func ksMulCost(a, b int) int {
+	if a < 0 || b < 0 {
+		return math.MaxInt
 	}
+	if a != 0 && b > math.MaxInt/a {
+		return math.MaxInt
+	}
+	return a * b
 }
 
-// ksIterationsOf reads the iteration count of a password-based algorithm
-// (PBES1 parameters, or PBES2's PBKDF2), or 0.
-func ksIterationsOf(alg ksAlgorithmIdentifier) int {
-	if alg.Algorithm.Equal(ksOIDPBES2) {
-		var p ksPBES2Params
-		if ksUnmarshalAll(alg.Parameters.FullBytes, &p) != nil {
-			return 0
-		}
-		return ksKDFIterations(p.KDF)
+func ksAddCost(a, b int) int {
+	if a < 0 || b < 0 || a > math.MaxInt-b {
+		return math.MaxInt
 	}
-	var p ksPBEParams
-	if ksUnmarshalAll(alg.Parameters.FullBytes, &p) == nil {
-		return p.Iterations
-	}
-	return 0
+	return a + b
 }
 
-func ksKDFIterations(kdf ksAlgorithmIdentifier) int {
-	if kdf.Algorithm.Equal(ksOIDPBKDF2) {
-		var p ksPBKDF2Params
-		if ksUnmarshalAll(kdf.Parameters.FullBytes, &p) == nil {
-			return p.Iterations
-		}
-	}
-	if kdf.Algorithm.Equal(ksOIDScrypt) {
-		var p ksScryptParams
-		if ksUnmarshalAll(kdf.Parameters.FullBytes, &p) == nil {
-			// scrypt's cost is N*r*p; it is never tried below, but bound it anyway.
-			return p.CostParameter * max(p.BlockSize, 1) * max(p.Parallelization, 1)
-		}
-	}
-	return 0
-}
-
-// ksMacInfo reports whether the library can verify this MAC and how many
-// iterations it costs.
-func ksMacInfo(m ksMacData) (checkable bool, iterations int) {
-	alg := m.Mac.Algorithm.Algorithm
-	switch alg.String() {
-	case "1.3.14.3.2.26", "2.16.840.1.101.3.4.2.1", "2.16.840.1.101.3.4.2.3":
-		return true, m.Iterations
-	}
-	if !alg.Equal(ksOIDPBMAC1) {
-		return false, 0
-	}
-	var p ksPBMAC1Params
-	if ksUnmarshalAll(m.Mac.Algorithm.Parameters.FullBytes, &p) != nil || !p.KDF.Algorithm.Equal(ksOIDPBKDF2) {
-		return false, 0
-	}
-	var kp ksPBKDF2Params
-	if ksUnmarshalAll(p.KDF.Parameters.FullBytes, &kp) != nil || kp.Salt.Tag != asn1.TagOctetString || kp.KeyLength < 20 || kp.KeyLength > 64 {
-		return false, 0
-	}
-	hmacs := map[string]bool{"1.2.840.113549.2.7": true, "1.2.840.113549.2.9": true, "1.2.840.113549.2.11": true}
-	if (len(kp.PRF.Algorithm) > 0 && !hmacs[kp.PRF.Algorithm.String()]) || !hmacs[p.MAC.Algorithm.String()] {
-		return false, 0
-	}
-	return true, kp.Iterations
-}
-
-// ParsePKCS12 describes a PKCS#12 / PFX file: its protection always, and its
-// certificates where they are stored in the clear or, with tryDefaults, where
-// a default password opens it.
+// ParsePKCS12 describes a PKCS#12 / PFX file: its protection always; what its
+// plain parts hold; and, with tryDefaults, what its encrypted parts hold when
+// a default password opens them.
 //
 // On a file that is not a PFX it returns an error and a Keystore with only
 // Type set.
@@ -410,64 +386,44 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	if err != nil {
 		return out, err
 	}
+
+	found := false
+	if tryDefaults {
+		ok, reason := st.trial(maxEntries)
+		out.DefaultsNotTried = reason
+		if reason == "" {
+			out.Keystore.DefaultPassword = &ok
+			found = ok
+		}
+	}
+
 	out.Keystore.Protection = st.protection()
-
-	if !st.hidden {
-		// Every bag was in the clear: the listing is complete without a password.
+	entries, certs, truncated := ksP12Build(st.bags, maxEntries)
+	out.Keystore.Entries, out.Certificates = entries, certs
+	out.Truncated = truncated || st.maxed
+	hidden := false
+	for _, p := range st.parts {
+		if !p.opened {
+			hidden = true
+		}
+	}
+	if !hidden && !st.signed && !out.Truncated {
+		out.Keystore.EntryCount = ksIntPtr(len(entries))
+	}
+	switch {
+	case found:
+		out.Keystore.Opened = OpenedDefaultPassword
+	case len(entries) > 0 || len(certs) > 0:
 		out.Keystore.Opened = OpenedWithoutPassword
-		ksP12List(&out, st.bags)
-		if !st.maxed {
-			out.Keystore.EntryCount = ksIntPtr(len(st.bags))
-		}
-	} else if ksP12HasCert(st.bags) {
-		// Part is in the clear: list it, and say the count is not known.
-		out.Keystore.Opened = OpenedWithoutPassword
-		ksP12List(&out, st.bags)
 	}
-
-	if !tryDefaults {
-		return out, nil
-	}
-	if st.maxIterations > ksMaxTrialIterations {
-		// Too costly to try; nothing learned, so DefaultPassword stays nil.
-		return out, nil
-	}
-	// Nothing protected at all: no part encrypted, no key shrouded, no MAC.
-	// The empty default "opens" it in the trivial sense, and the listing
-	// above already needed no password, which is the more precise answer.
-	unprotected := !st.hidden && !st.shrouded && len(st.pfx.MacData.Mac.Algorithm.Algorithm) == 0
-	ok := false
-	for _, pw := range DefaultKeystorePasswords {
-		res, right := ksP12TryPassword(b, pw, st)
-		if !right {
-			continue
-		}
-		ok = true
-		if !unprotected {
-			out.Keystore.Opened = OpenedDefaultPassword
-		}
-		if res != nil && st.hidden {
-			out.Keystore.Entries = nil
-			out.Certificates = nil
-			ksP12ListDecoded(&out, res, st.bags, maxEntries)
-		}
-		break
-	}
-	out.Keystore.DefaultPassword = &ok
 	return out, nil
-}
-
-func ksP12HasCert(bags []ksP12Bag) bool {
-	for _, b := range bags {
-		if b.kind == "certificate" {
-			return true
-		}
-	}
-	return false
 }
 
 // protection renders the description, in the order certificates, keys, MAC.
 func (st *ksP12Structure) protection() string {
+	if st.signed {
+		return "signed (public-key integrity)"
+	}
 	var parts []string
 	if len(st.certs) > 0 {
 		parts = append(parts, "certificates: "+strings.Join(ksUniq(st.certs), " + "))
@@ -500,29 +456,25 @@ func ksP12Parse(b []byte, maxEntries int) (*ksP12Structure, error) {
 	if st.pfx.Version != 3 {
 		return nil, errors.New("pkcs12: unsupported PFX version")
 	}
-	if len(st.pfx.MacData.Mac.Algorithm.Algorithm) > 0 {
-		var iters int
-		st.macCheckable, iters = ksMacInfo(st.pfx.MacData)
-		st.noteIterations(iters)
-	}
 	switch {
 	case st.pfx.AuthSafe.ContentType.Equal(ksOIDData):
 	case st.pfx.AuthSafe.ContentType.Equal(ksOIDSignedData):
-		// Public-key integrity mode: rare, and not walked here.
-		st.certs = append(st.certs, "public-key integrity mode (signedData), not parsed")
-		st.hidden = true
+		// Public-key integrity mode: rare, not walked, and no password can be
+		// checked against it.
+		st.signed = true
+		st.parts = append(st.parts, ksP12Part{encrypted: true})
 		return st, nil
 	default:
 		return nil, errors.New("pkcs12: unknown authenticated safe type")
 	}
-	var authSafeBytes []byte
-	if err := ksUnmarshalAll(st.pfx.AuthSafe.Content.Bytes, &authSafeBytes); err != nil {
+	if err := ksUnmarshalAll(st.pfx.AuthSafe.Content.Bytes, &st.authSafe); err != nil {
 		return nil, errors.New("pkcs12: bad authenticated safe")
 	}
-	if err := ksUnmarshalAll(authSafeBytes, &st.authSafe); err != nil {
+	var cis []ksContentInfo
+	if err := ksUnmarshalAll(st.authSafe, &cis); err != nil {
 		return nil, errors.New("pkcs12: bad authenticated safe")
 	}
-	for _, ci := range st.authSafe {
+	for _, ci := range cis {
 		switch {
 		case ci.ContentType.Equal(ksOIDData):
 			var data []byte
@@ -532,21 +484,21 @@ func ksP12Parse(b []byte, maxEntries int) (*ksP12Structure, error) {
 			if err := st.walkSafeContents(data, maxEntries, 0); err != nil {
 				return nil, err
 			}
+			st.parts = append(st.parts, ksP12Part{opened: true})
 		case ci.ContentType.Equal(ksOIDEncryptedData):
 			var ed ksEncryptedData
 			if err := ksUnmarshalAll(ci.Content.Bytes, &ed); err != nil {
 				return nil, errors.New("pkcs12: bad encrypted part")
 			}
+			alg := ed.EncryptedContentInfo.ContentEncryptionAlgorithm
 			// An encrypted part conventionally holds the certificates (it is
-			// what OpenSSL, Windows and Java put there), so it is described
-			// as theirs. Keys inside it would be shrouded again and are not
-			// visible without the password.
-			st.certs = append(st.certs, ksDescribeEncryption(ed.EncryptedContentInfo.ContentEncryptionAlgorithm))
-			st.noteIterations(ksIterationsOf(ed.EncryptedContentInfo.ContentEncryptionAlgorithm))
-			st.hidden = true
+			// where OpenSSL, Windows and Java put them), so it is described as
+			// theirs.
+			st.certs = append(st.certs, ksDescribeEncryption(alg))
+			st.parts = append(st.parts, ksP12Part{encrypted: true, alg: alg, content: ed.EncryptedContentInfo.EncryptedContent.Bytes})
 		case ci.ContentType.Equal(ksOIDEnvelopedData):
 			st.certs = append(st.certs, "public-key encrypted (envelopedData)")
-			st.hidden = true
+			st.parts = append(st.parts, ksP12Part{encrypted: true})
 		default:
 			return nil, errors.New("pkcs12: unknown part type")
 		}
@@ -554,8 +506,9 @@ func ksP12Parse(b []byte, maxEntries int) (*ksP12Structure, error) {
 	return st, nil
 }
 
-// walkSafeContents reads a plain SafeContents. depth bounds nested
-// safeContentsBags.
+// walkSafeContents reads a SafeContents. depth bounds nested
+// safeContentsBags. It never decrypts a key: of a shrouded key bag it reads
+// the algorithm identifier and the attributes.
 func (st *ksP12Structure) walkSafeContents(data []byte, maxEntries, depth int) error {
 	if depth > 4 {
 		return errors.New("pkcs12: nesting too deep")
@@ -587,27 +540,24 @@ func (st *ksP12Structure) walkSafeContents(data []byte, maxEntries, depth int) e
 		switch {
 		case sb.ID.Equal(ksOIDCertBag):
 			var cb ksCertBag
-			if ksUnmarshalAll(sb.Value.Bytes, &cb) != nil || !cb.ID.Equal(ksOIDX509Cert) {
-				bag.kind = "other"
-			} else {
+			if ksUnmarshalAll(sb.Value.Bytes, &cb) == nil && cb.ID.Equal(ksOIDX509Cert) {
 				bag.kind = "certificate"
 				bag.certDER = cb.Data
 				sawCert = true
 			}
 		case sb.ID.Equal(ksOIDShroudedBag):
 			bag.kind = "private_key"
-			var epki ksEncryptedPrivateKeyInfo
 			st.shrouded = true
+			// Only the algorithm identifier; the ciphertext is not touched.
+			var epki ksEncryptedPrivateKeyInfo
 			if ksUnmarshalAll(sb.Value.Bytes, &epki) == nil {
-				bag.keyEncryption = ksDescribeEncryption(epki.Algorithm)
-				st.noteIterations(ksIterationsOf(epki.Algorithm))
+				st.keys = append(st.keys, ksDescribeEncryption(epki.Algorithm))
 			} else {
-				bag.keyEncryption = "encrypted (unreadable parameters)"
+				st.keys = append(st.keys, "encrypted (unreadable parameters)")
 			}
-			st.keys = append(st.keys, bag.keyEncryption)
 		case sb.ID.Equal(ksOIDKeyBag):
 			bag.kind = "private_key"
-			bag.plainKey = sb.Value.Bytes
+			bag.plainAlg, bag.plainBits, bag.plainCurve = ksPKCS8Algorithm(sb.Value.Bytes)
 			st.keys = append(st.keys, "not encrypted")
 		case sb.ID.Equal(ksOIDSecretBag):
 			bag.kind = "secret_key"
@@ -621,10 +571,67 @@ func (st *ksP12Structure) walkSafeContents(data []byte, maxEntries, depth int) e
 		}
 		st.bags = append(st.bags, bag)
 	}
-	if sawCert {
+	if sawCert && depth == 0 {
 		st.certs = append(st.certs, "not encrypted")
 	}
 	return nil
+}
+
+// ksPKCS8Algorithm reads the algorithm identifier of an unencrypted PKCS#8
+// key: SEQUENCE { version, algorithm, privateKey, ... }. The private key
+// element is not parsed. RSA's size is inside the key, so it is left 0.
+func ksPKCS8Algorithm(der []byte) (alg string, bits int, curve string) {
+	var elems []asn1.RawValue
+	if _, err := asn1.Unmarshal(der, &elems); err != nil || len(elems) < 3 {
+		return "", 0, ""
+	}
+	var ai ksAlgorithmIdentifier
+	if ksUnmarshalAll(elems[1].FullBytes, &ai) != nil {
+		return "", 0, ""
+	}
+	switch ai.Algorithm.String() {
+	case "1.2.840.113549.1.1.1", "1.2.840.113549.1.1.10":
+		return "RSA", 0, ""
+	case "1.2.840.10040.4.1":
+		return "DSA", 0, ""
+	case "1.2.840.10045.2.1":
+		var c asn1.ObjectIdentifier
+		if ksUnmarshalAll(ai.Parameters.FullBytes, &c) == nil {
+			if n, b, ok := ksNamedCurve(c); ok {
+				return "ECDSA", b, n
+			}
+		}
+		return "ECDSA", 0, ""
+	case "1.3.101.110":
+		return "X25519", 256, ""
+	case "1.3.101.111":
+		return "X448", 448, ""
+	case "1.3.101.112":
+		return "Ed25519", 256, ""
+	case "1.3.101.113":
+		return "Ed448", 448, ""
+	case "2.16.840.1.101.3.4.3.17":
+		return "ML-DSA-44", 0, ""
+	case "2.16.840.1.101.3.4.3.18":
+		return "ML-DSA-65", 0, ""
+	case "2.16.840.1.101.3.4.3.19":
+		return "ML-DSA-87", 0, ""
+	}
+	return "", 0, ""
+}
+
+func ksNamedCurve(oid asn1.ObjectIdentifier) (name string, bits int, ok bool) {
+	switch oid.String() {
+	case "1.2.840.10045.3.1.7":
+		return "P-256", 256, true
+	case "1.3.132.0.34":
+		return "P-384", 384, true
+	case "1.3.132.0.35":
+		return "P-521", 521, true
+	case "1.3.132.0.10":
+		return "secp256k1", 256, true
+	}
+	return "", 0, false
 }
 
 // ksBMPString decodes a DER BMPString (a friendlyName) and drops anything
@@ -641,215 +648,613 @@ func ksBMPString(der []byte) string {
 	return strings.ToValidUTF8(string(utf16.Decode(u)), "�")
 }
 
-// ksP12List turns plain bags into entries and certificates.
-func ksP12List(out *KeystoreContents, bags []ksP12Bag) {
-	certsByKeyID := map[string]Certificate{}
-	for _, bag := range bags {
-		if bag.kind != "certificate" {
+// ksP12Build turns bags into entries and certificates by keytool's rule (see
+// [KeystoreContents]): one entry per key, carrying its chain, and one per
+// certificate that belongs to no key's chain. A key's certificate is the one
+// with its key id; its chain follows issuer to subject among the certificates
+// that carry neither a key id nor the Java trusted attribute. A trusted
+// certificate is always its own entry.
+func ksP12Build(bags []ksP12Bag, maxEntries int) (entries []KeystoreEntry, certs []Certificate, truncated bool) {
+	type parsed struct {
+		x     *x509.Certificate
+		c     Certificate
+		owner int // index of the key bag whose chain it is in, or -1
+	}
+	pc := make([]parsed, len(bags))
+	for i := range bags {
+		pc[i].owner = -1
+		if bags[i].kind != "certificate" {
 			continue
 		}
-		entry := KeystoreEntry{Alias: bag.alias, Kind: "certificate", CertificateFingerprint: ksDERFingerprint(bag.certDER)}
-		if cert, ok := ksCertificate(bag.certDER); ok {
-			entry.Algorithm, entry.SizeBits, entry.PublicKeySHA256 = cert.KeyAlgorithm, cert.KeySize, cert.PublicKeySHA256
-			if bag.trusted {
-				cert = ksTrustAnchor(cert)
-			}
-			cert.Location.Alias = bag.alias
-			out.Certificates = append(out.Certificates, cert)
-			if len(bag.localKeyID) > 0 {
-				certsByKeyID[string(bag.localKeyID)] = cert
+		if x, err := x509.ParseCertificate(bags[i].certDER); err == nil {
+			pc[i].x = x
+			pc[i].c = ksCertificateFrom(x)
+		}
+	}
+	leafOf := map[int]int{}
+	for k := range bags {
+		if bags[k].kind != "private_key" || len(bags[k].localKeyID) == 0 {
+			continue
+		}
+		leaf := -1
+		for i := range bags {
+			if bags[i].kind == "certificate" && !bags[i].trusted && pc[i].owner < 0 && bytes.Equal(bags[i].localKeyID, bags[k].localKeyID) {
+				leaf = i
+				break
 			}
 		}
-		out.Keystore.Entries = append(out.Keystore.Entries, entry)
-	}
-	for _, bag := range bags {
-		switch bag.kind {
-		case "private_key":
-			entry := KeystoreEntry{Alias: bag.alias, Kind: "private_key"}
-			if cert, ok := certsByKeyID[string(bag.localKeyID)]; ok && len(bag.localKeyID) > 0 {
-				entry.Algorithm, entry.SizeBits = cert.KeyAlgorithm, cert.KeySize
-				entry.PublicKeySHA256, entry.CertificateFingerprint = cert.PublicKeySHA256, cert.FingerprintSHA256
-			} else if bag.plainKey != nil {
-				// An unencrypted key with no matching certificate: its public
-				// half is derived in memory and the key is dropped.
-				if pub := ksPublicFromPKCS8(bag.plainKey); pub != nil {
-					entry.Algorithm, entry.SizeBits, entry.PublicKeySHA256 = ksDescribePublic(pub)
+		if leaf < 0 {
+			continue
+		}
+		leafOf[k] = leaf
+		pc[leaf].owner = k
+		for cur, depth := leaf, 0; pc[cur].x != nil && depth < 10; depth++ {
+			x := pc[cur].x
+			if bytes.Equal(x.RawIssuer, x.RawSubject) {
+				break
+			}
+			next := -1
+			for i := range bags {
+				if pc[i].x != nil && pc[i].owner < 0 && !bags[i].trusted && len(bags[i].localKeyID) == 0 && bytes.Equal(pc[i].x.RawSubject, x.RawIssuer) {
+					next = i
+					break
 				}
 			}
-			out.Keystore.Entries = append(out.Keystore.Entries, entry)
+			if next < 0 {
+				break
+			}
+			pc[next].owner = k
+			cur = next
+		}
+	}
+	add := func(e KeystoreEntry) {
+		if len(entries) >= maxEntries {
+			truncated = true
+			return
+		}
+		entries = append(entries, e)
+	}
+	for i, bag := range bags {
+		switch bag.kind {
+		case "private_key":
+			e := KeystoreEntry{Alias: bag.alias, Kind: "private_key"}
+			if leaf, ok := leafOf[i]; ok {
+				if e.Alias == "" {
+					e.Alias = bags[leaf].alias
+				}
+				e.CertificateFingerprint = ksDERFingerprint(bags[leaf].certDER)
+				if pc[leaf].x != nil {
+					c := pc[leaf].c
+					e.Algorithm, e.SizeBits, e.PublicKeySHA256 = c.KeyAlgorithm, c.KeySize, c.PublicKeySHA256
+					_ = c.Curve // TODO(merge): set Curve
+				}
+			} else if bag.plainAlg != "" {
+				e.Algorithm, e.SizeBits = bag.plainAlg, bag.plainBits
+				_ = bag.plainCurve // TODO(merge): set Curve
+			}
+			add(e)
 		case "secret_key":
-			out.Keystore.Entries = append(out.Keystore.Entries, KeystoreEntry{Alias: bag.alias, Kind: "secret_key"})
+			add(KeystoreEntry{Alias: bag.alias, Kind: "secret_key"})
+		case "certificate":
+			if pc[i].owner >= 0 {
+				continue
+			}
+			e := KeystoreEntry{Alias: bag.alias, Kind: "certificate", CertificateFingerprint: ksDERFingerprint(bag.certDER)}
+			if pc[i].x != nil {
+				c := pc[i].c
+				e.Algorithm, e.SizeBits, e.PublicKeySHA256 = c.KeyAlgorithm, c.KeySize, c.PublicKeySHA256
+				_ = c.Curve // TODO(merge): set Curve
+			}
+			add(e)
 		}
 	}
-}
-
-// ksP12Decoded is what a default password opened. It holds only public
-// material: the private key was reduced to its public half before this was
-// built.
-type ksP12Decoded struct {
-	certs   []*x509.Certificate
-	trusted bool
-	keyPub  crypto.PublicKey // nil for a trust store
-}
-
-// ksP12TryPassword tries one password. It reports whether the password is
-// right; res is nil when it is right but the library could not list the
-// contents (more than one key, an unusual layout): the MAC proved the
-// password, so DefaultPassword is still true.
-func ksP12TryPassword(b []byte, pw string, st *ksP12Structure) (res *ksP12Decoded, right bool) {
-	key, leaf, cas, err := pkcs12.DecodeChain(b, pw)
-	if err == nil {
-		pub := ksPublicOf(key)
-		ksZeroKey(key)
-		return &ksP12Decoded{certs: append([]*x509.Certificate{leaf}, cas...), keyPub: pub}, true
-	}
-	if errors.Is(err, pkcs12.ErrIncorrectPassword) {
-		return nil, false
-	}
-	certs, err2 := pkcs12.DecodeTrustStore(b, pw)
-	if err2 == nil {
-		return &ksP12Decoded{certs: certs, trusted: true}, true
-	}
-	if errors.Is(err2, pkcs12.ErrIncorrectPassword) {
-		return nil, false
-	}
-	// Neither decoder could list it. The library verifies the MAC before it
-	// reads anything else, and the structure already parsed here, so when the
-	// MAC is one the library can compute, an error that is not "incorrect
-	// password" came after the MAC verified: the password is right. Without a
-	// MAC, or with one the library cannot compute, nothing proved it.
-	return nil, st.macCheckable
-}
-
-// ksP12ListDecoded lists what a default password opened, keeping aliases the
-// clear bags gave.
-func ksP12ListDecoded(out *KeystoreContents, res *ksP12Decoded, clearBags []ksP12Bag, maxEntries int) {
-	alias := map[string]string{}
-	keyAlias := ""
-	for _, bag := range clearBags {
-		if bag.kind == "certificate" && bag.alias != "" {
-			alias[ksDERFingerprint(bag.certDER)] = bag.alias
-		}
-		if bag.kind == "private_key" && keyAlias == "" {
-			keyAlias = bag.alias
-		}
-	}
-	var keySPKI string
-	if res.keyPub != nil {
-		_, _, keySPKI = ksDescribePublic(res.keyPub)
-	}
-	var keyEntry *KeystoreEntry
-	if res.keyPub != nil {
-		keyEntry = &KeystoreEntry{Alias: keyAlias, Kind: "private_key"}
-		keyEntry.Algorithm, keyEntry.SizeBits, keyEntry.PublicKeySHA256 = ksDescribePublic(res.keyPub)
-	}
-	n := 0
-	for _, c := range res.certs {
-		if n >= maxEntries {
-			break
-		}
-		cert, ok := ksCertificate(c.Raw)
-		if !ok {
+	for i, bag := range bags {
+		if bag.kind != "certificate" || pc[i].x == nil {
 			continue
 		}
-		cert.Location.Alias = alias[cert.FingerprintSHA256]
-		if keyEntry != nil && cert.PublicKeySHA256 == keySPKI {
-			// The key's certificate: the entry's facts come from it.
-			keyEntry.Algorithm, keyEntry.SizeBits = cert.KeyAlgorithm, cert.KeySize
-			keyEntry.CertificateFingerprint = cert.FingerprintSHA256
-			if cert.Location.Alias == "" {
-				cert.Location.Alias = keyAlias
+		c := pc[i].c
+		c.Location.Alias = bag.alias
+		if c.Location.Alias == "" && pc[i].owner >= 0 {
+			c.Location.Alias = bags[pc[i].owner].alias
+		}
+		if bag.trusted {
+			c = ksTrustAnchor(c)
+		}
+		certs = append(certs, c)
+	}
+	return entries, certs, truncated
+}
+
+// ---- The default-password trial ----
+
+// ksP12Password is one candidate in the two encodings the format uses: the
+// PKCS#12 KDF takes a BMPString with a two-byte terminator; PBKDF2 (PBES2,
+// PBMAC1) takes UTF-8.
+type ksP12Password struct {
+	bmp  []byte
+	utf8 []byte
+}
+
+// ksP12Candidates lists the defaults. The empty password is tried both as a
+// terminated empty BMPString and as no bytes at all, because writers differ.
+func ksP12Candidates() []ksP12Password {
+	var out []ksP12Password
+	for _, pw := range DefaultKeystorePasswords {
+		var bmp []byte
+		for _, c := range utf16.Encode([]rune(pw)) {
+			bmp = append(bmp, byte(c>>8), byte(c))
+		}
+		bmp = append(bmp, 0, 0)
+		out = append(out, ksP12Password{bmp: bmp, utf8: []byte(pw)})
+		if pw == "" {
+			out = append(out, ksP12Password{bmp: nil, utf8: nil})
+		}
+	}
+	return out
+}
+
+// ksP12Check is a way to test one password, and what each test costs.
+type ksP12Check struct {
+	cost int
+	test func(pw ksP12Password) bool
+}
+
+// trial tries the defaults. It returns whether one opened the file, or a
+// reason it was not tried. On success the encrypted parts that the password
+// opens are walked into st.bags.
+func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
+	if st.signed {
+		return false, ksNotTriedSigned
+	}
+	hasMAC := len(st.pfx.MacData.Mac.Algorithm.Algorithm) > 0
+	anyEncrypted := false
+	for _, p := range st.parts {
+		anyEncrypted = anyEncrypted || p.encrypted
+	}
+	if !hasMAC && !anyEncrypted && !st.shrouded {
+		return false, ksNotTriedUnprotected
+	}
+
+	// Each encrypted part that can be opened, and what opening it costs.
+	type opener struct {
+		idx  int
+		cost int
+		open func(pw ksP12Password) ([]byte, bool)
+	}
+	var openers []opener
+	for i, p := range st.parts {
+		if !p.encrypted || p.content == nil {
+			continue
+		}
+		if cost, open, ok := ksP12Decrypter(p.alg, p.content); ok {
+			openers = append(openers, opener{idx: i, cost: cost, open: open})
+		}
+	}
+
+	// The check: the MAC when the file has one this code computes; otherwise
+	// the cheapest part to decrypt.
+	var check ksP12Check
+	verifier := -1
+	if hasMAC {
+		if c, ok := ksP12MacCheck(st.pfx.MacData, st.authSafe); ok {
+			check = c
+		}
+	}
+	if check.test == nil && len(openers) > 0 {
+		verifier = 0
+		for j := range openers {
+			if openers[j].cost < openers[verifier].cost {
+				verifier = j
 			}
 		}
-		if res.trusted {
-			cert = ksTrustAnchor(cert)
+		v := openers[verifier]
+		check = ksP12Check{cost: v.cost, test: func(pw ksP12Password) bool {
+			pt, ok := v.open(pw)
+			if !ok {
+				return false
+			}
+			var bags []ksSafeBag
+			return ksUnmarshalAll(pt, &bags) == nil
+		}}
+	}
+	if check.test == nil {
+		return false, ksNotTriedNoCheck
+	}
+
+	cands := ksP12Candidates()
+	total := ksMulCost(check.cost, len(cands))
+	for j, o := range openers {
+		if j != verifier {
+			total = ksAddCost(total, o.cost)
 		}
-		out.Certificates = append(out.Certificates, cert)
-		out.Keystore.Entries = append(out.Keystore.Entries, KeystoreEntry{
-			Alias: cert.Location.Alias, Kind: "certificate",
-			Algorithm: cert.KeyAlgorithm, SizeBits: cert.KeySize,
-			CertificateFingerprint: cert.FingerprintSHA256, PublicKeySHA256: cert.PublicKeySHA256,
-		})
-		n++
 	}
-	if keyEntry != nil {
-		out.Keystore.Entries = append(out.Keystore.Entries, *keyEntry)
+	if total > ksMaxTrialWork {
+		return false, ksNotTriedCost
 	}
-	out.Keystore.EntryCount = ksIntPtr(len(out.Keystore.Entries))
-}
 
-// ksPublicOf returns a decrypted private key's public half.
-func ksPublicOf(key any) crypto.PublicKey {
-	if s, ok := key.(crypto.Signer); ok {
-		return s.Public()
-	}
-	if k, ok := key.(*ecdh.PrivateKey); ok {
-		return k.PublicKey()
-	}
-	return nil
-}
-
-// ksPublicFromPKCS8 parses an unencrypted PKCS#8 key only to reach its
-// public half, then overwrites the private value.
-func ksPublicFromPKCS8(der []byte) crypto.PublicKey {
-	key, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil
-	}
-	pub := ksPublicOf(key)
-	ksZeroKey(key)
-	return pub
-}
-
-// ksZeroKey overwrites what Go lets us overwrite of a private key. It is a
-// best effort: big.Int and the runtime may have copied the value, and the
-// garbage collector frees, not wipes. Its job is to make sure nothing here
-// keeps a usable key alive longer than the call.
-func ksZeroKey(key any) {
-	switch k := key.(type) {
-	case *rsa.PrivateKey:
-		ksZeroBig(k.D)
-		for _, p := range k.Primes {
-			ksZeroBig(p)
+	for _, pw := range cands {
+		if !check.test(pw) {
+			continue
 		}
-		ksZeroBig(k.Precomputed.Dp)
-		ksZeroBig(k.Precomputed.Dq)
-		ksZeroBig(k.Precomputed.Qinv)
-	case *ecdsa.PrivateKey:
-		ksZeroBig(k.D) //nolint:staticcheck // D is deprecated for reading, not for clearing
-	case ed25519.PrivateKey:
-		clear(k)
-	}
-}
-
-func ksZeroBig(n *big.Int) {
-	if n == nil {
-		return
-	}
-	words := n.Bits()
-	clear(words)
-	n.SetInt64(0)
-}
-
-// ksDescribePublic returns a public key's catalogue algorithm, size and the
-// SHA-256 of its SubjectPublicKeyInfo.
-func ksDescribePublic(pub crypto.PublicKey) (alg string, bits int, spkiSHA256 string) {
-	spki, err := x509.MarshalPKIXPublicKey(pub)
-	if err == nil {
-		spkiSHA256 = ksDERFingerprint(spki)
-	}
-	switch k := pub.(type) {
-	case *rsa.PublicKey:
-		return "RSA", k.N.BitLen(), spkiSHA256
-	case *ecdsa.PublicKey:
-		return "ECDSA", k.Curve.Params().BitSize, spkiSHA256
-	case ed25519.PublicKey:
-		return "Ed25519", 256, spkiSHA256
-	case *ecdh.PublicKey:
-		if k.Curve() == ecdh.X25519() {
-			return "X25519", 256, spkiSHA256
+		for _, o := range openers {
+			pt, ok := o.open(pw)
+			if !ok {
+				continue // another password protects this part
+			}
+			before := len(st.bags)
+			if st.walkSafeContents(pt, maxEntries, 1) != nil {
+				st.bags = st.bags[:before]
+				continue
+			}
+			st.parts[o.idx].opened = true
 		}
-		return "ECDH", 0, spkiSHA256
+		return true, ""
 	}
-	return "", 0, spkiSHA256
+	return false, ""
+}
+
+// ksHashFor maps a digest OID (as a PKCS#12 MacData names it) or an HMAC OID
+// (as PBKDF2 and PBMAC1 name it) to the hash, with its output and block sizes.
+func ksHashFor(oid asn1.ObjectIdentifier) (h func() hash.Hash, u, v int, ok bool) {
+	switch oid.String() {
+	case "1.3.14.3.2.26", "1.2.840.113549.2.7":
+		return sha1.New, 20, 64, true
+	case "2.16.840.1.101.3.4.2.4", "1.2.840.113549.2.8":
+		return sha256.New224, 28, 64, true
+	case "2.16.840.1.101.3.4.2.1", "1.2.840.113549.2.9":
+		return sha256.New, 32, 64, true
+	case "2.16.840.1.101.3.4.2.2", "1.2.840.113549.2.10":
+		return sha512.New384, 48, 128, true
+	case "2.16.840.1.101.3.4.2.3", "1.2.840.113549.2.11":
+		return sha512.New, 64, 128, true
+	case "2.16.840.1.101.3.4.2.5", "1.2.840.113549.2.12":
+		return sha512.New512_224, 28, 128, true
+	case "2.16.840.1.101.3.4.2.6", "1.2.840.113549.2.13":
+		return sha512.New512_256, 32, 128, true
+	}
+	return nil, 0, 0, false
+}
+
+// ksP12KDF is the key derivation of RFC 7292 appendix B.2: id 1 for keys, 2
+// for IVs, 3 for MAC keys; u and v are the hash's output and block sizes.
+func ksP12KDF(newHash func() hash.Hash, u, v int, id byte, salt, password []byte, iterations, n int) []byte {
+	fill := func(src []byte) []byte {
+		if len(src) == 0 {
+			return nil
+		}
+		out := make([]byte, v*((len(src)+v-1)/v))
+		for i := range out {
+			out[i] = src[i%len(src)]
+		}
+		return out
+	}
+	d := bytes.Repeat([]byte{id}, v)
+	in := append(fill(salt), fill(password)...)
+	h := newHash()
+	var out []byte
+	for {
+		h.Reset()
+		h.Write(d)
+		h.Write(in)
+		a := h.Sum(nil)
+		for r := 1; r < iterations; r++ {
+			h.Reset()
+			h.Write(a)
+			a = h.Sum(a[:0])
+		}
+		out = append(out, a...)
+		if len(out) >= n {
+			return out[:n]
+		}
+		// I_j = (I_j + B + 1) mod 2^(8v), with B = A repeated to v bytes.
+		b := fill(a)
+		for j := 0; j+v <= len(in); j += v {
+			carry := 1
+			for k := v - 1; k >= 0; k-- {
+				s := int(in[j+k]) + int(b[k]) + carry
+				in[j+k] = byte(s)
+				carry = s >> 8
+			}
+		}
+	}
+}
+
+// ksP12KDFCost is the work of one ksP12KDF call.
+func ksP12KDFCost(u, iterations, n int) int {
+	return ksMulCost(iterations, (n+u-1)/u)
+}
+
+// ksP12MacCheck builds the MAC check, or reports false when the MAC is of a
+// kind this code does not compute.
+func ksP12MacCheck(m ksMacData, msg []byte) (ksP12Check, bool) {
+	alg := m.Mac.Algorithm.Algorithm
+	if alg.Equal(ksOIDPBMAC1) {
+		var p ksPBMAC1Params
+		if ksUnmarshalAll(m.Mac.Algorithm.Parameters.FullBytes, &p) != nil {
+			return ksP12Check{}, false
+		}
+		macHash, _, _, ok := ksHashFor(p.MAC.Algorithm)
+		if !ok {
+			return ksP12Check{}, false
+		}
+		// RFC 9579: the key length is required; 20 to 64 octets.
+		derive, cost, keyLen, ok := ksPBKDF2(p.KDF, -1)
+		if !ok || keyLen < 20 || keyLen > 64 {
+			return ksP12Check{}, false
+		}
+		return ksP12Check{cost: cost, test: func(pw ksP12Password) bool {
+			key := derive(pw.utf8)
+			if key == nil {
+				return false
+			}
+			mac := hmac.New(macHash, key)
+			mac.Write(msg)
+			return hmac.Equal(mac.Sum(nil), m.Mac.Digest)
+		}}, true
+	}
+	h, u, v, ok := ksHashFor(alg)
+	if !ok || m.Iterations < 1 {
+		return ksP12Check{}, false
+	}
+	return ksP12Check{cost: ksP12KDFCost(u, m.Iterations, u), test: func(pw ksP12Password) bool {
+		key := ksP12KDF(h, u, v, 3, m.MacSalt, pw.bmp, m.Iterations, u)
+		mac := hmac.New(h, key)
+		mac.Write(msg)
+		return hmac.Equal(mac.Sum(nil), m.Mac.Digest)
+	}}, true
+}
+
+// ksPBKDF2 prepares a PBKDF2 derivation from its AlgorithmIdentifier.
+// keyLen < 0 means "the length the parameters state" (PBMAC1); otherwise the
+// parameters may state only that length. It returns the derivation, its cost
+// and the key length.
+func ksPBKDF2(kdf ksAlgorithmIdentifier, keyLen int) (derive func(pw []byte) []byte, cost, n int, ok bool) {
+	if !kdf.Algorithm.Equal(ksOIDPBKDF2) {
+		return nil, 0, 0, false
+	}
+	var p ksPBKDF2Params
+	if ksUnmarshalAll(kdf.Parameters.FullBytes, &p) != nil || p.Salt.Class != asn1.ClassUniversal || p.Salt.Tag != asn1.TagOctetString || p.Iterations < 1 {
+		return nil, 0, 0, false
+	}
+	prf, hlen := sha1.New, 20
+	if len(p.PRF.Algorithm) > 0 {
+		h, u, _, hok := ksHashFor(p.PRF.Algorithm)
+		if !hok || !strings.HasPrefix(p.PRF.Algorithm.String(), "1.2.840.113549.2.") {
+			return nil, 0, 0, false
+		}
+		prf, hlen = h, u
+	}
+	switch {
+	case keyLen < 0:
+		keyLen = p.KeyLength
+	case p.KeyLength != 0 && p.KeyLength != keyLen:
+		return nil, 0, 0, false
+	}
+	if keyLen <= 0 || keyLen > 64 {
+		return nil, 0, 0, false
+	}
+	salt, iters := p.Salt.Bytes, p.Iterations
+	derive = func(pw []byte) []byte {
+		k, err := pbkdf2.Key(prf, string(pw), salt, iters, keyLen)
+		if err != nil {
+			return nil
+		}
+		return k
+	}
+	return derive, ksMulCost(iters, (keyLen+hlen-1)/hlen), keyLen, true
+}
+
+// ksP12Decrypter prepares decryption of an encryptedData part: the schemes
+// RFC 7292 and RFC 8018 define that a PKCS#12 file uses in practice. It
+// returns false for anything else (RC4, scrypt, an unknown cipher).
+func ksP12Decrypter(alg ksAlgorithmIdentifier, ct []byte) (cost int, open func(pw ksP12Password) ([]byte, bool), ok bool) {
+	if alg.Algorithm.Equal(ksOIDPBES2) {
+		var p ksPBES2Params
+		if ksUnmarshalAll(alg.Parameters.FullBytes, &p) != nil {
+			return 0, nil, false
+		}
+		var iv []byte
+		if ksUnmarshalAll(p.Enc.Parameters.FullBytes, &iv) != nil {
+			return 0, nil, false
+		}
+		var keyLen int
+		var newBlock func([]byte) (cipher.Block, error)
+		switch p.Enc.Algorithm.String() {
+		case "2.16.840.1.101.3.4.1.2":
+			keyLen, newBlock = 16, aes.NewCipher
+		case "2.16.840.1.101.3.4.1.22":
+			keyLen, newBlock = 24, aes.NewCipher
+		case "2.16.840.1.101.3.4.1.42":
+			keyLen, newBlock = 32, aes.NewCipher
+		case "1.2.840.113549.3.7":
+			keyLen, newBlock = 24, des.NewTripleDESCipher
+		default:
+			return 0, nil, false
+		}
+		derive, cost, _, ok := ksPBKDF2(p.KDF, keyLen)
+		if !ok {
+			return 0, nil, false
+		}
+		return cost, func(pw ksP12Password) ([]byte, bool) {
+			key := derive(pw.utf8)
+			if key == nil {
+				return nil, false
+			}
+			blk, err := newBlock(key)
+			if err != nil {
+				return nil, false
+			}
+			return ksCBCDecrypt(blk, iv, ct)
+		}, true
+	}
+
+	var p ksPBEParams
+	if ksUnmarshalAll(alg.Parameters.FullBytes, &p) != nil || p.Iterations < 1 {
+		return 0, nil, false
+	}
+	var keyLen int
+	var newBlock func([]byte) (cipher.Block, error)
+	switch alg.Algorithm.String() {
+	case "1.2.840.113549.1.12.1.3": // pbeWithSHAAnd3-KeyTripleDES-CBC
+		keyLen, newBlock = 24, des.NewTripleDESCipher
+	case "1.2.840.113549.1.12.1.4": // pbeWithSHAAnd2-KeyTripleDES-CBC
+		keyLen = 16
+		newBlock = func(k []byte) (cipher.Block, error) {
+			return des.NewTripleDESCipher(append(append([]byte{}, k...), k[:8]...))
+		}
+	case "1.2.840.113549.1.12.1.5": // pbeWithSHAAnd128BitRC2-CBC
+		keyLen = 16
+		newBlock = func(k []byte) (cipher.Block, error) { return ksNewRC2(k, 128), nil }
+	case "1.2.840.113549.1.12.1.6": // pbeWithSHAAnd40BitRC2-CBC
+		keyLen = 5
+		newBlock = func(k []byte) (cipher.Block, error) { return ksNewRC2(k, 40), nil }
+	default:
+		return 0, nil, false
+	}
+	cost = ksAddCost(ksP12KDFCost(20, p.Iterations, keyLen), ksP12KDFCost(20, p.Iterations, 8))
+	salt, iters := p.Salt, p.Iterations
+	return cost, func(pw ksP12Password) ([]byte, bool) {
+		key := ksP12KDF(sha1.New, 20, 64, 1, salt, pw.bmp, iters, keyLen)
+		iv := ksP12KDF(sha1.New, 20, 64, 2, salt, pw.bmp, iters, 8)
+		blk, err := newBlock(key)
+		if err != nil {
+			return nil, false
+		}
+		return ksCBCDecrypt(blk, iv, ct)
+	}, true
+}
+
+// ksCBCDecrypt decrypts and checks the PKCS#7 padding, which is what tells a
+// wrong password from a right one when nothing else can.
+func ksCBCDecrypt(blk cipher.Block, iv, ct []byte) ([]byte, bool) {
+	bs := blk.BlockSize()
+	if len(iv) != bs || len(ct) == 0 || len(ct)%bs != 0 {
+		return nil, false
+	}
+	pt := make([]byte, len(ct))
+	cipher.NewCBCDecrypter(blk, iv).CryptBlocks(pt, ct)
+	pad := int(pt[len(pt)-1])
+	if pad == 0 || pad > bs {
+		return nil, false
+	}
+	for _, c := range pt[len(pt)-pad:] {
+		if int(c) != pad {
+			return nil, false
+		}
+	}
+	return pt[:len(pt)-pad], true
+}
+
+// ---- RC2 (RFC 2268), for the legacy pbeWithSHAAnd40BitRC2-CBC that
+// OpenSSL's -legacy and older Windows exports still write. Written from the
+// RFC.
+
+var ksRC2Pi = [256]byte{
+	0xd9, 0x78, 0xf9, 0xc4, 0x19, 0xdd, 0xb5, 0xed, 0x28, 0xe9, 0xfd, 0x79, 0x4a, 0xa0, 0xd8, 0x9d,
+	0xc6, 0x7e, 0x37, 0x83, 0x2b, 0x76, 0x53, 0x8e, 0x62, 0x4c, 0x64, 0x88, 0x44, 0x8b, 0xfb, 0xa2,
+	0x17, 0x9a, 0x59, 0xf5, 0x87, 0xb3, 0x4f, 0x13, 0x61, 0x45, 0x6d, 0x8d, 0x09, 0x81, 0x7d, 0x32,
+	0xbd, 0x8f, 0x40, 0xeb, 0x86, 0xb7, 0x7b, 0x0b, 0xf0, 0x95, 0x21, 0x22, 0x5c, 0x6b, 0x4e, 0x82,
+	0x54, 0xd6, 0x65, 0x93, 0xce, 0x60, 0xb2, 0x1c, 0x73, 0x56, 0xc0, 0x14, 0xa7, 0x8c, 0xf1, 0xdc,
+	0x12, 0x75, 0xca, 0x1f, 0x3b, 0xbe, 0xe4, 0xd1, 0x42, 0x3d, 0xd4, 0x30, 0xa3, 0x3c, 0xb6, 0x26,
+	0x6f, 0xbf, 0x0e, 0xda, 0x46, 0x69, 0x07, 0x57, 0x27, 0xf2, 0x1d, 0x9b, 0xbc, 0x94, 0x43, 0x03,
+	0xf8, 0x11, 0xc7, 0xf6, 0x90, 0xef, 0x3e, 0xe7, 0x06, 0xc3, 0xd5, 0x2f, 0xc8, 0x66, 0x1e, 0xd7,
+	0x08, 0xe8, 0xea, 0xde, 0x80, 0x52, 0xee, 0xf7, 0x84, 0xaa, 0x72, 0xac, 0x35, 0x4d, 0x6a, 0x2a,
+	0x96, 0x1a, 0xd2, 0x71, 0x5a, 0x15, 0x49, 0x74, 0x4b, 0x9f, 0xd0, 0x5e, 0x04, 0x18, 0xa4, 0xec,
+	0xc2, 0xe0, 0x41, 0x6e, 0x0f, 0x51, 0xcb, 0xcc, 0x24, 0x91, 0xaf, 0x50, 0xa1, 0xf4, 0x70, 0x39,
+	0x99, 0x7c, 0x3a, 0x85, 0x23, 0xb8, 0xb4, 0x7a, 0xfc, 0x02, 0x36, 0x5b, 0x25, 0x55, 0x97, 0x31,
+	0x2d, 0x5d, 0xfa, 0x98, 0xe3, 0x8a, 0x92, 0xae, 0x05, 0xdf, 0x29, 0x10, 0x67, 0x6c, 0xba, 0xc9,
+	0xd3, 0x00, 0xe6, 0xcf, 0xe1, 0x9e, 0xa8, 0x2c, 0x63, 0x16, 0x01, 0x3f, 0x58, 0xe2, 0x89, 0xa9,
+	0x0d, 0x38, 0x34, 0x1b, 0xab, 0x33, 0xff, 0xb0, 0xbb, 0x48, 0x0c, 0x5f, 0xb9, 0xb1, 0xcd, 0x2e,
+	0xc5, 0xf3, 0xdb, 0x47, 0xe5, 0xa5, 0x9c, 0x77, 0x0a, 0xa6, 0x20, 0x68, 0xfe, 0x7f, 0xc1, 0xad,
+}
+
+type ksRC2 struct{ k [64]uint16 }
+
+// ksNewRC2 expands a key (1 to 128 bytes) for the given effective key bits.
+func ksNewRC2(key []byte, effBits int) *ksRC2 {
+	var l [128]byte
+	t := len(key)
+	copy(l[:], key)
+	for i := t; i < 128; i++ {
+		l[i] = ksRC2Pi[l[i-1]+l[i-t]]
+	}
+	t8 := (effBits + 7) / 8
+	tm := byte(0xff >> uint(8*t8-effBits))
+	l[128-t8] = ksRC2Pi[l[128-t8]&tm]
+	for i := 127 - t8; i >= 0; i-- {
+		l[i] = ksRC2Pi[l[i+1]^l[i+t8]]
+	}
+	c := &ksRC2{}
+	for i := range c.k {
+		c.k[i] = uint16(l[2*i]) | uint16(l[2*i+1])<<8
+	}
+	return c
+}
+
+func (c *ksRC2) BlockSize() int { return 8 }
+
+var ksRC2Shift = [4]uint{1, 2, 3, 5}
+
+func (c *ksRC2) Encrypt(dst, src []byte) {
+	var r [4]uint16
+	for i := range r {
+		r[i] = uint16(src[2*i]) | uint16(src[2*i+1])<<8
+	}
+	j := 0
+	mix := func() {
+		for i := 0; i < 4; i++ {
+			r[i] += c.k[j] + (r[(i+3)%4] & r[(i+2)%4]) + (^r[(i+3)%4] & r[(i+1)%4])
+			j++
+			r[i] = r[i]<<ksRC2Shift[i] | r[i]>>(16-ksRC2Shift[i])
+		}
+	}
+	mash := func() {
+		for i := 0; i < 4; i++ {
+			r[i] += c.k[r[(i+3)%4]&63]
+		}
+	}
+	for _, n := range []int{5, -1, 6, -1, 5} {
+		if n < 0 {
+			mash()
+			continue
+		}
+		for ; n > 0; n-- {
+			mix()
+		}
+	}
+	for i := range r {
+		dst[2*i], dst[2*i+1] = byte(r[i]), byte(r[i]>>8)
+	}
+}
+
+func (c *ksRC2) Decrypt(dst, src []byte) {
+	var r [4]uint16
+	for i := range r {
+		r[i] = uint16(src[2*i]) | uint16(src[2*i+1])<<8
+	}
+	j := 63
+	unmix := func() {
+		for i := 3; i >= 0; i-- {
+			r[i] = r[i]>>ksRC2Shift[i] | r[i]<<(16-ksRC2Shift[i])
+			r[i] -= c.k[j] + (r[(i+3)%4] & r[(i+2)%4]) + (^r[(i+3)%4] & r[(i+1)%4])
+			j--
+		}
+	}
+	unmash := func() {
+		for i := 3; i >= 0; i-- {
+			r[i] -= c.k[r[(i+3)%4]&63]
+		}
+	}
+	for _, n := range []int{5, -1, 6, -1, 5} {
+		if n < 0 {
+			unmash()
+			continue
+		}
+		for ; n > 0; n-- {
+			unmix()
+		}
+	}
+	for i := range r {
+		dst[2*i], dst[2*i+1] = byte(r[i]), byte(r[i]>>8)
+	}
 }

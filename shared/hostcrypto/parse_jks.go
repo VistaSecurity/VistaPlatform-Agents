@@ -90,10 +90,14 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 	out.Keystore.Opened = OpenedWithoutPassword
 
 	if tryDefaults {
-		ok := ksJKSDefaultPassword(b)
-		out.Keystore.DefaultPassword = &ok
-		if ok {
-			out.Keystore.Opened = OpenedDefaultPassword
+		if len(b) < 12+ksJKSDigestLen {
+			out.DefaultsNotTried = "file too short to hold an integrity digest"
+		} else {
+			ok := ksJKSDefaultPassword(b)
+			out.Keystore.DefaultPassword = &ok
+			if ok {
+				out.Keystore.Opened = OpenedDefaultPassword
+			}
 		}
 	}
 
@@ -114,6 +118,7 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 	for i := uint32(0); i < count; i++ {
 		if len(out.Keystore.Entries) >= maxEntries {
 			out.Keystore.EntryCount = ksIntPtr(int(count))
+			out.Truncated = true
 			return out, nil
 		}
 		tag := r.u32()
@@ -145,6 +150,7 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 						entry.Algorithm = cert.KeyAlgorithm
 						entry.SizeBits = cert.KeySize
 						entry.PublicKeySHA256 = cert.PublicKeySHA256
+						_ = cert.Curve // TODO(merge): set Curve
 					}
 				}
 				if parsed {
@@ -163,6 +169,7 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 				entry.Algorithm = cert.KeyAlgorithm
 				entry.SizeBits = cert.KeySize
 				entry.PublicKeySHA256 = cert.PublicKeySHA256
+				_ = cert.Curve // TODO(merge): set Curve
 				cert = ksTrustAnchor(cert)
 				cert.Location.Alias = alias
 				out.Certificates = append(out.Certificates, cert)
@@ -175,6 +182,8 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 			// See the function comment: the rest cannot be listed honestly.
 			out.Keystore.Entries = append(out.Keystore.Entries, KeystoreEntry{Alias: alias, Kind: "secret_key"})
 			out.Keystore.EntryCount = ksIntPtr(int(count))
+			// Truncated only when entries follow it that were not listed.
+			out.Truncated = i+1 < count
 			return out, nil
 		default:
 			return out, errors.New("jks: unknown entry type")
