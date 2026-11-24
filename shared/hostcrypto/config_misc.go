@@ -186,19 +186,18 @@ func cfgParsePostfix(b []byte, _ IncludeResolver) []CryptoConfig {
 	}
 
 	globals := CryptoConfig{}
-	for _, k := range []string{"tls_high_cipherlist", "tls_medium_cipherlist", "tls_low_cipherlist",
-		"tls_export_cipherlist", "tls_null_cipherlist", "tls_ssl_options", "tls_preempt_cipherlist",
-		"tls_eecdh_strong_curve", "tls_eecdh_ultra_curve"} {
+	for _, k := range cfgPostfixGlobals {
 		if v, ok := val(k); ok {
 			cfgSet(&globals, k, v)
 		}
 	}
 
 	var out []CryptoConfig
-	for _, side := range []string{"smtpd", "smtp"} {
+	for _, side := range cfgPostfixSides {
 		c := CryptoConfig{Product: "postfix", Context: side}
 		protoKey := ""
-		for _, k := range []string{side + "_tls_protocols", side + "_tls_mandatory_protocols"} {
+		for _, suffix := range cfgPostfixProtocolSuffixes {
+			k := side + suffix
 			if v, ok := val(k); ok {
 				cfgSet(&c, k, v)
 				if protoKey == "" {
@@ -210,7 +209,8 @@ func cfgParsePostfix(b []byte, _ IncludeResolver) []CryptoConfig {
 			cfgPostfixProtocols(&c, c.Settings[protoKey])
 		}
 		cipherSet := false
-		for _, k := range []string{side + "_tls_ciphers", side + "_tls_mandatory_ciphers"} {
+		for _, suffix := range cfgPostfixCipherSuffixes {
+			k := side + suffix
 			if v, ok := val(k); ok {
 				cfgSet(&c, k, v)
 				if !cipherSet {
@@ -219,24 +219,20 @@ func cfgParsePostfix(b []byte, _ IncludeResolver) []CryptoConfig {
 				}
 			}
 		}
-		for _, k := range []string{side + "_tls_exclude_ciphers", side + "_tls_mandatory_exclude_ciphers"} {
+		for _, suffix := range cfgPostfixExcludeSuffixes {
+			k := side + suffix
 			if v, ok := val(k); ok {
 				cfgSet(&c, k, v)
 				cfgAppend(&c.DisabledAlgorithms, cfgSplitList(v, ", \t:")...)
 			}
 		}
-		for _, k := range []string{side + "_tls_security_level", side + "_tls_eecdh_grade", side + "_tls_fingerprint_digest"} {
+		for _, suffix := range cfgPostfixSimpleSuffixes {
+			k := side + suffix
 			if v, ok := val(k); ok {
 				cfgSetSimple(&c, k, v)
 			}
 		}
-		for _, r := range []struct{ suffix, kind string }{
-			{"_tls_cert_file", "certificate"}, {"_tls_key_file", "private_key"},
-			{"_tls_eccert_file", "certificate"}, {"_tls_eckey_file", "private_key"},
-			{"_tls_dcert_file", "certificate"}, {"_tls_dkey_file", "private_key"},
-			{"_tls_CAfile", "trust_store"}, {"_tls_CApath", "trust_store"},
-			{"_tls_dh1024_param_file", "dh_params"}, {"_tls_dh512_param_file", "dh_params"},
-		} {
+		for _, r := range cfgPostfixRefSuffixes {
 			if v, ok := val(side + r.suffix); ok {
 				cfgRef(&c, r.kind, side+r.suffix, v)
 			}
@@ -254,6 +250,28 @@ func cfgParsePostfix(b []byte, _ IncludeResolver) []CryptoConfig {
 	}
 	return out
 }
+
+// The parameters cfgParsePostfix reads: the global ones by name, the
+// per-side ones as a side ("smtpd", "smtp") followed by a suffix. Each list
+// is read in its order: the first of a pair that is set fills the typed
+// field.
+var (
+	cfgPostfixGlobals = []string{"tls_high_cipherlist", "tls_medium_cipherlist", "tls_low_cipherlist",
+		"tls_export_cipherlist", "tls_null_cipherlist", "tls_ssl_options", "tls_preempt_cipherlist",
+		"tls_eecdh_strong_curve", "tls_eecdh_ultra_curve"}
+	cfgPostfixSides            = []string{"smtpd", "smtp"}
+	cfgPostfixProtocolSuffixes = []string{"_tls_protocols", "_tls_mandatory_protocols"}
+	cfgPostfixCipherSuffixes   = []string{"_tls_ciphers", "_tls_mandatory_ciphers"}
+	cfgPostfixExcludeSuffixes  = []string{"_tls_exclude_ciphers", "_tls_mandatory_exclude_ciphers"}
+	cfgPostfixSimpleSuffixes   = []string{"_tls_security_level", "_tls_eecdh_grade", "_tls_fingerprint_digest"}
+	cfgPostfixRefSuffixes      = []struct{ suffix, kind string }{
+		{"_tls_cert_file", "certificate"}, {"_tls_key_file", "private_key"},
+		{"_tls_eccert_file", "certificate"}, {"_tls_eckey_file", "private_key"},
+		{"_tls_dcert_file", "certificate"}, {"_tls_dkey_file", "private_key"},
+		{"_tls_CAfile", "trust_store"}, {"_tls_CApath", "trust_store"},
+		{"_tls_dh1024_param_file", "dh_params"}, {"_tls_dh512_param_file", "dh_params"},
+	}
+)
 
 func cfgPostfixProtocols(c *CryptoConfig, v string) {
 	for _, item := range cfgSplitList(v, ", \t:") {

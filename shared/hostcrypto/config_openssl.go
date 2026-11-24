@@ -208,6 +208,18 @@ func cfgOSSLFragment(b []byte, include IncludeResolver) []CryptoConfig {
 	return []CryptoConfig{c}
 }
 
+// cfgOSSLSettingKeys are the SSL_CONF keys kept as written in Settings.
+var cfgOSSLSettingKeys = []string{"ClientSignatureAlgorithms", "Options", "Protocol", "VerifyMode"}
+
+// cfgOSSLRefKeys are the SSL_CONF keys that name a file, and its kind.
+var cfgOSSLRefKeys = []struct{ key, kind string }{
+	{"Certificate", "certificate"}, {"PrivateKey", "private_key"},
+	{"ChainCAFile", "trust_store"}, {"ChainCAPath", "trust_store"},
+	{"VerifyCAFile", "trust_store"}, {"VerifyCAPath", "trust_store"},
+	{"RequestCAFile", "trust_store"}, {"RequestCAPath", "trust_store"},
+	{"DHParameters", "dh_params"},
+}
+
 func cfgOSSLApplySSL(c *CryptoConfig, eff *cfgOSSLSection) {
 	val := func(names ...string) (string, bool) {
 		v, ok := eff.ci(names...)
@@ -245,18 +257,12 @@ func cfgOSSLApplySSL(c *CryptoConfig, eff *cfgOSSLSection) {
 	if v, ok := val("SignatureAlgorithms"); ok {
 		c.SignatureAlgorithms = cfgSplitList(v, ":")
 	}
-	for _, n := range []string{"ClientSignatureAlgorithms", "Options", "Protocol", "VerifyMode"} {
+	for _, n := range cfgOSSLSettingKeys {
 		if v, ok := val(n); ok {
 			cfgSet(c, n, v)
 		}
 	}
-	for _, r := range []struct{ key, kind string }{
-		{"Certificate", "certificate"}, {"PrivateKey", "private_key"},
-		{"ChainCAFile", "trust_store"}, {"ChainCAPath", "trust_store"},
-		{"VerifyCAFile", "trust_store"}, {"VerifyCAPath", "trust_store"},
-		{"RequestCAFile", "trust_store"}, {"RequestCAPath", "trust_store"},
-		{"DHParameters", "dh_params"},
-	} {
+	for _, r := range cfgOSSLRefKeys {
 		if v, ok := val(r.key); ok {
 			cfgRef(c, r.kind, r.key, v)
 		}
