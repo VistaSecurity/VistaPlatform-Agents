@@ -60,7 +60,7 @@ func TestApacheDepthPastLimitIsCountedNotPushed(t *testing.T) {
 }
 
 func TestOpenSSLFIPSBackendNeverSetsFIPS(t *testing.T) {
-	got := ParseCryptoPolicyBackend("openssl_fips.config", []byte("[fips_sect]\nactivate = 1\n"))
+	got := keepCPBackend("openssl_fips.config", []byte("[fips_sect]\nactivate = 1\n"))
 	if got[0].FIPS != nil {
 		t.Errorf("must not set FIPS: %s", cfgJSON(t, got))
 	}

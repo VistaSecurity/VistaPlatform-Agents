@@ -26,7 +26,7 @@ func TestCryptoPoliciesConfig(t *testing.T) {
 
 func TestCryptoPolicyBackends(t *testing.T) {
 	t.Run("opensshserver (RHEL 9 style)", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("opensshserver.config", []byte(`Ciphers aes256-gcm@openssh.com,aes256-ctr
+		cfgs := keepCPBackend("opensshserver.config", []byte(`Ciphers aes256-gcm@openssh.com,aes256-ctr
 MACs hmac-sha2-256,hmac-sha2-512
 GSSAPIKexAlgorithms gss-curve25519-sha256-
 KexAlgorithms curve25519-sha256,ecdh-sha2-nistp256
@@ -49,7 +49,7 @@ RequiredRSASize 2048
 		}})
 	})
 	t.Run("openssh (RHEL 8 CRYPTO_POLICY style)", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("openssh", []byte(`CRYPTO_POLICY='-oCiphers=aes256-ctr,aes128-ctr -oMACs=hmac-sha2-256 -oKexAlgorithms=ecdh-sha2-nistp256 -oSomethingElse=x'
+		cfgs := keepCPBackend("openssh", []byte(`CRYPTO_POLICY='-oCiphers=aes256-ctr,aes128-ctr -oMACs=hmac-sha2-256 -oKexAlgorithms=ecdh-sha2-nistp256 -oSomethingElse=x'
 `))
 		if len(cfgs) != 1 || cfgs[0].CipherSuites[1] != "aes128-ctr" || cfgs[0].MACs[0] != "hmac-sha2-256" ||
 			cfgs[0].KeyExchanges[0] != "ecdh-sha2-nistp256" || cfgs[0].Context != "back-end openssh" {
@@ -57,7 +57,7 @@ RequiredRSASize 2048
 		}
 	})
 	t.Run("gnutls", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("gnutls.config", []byte(`[priorities]
+		cfgs := keepCPBackend("gnutls.config", []byte(`[priorities]
 SYSTEM=NONE:+AES-256-GCM:+AES-128-GCM:+VERS-TLS1.3:+VERS-TLS1.2:%PROFILE_MEDIUM
 
 [overrides]
@@ -82,13 +82,13 @@ password = SECRETGNUTLS
 		cfgNoSecrets(t, cfgs, "SECRETGNUTLS")
 	})
 	t.Run("java", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("java.config", []byte("jdk.tls.disabledAlgorithms=SSLv3, TLSv1\nkeystore.type=pkcs12\n"))
+		cfgs := keepCPBackend("java.config", []byte("jdk.tls.disabledAlgorithms=SSLv3, TLSv1\nkeystore.type=pkcs12\n"))
 		if len(cfgs) != 1 || cfgs[0].Context != "back-end java" || len(cfgs[0].DisabledAlgorithms) != 2 {
 			t.Errorf("got %s", cfgJSON(t, cfgs))
 		}
 	})
 	t.Run("nss", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("nss.config", []byte(`name=Policy
+		cfgs := keepCPBackend("nss.config", []byte(`name=Policy
 library=
 NSS=flags=policyOnly,moduleDB
 config="disallow=ALL allow=HMAC-SHA256:HMAC-SHA1:AES256-GCM:tls-version-min=tls1.2:dtls-version-min=dtls1.2"
@@ -99,7 +99,7 @@ config="disallow=ALL allow=HMAC-SHA256:HMAC-SHA1:AES256-GCM:tls-version-min=tls1
 		}
 	})
 	t.Run("krb5", func(t *testing.T) {
-		cfgs := ParseCryptoPolicyBackend("/etc/crypto-policies/back-ends/krb5.config", []byte("[libdefaults]\npermitted_enctypes = aes256-cts-hmac-sha384-192 aes128-cts-hmac-sha256-128\n"))
+		cfgs := keepCPBackend("/etc/crypto-policies/back-ends/krb5.config", []byte("[libdefaults]\npermitted_enctypes = aes256-cts-hmac-sha384-192 aes128-cts-hmac-sha256-128\n"))
 		if len(cfgs) != 1 || len(cfgs[0].CipherSuites) != 2 || cfgs[0].Context != "back-end krb5" {
 			t.Errorf("got %s", cfgJSON(t, cfgs))
 		}

@@ -286,5 +286,6 @@ func TestParseCryptoPolicyBackendUnknown(t *testing.T) {
 	}
 }
 
-// cfgT calls a parser with no include resolver.
-func cfgT(p ConfigParser, b []byte) []CryptoConfig { return p(b, nil) }
+// cfgT parses b with no resolver. It also hands b to keepRecord, so the
+// keep-word parity test (config_keep_test.go) sees every fixture.
+func cfgT(p ConfigParser, b []byte) []CryptoConfig { keepRecord(p, "", b); return p(b, nil) }
