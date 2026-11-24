@@ -330,6 +330,20 @@ func (c *collection) timeUp(ctx context.Context, section string) bool {
 	return false
 }
 
+// readConfig is the ONE way a pass reads a configuration file: through
+// [Target.ReadText], with the keep words of the parser for product
+// ([ConfigKeepWords]). A product with no keep words is refused here, before
+// the target is asked anything, so a pass cannot read configuration it has no
+// parser for. Redactions are not an error; the parser sees what was kept.
+func (c *collection) readConfig(ctx context.Context, path string, product string) ([]byte, error) {
+	keep := ConfigKeepWords(product)
+	if len(keep) == 0 {
+		return nil, fmt.Errorf("hostcrypto: %s: no keep words for product %q: %w", path, product, ErrNotPublic)
+	}
+	text, _, err := c.target.ReadText(ctx, path, keep)
+	return text, err
+}
+
 // pass is one of the collector's passes. Passes register in the files that
 // define them (pass_*.go, os_*.go) by appending to passes in an init, in the
 // order they must run: known locations, configuration, running system, sweep.
