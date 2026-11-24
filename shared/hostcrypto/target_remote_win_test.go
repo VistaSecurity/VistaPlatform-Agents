@@ -110,10 +110,12 @@ func TestRemoteWindowsStdinPath(t *testing.T) {
 				t.Errorf("path %q appears in script text", p)
 			}
 			got, _ := args["Path"].(string)
+			want := winLongPath(p)
 			if got == "" {
 				got, _ = args["Root"].(string)
+				want = p
 			}
-			if got != p {
+			if got != want {
 				t.Errorf("decoded argument = %q, want %q", got, p)
 			}
 			return host(argv, stdin)
@@ -377,8 +379,9 @@ func TestRemoteWindowsReadText(t *testing.T) {
 }
 
 // TestRemoteWindowsEncodingAndLongPaths (review item D): every answer is
-// ASCII on the wire, non-ASCII names survive the round trip, and a path of
-// 260 characters or more is sent in the \\?\ form.
+// ASCII on the wire, non-ASCII names survive the round trip, and every
+// absolute path is sent in the \\?\ form (fourth review: without it
+// "nul.conf", "COM1.conf" and a trailing dot or space name something else).
 func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
 	var sent []string
 	fr := newTgtFakeInputRunner(func(argv []string, stdin []byte) tgtResult {
@@ -389,7 +392,7 @@ func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
 	})
 	name := `C:\Users\Jürgen\café-日本.pem`
 	fi, err := NewRemoteWindowsTarget(fr).Stat(context.Background(), name)
-	if err != nil || fi.Owner != "HÔTE\\Jürgen-日本" || fi.Path != name || sent[0] != name {
+	if err != nil || fi.Owner != "HÔTE\\Jürgen-日本" || fi.Path != name || sent[0] != `\\?\`+name {
 		t.Fatalf("non-ASCII: %+v %v %q", fi, err, sent)
 	}
 	long := `C:\` + strings.Repeat("d\\", 140) + "x.pem"
@@ -401,8 +404,11 @@ func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
 	if got := winLongPath(unc); got != `\\?\UNC\server\share\`+strings.Repeat("d", 260) {
 		t.Fatalf("UNC long path: %q", got[:20])
 	}
-	if winLongPath(`C:\short`) != `C:\short` || winLongPath(`\\?\`+long) != `\\?\`+long {
-		t.Fatal("short or prefixed path changed")
+	for in, want := range map[string]string{`C:\short`: `\\?\C:\short`, `C:\x\nul.conf`: `\\?\C:\x\nul.conf`, `c:/x/COM1.conf`: `\\?\c:\x\COM1.conf`,
+		`C:\x\trail. `: `\\?\C:\x\trail. `, `\\?\` + long: `\\?\` + long, `relative\x`: `relative\x`, `/unix/path`: `/unix/path`} {
+		if got := winLongPath(in); got != want {
+			t.Errorf("winLongPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 	// A raw (code-page) answer is refused, not misread.
 	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: `{"Path":"x"}`} })

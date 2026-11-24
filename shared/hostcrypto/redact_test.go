@@ -315,8 +315,6 @@ func TestPublicContentRules(t *testing.T) {
 		"two_certs.pem":            string(r.certPEM) + string(r.certPEM),
 		"id_ed25519.pub":           strings.Join(strings.Fields(string(r.pubLine))[:2], " ") + "\n",
 		"pub_then_priv.pub":        strings.Join(strings.Fields(string(r.pubLine))[:2], " ") + "\n",
-		"pub.pem":                  string(r.files["pub.pem"]),
-		"csr.pem":                  string(r.files["csr.pem"]),
 	}
 	for name, b := range r.files {
 		out, ok := publicContent(b)
@@ -446,6 +444,7 @@ func TestRemoteParity(t *testing.T) {
 	for name, b := range r.files {
 		tgtWrite(t, dir, "files/"+name, b, 0o644)
 	}
+	fxSettle()
 	ctx := context.Background()
 	lt := NewLocalTarget()
 	for impl, runner := range tgtAwks(t) {

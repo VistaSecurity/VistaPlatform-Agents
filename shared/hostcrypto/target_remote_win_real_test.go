@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -230,6 +229,7 @@ func TestRemoteWindowsRealReadText(t *testing.T) {
 	corpus := fxTextCorpus(t, gen)
 	dir := t.TempDir()
 	fxWriteCorpus(t, dir, corpus)
+	fxSettle()
 	keeps := fxParityKeeps(true)
 	kn := fxSorted(keeps)
 	rt := NewRemoteWindowsTarget(r)
@@ -269,6 +269,7 @@ func TestRemoteWindowsRealSpeed(t *testing.T) {
 	dir := t.TempDir()
 	text := fxReview3Text()
 	fxWriteCorpus(t, dir, map[string][]byte{"l.conf": text["lines_200000.conf"], "long.conf": text["long_line.conf"]})
+	fxSettle()
 	rt := NewRemoteWindowsTarget(r)
 	for _, c := range []struct{ file, name string }{{"l.conf", "realistic"}, {"l.conf", "realistic+statements"}, {"long.conf", "gen+statements"}} {
 		keep := fxParityKeeps(true)[c.name]
@@ -299,6 +300,7 @@ func TestRemoteWindowsRealReadFile(t *testing.T) {
 	corpus := fxFileCorpus(t)
 	dir := t.TempDir()
 	fxWriteCorpus(t, dir, corpus)
+	fxSettle()
 	rt := NewRemoteWindowsTarget(r)
 	ctx := context.Background()
 	for _, name := range fxSorted(corpus) {
@@ -328,6 +330,7 @@ func TestRemoteWindowsRealStatListIdentify(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, keyPEM, _, _ := tgtMaterial(t)
 	fxWriteCorpus(t, dir, map[string][]byte{"a/cert.pem": certPEM, "a/b/key.pem": keyPEM, "c.txt": []byte("x = 1\n")})
+	fxSettle()
 	rt := NewRemoteWindowsTarget(r)
 	ctx := context.Background()
 	fi, err := rt.Stat(ctx, filepath.Join(dir, "a", "cert.pem"))
@@ -376,6 +379,7 @@ func TestRemoteWindowsRealStatListIdentify(t *testing.T) {
 	if err := os.WriteFile(deep+`\deep.pem`, certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	fxSettle()
 	files, err = rt.List(ctx, dir, ListOptions{MaxDepth: 20})
 	found := false
 	for _, f := range files {
@@ -392,72 +396,58 @@ func TestRemoteWindowsRealStatListIdentify(t *testing.T) {
 }
 
 // TestRemoteWindowsRealTornReads: the in-place rewrite of
-// TestRemoteUnixTornReads, against the PowerShell read.
+// TestRemoteUnixTornReads (bursts and quiet spells), against the PowerShell
+// read.
 func TestRemoteWindowsRealTornReads(t *testing.T) {
 	r := fxPSRunner(t)
-	reads := 300
+	cycles := 3
 	if testing.Short() {
-		reads = 40
+		cycles = 1
 	}
 	text := fxReview3Text()
 	a, b := text["race_a.conf"], text["race_b.conf"]
 	keep := []string{"ssl_ciphers", "ssl_protocols", KeepOptStatements}
 	wa, _, _ := FilterConfigText(a, keep)
 	wb, _, _ := FilterConfigText(b, keep)
-	dir := t.TempDir()
-	p := filepath.Join(dir, "swap.conf")
-	tgtWrite(t, dir, "swap.conf", a, 0o644)
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			f, err := os.OpenFile(p, os.O_WRONLY, 0)
-			if err != nil {
-				continue
-			}
-			src := a
-			if i%2 == 1 {
-				src = b
-			}
-			for off := 0; off < len(src); off += 4096 {
-				_, _ = f.WriteAt(src[off:min(off+4096, len(src))], int64(off))
-				// dd's gap between its two writes, which is what
-				// lets a read take one page of each version.
-				time.Sleep(50 * time.Microsecond)
-			}
-			_ = f.Close()
-			// A pause, so some reads fall between rewrites and succeed:
-			// a test where every read is refused proves nothing.
-			time.Sleep(time.Duration(i%5) * 20 * time.Millisecond)
-		}
-	}()
 	rt := NewRemoteWindowsTarget(r)
-	torn, ok, changed := 0, 0, 0
-	for i := 0; i < reads; i++ {
+	ok, changed, other, torn, reads := fxTornRun(t, a, b, cycles, func(p string) ([]byte, error) {
 		out, _, err := rt.ReadText(context.Background(), p, keep)
-		switch {
-		case err == nil:
-			ok++
-			if !bytes.Equal(out, wa) && !bytes.Equal(out, wb) {
-				torn++
-				t.Errorf("read %d returned neither version: %s", i, fxFirstDiff(out, wa))
-			}
-		case errors.Is(err, errChanged):
-			changed++
+		return out, err
+	}, func(out []byte) bool { return bytes.Equal(out, wa) || bytes.Equal(out, wb) })
+	t.Logf("ok=%d changed=%d other=%d torn=%d of %d", ok, changed, other, torn, reads)
+	if torn != 0 {
+		t.Fatalf("%d torn reads", torn)
+	}
+	if ok == 0 {
+		t.Fatal("no read succeeded: the test proves nothing")
+	}
+}
+
+// TestRemoteWindowsRealDeviceNames: names Windows reads as devices or
+// rewrites without the \\?\ form (fourth review) are read as the files they
+// are.
+func TestRemoteWindowsRealDeviceNames(t *testing.T) {
+	r := fxPSRunner(t)
+	dir := t.TempDir()
+	prefix := ""
+	if runtime.GOOS == "windows" {
+		prefix = `\\?\`
+	}
+	conf := []byte("ssl_ciphers HIGH;\npassword S3cr3t;\n")
+	keep := []string{"ssl_ciphers", KeepOptStatements}
+	names := []string{"nul.conf", "con.conf", "aux", "COM1.conf", "prn.txt", "trail.", "trail "}
+	for _, n := range names {
+		if err := os.WriteFile(prefix+filepath.Join(dir, n), conf, 0o644); err != nil {
+			t.Fatalf("%q: %v", n, err)
 		}
 	}
-	close(stop)
-	wg.Wait()
-	t.Logf("ok=%d changed=%d torn=%d of %d", ok, changed, torn, reads)
-	if ok == 0 {
-		t.Error("no read succeeded: the test proves nothing")
+	fxSettle()
+	rt := NewRemoteWindowsTarget(r)
+	for _, n := range names {
+		got, _, err := rt.ReadText(context.Background(), filepath.Join(dir, n), keep)
+		if err != nil || string(got) != "ssl_ciphers HIGH;\n" {
+			t.Errorf("%q: %q, %v", n, got, err)
+		}
 	}
 }
 

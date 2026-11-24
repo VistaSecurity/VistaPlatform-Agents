@@ -15,9 +15,10 @@ import (
 // The parsers take bytes and nothing else, exactly as host inventory's do.
 // What differs between the modes is which bytes the collector may ask for.
 // On a remote target [Target.ReadFile] does not return a file: it returns the
-// public PEM blocks in it (or its SSH public key lines) and nothing around
-// them, decided and printed on the host from one read of the file. A file
-// with no such content is refused with ErrNotPublic. Configuration is read
+// certificates in it, each re-encoded by a certificate parser on the host
+// (openssl, or .NET on Windows), and its SSH public key lines, and nothing
+// around them, decided and printed on the host from one read of the file. A
+// file with no such content is refused with ErrNotPublic. Configuration is read
 // through [Target.ReadText], which narrows on the host to the lines a parser
 // asked for.
 type Target interface {
@@ -55,8 +56,10 @@ type Target interface {
 	//      (brace-and-semicolon syntax read as statements), "@backslash"
 	//      (a kept line ending in an odd number of backslashes continues),
 	//      "@indent" (a line beginning with a blank continues the previous
-	//      one) and "@cr" (a lone carriage return ends a line). There is no
-	//      continuation without an option.
+	//      one) and "@cr" (a lone carriage return ends a line), and the structure it
+	//      has: "@sections" and "@anysections" ("[name]" headers) and "@tags"
+	//      (closing tags). There is no continuation without an option, and a
+	//      line holding a lone carriage return is dropped whole.
 	//   2. A line (or statement) is kept only when its first word is in keep
 	//      (compared without regard to ASCII case), when it is strict
 	//      structure (a section header, a lone brace, a closing tag), or
@@ -181,17 +184,24 @@ type Identity struct {
 	KeystoreType string
 }
 
-// Public reports whether a file of this identity holds nothing private, so
-// its bytes may cross a remote connection whole: a certificate, a public key,
-// a request, a revocation list or parameters. A file holding a private key in
-// any form is not public, and neither is a keystore, a PGP keyring, anything
-// unidentified, or plain text. Text is not public because a secret needs no
-// marker: a WireGuard key, a kubeconfig and a Tor service key are all
-// printable. A configuration file is read with [Target.ReadText] instead.
+// Public reports whether a file of this identity may be read over a remote
+// connection with [Target.ReadFile]: a certificate file, or an OpenSSH
+// public key file (key lines, no PEM label). Even then what crosses is not
+// the file: each certificate crosses only as a host parser's re-encoding of
+// it, and each key line as "type blob". A public key, request, revocation
+// list or parameters file is harmless but not readable remotely (no record
+// of the Report needs it from a remote host); a private key in any form, a
+// keystore, a PGP keyring, anything unidentified, and plain text are not
+// public at all. Text is not public because a secret needs no marker: a
+// WireGuard key, a kubeconfig and a Tor service key are all printable. A
+// configuration file is read with [Target.ReadText] instead. A local target
+// reads every file whole and does not consult Public.
 func (i Identity) Public() bool {
 	switch i.Class {
-	case ClassCertificate, ClassPublicKey, ClassCSR, ClassCRL, ClassDHParams:
+	case ClassCertificate:
 		return true
+	case ClassPublicKey:
+		return len(i.PEMLabels) == 0
 	default:
 		return false
 	}

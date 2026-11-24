@@ -27,6 +27,15 @@ import (
 // GnuTLS, NSS, crypto-policies' config and the bare cipher string have no
 // continuation syntax and declare none.
 //
+// Structure is per product too. A "[name]" header is structure only with
+// @sections (krb5, GnuTLS: and then only when name is listed, the sections
+// the parser reads) or @anysections (OpenSSL, whose section names the file
+// chooses, of the shape [A-Za-z0-9_.-]{1,64}); a header that does not cross
+// drops its whole section, so a section the parser does not read crosses
+// nothing. A closing tag "</Name>" is structure only with @tags (Apache), and
+// only for a listed Name. No other product has headers or tags: to them
+// such a line is an ordinary line, dropped unless its first word is listed.
+//
 // The lists are built from the parsers' own allowlist tables wherever a
 // parser has one. Where a parser decides by a switch or a comparison, the
 // words are written here once, in the keep* slices below, and
@@ -175,6 +184,10 @@ var (
 		"default_keytab_name", "default_client_keytab_name", "pkinit_anchors", "pkinit_identities"}
 	// cfgParseKrb5's directives valid anywhere.
 	keepKrb5Includes = []string{"include", "includedir"}
+	// cfgParseKrb5's one section; every other section's body is dropped.
+	keepKrb5Sections = []string{"libdefaults"}
+	// cfgParseGnuTLS's sections.
+	keepGnuTLSSections = []string{"priorities", "overrides", "global"}
 
 	// cfgParseGnuTLS's comparison: the priority string.
 	keepGnuTLSSystem = []string{"SYSTEM"}
@@ -251,6 +264,9 @@ var (
 	keepOptsJava      = []string{KeepOptCR, KeepOptBackslash}
 	keepOptsBackslash = []string{KeepOptBackslash}
 	keepOptsPostfix   = []string{KeepOptIndent}
+	keepOptsOpenSSL   = []string{KeepOptBackslash, KeepOptAnySections}
+	keepOptsApache    = []string{KeepOptBackslash, KeepOptTags}
+	keepOptsSections  = []string{KeepOptSections}
 )
 
 // keepWordsOnly is a list without its options.
@@ -272,9 +288,9 @@ var configKeepWords = func() map[string][]string {
 		osslRefs = append(osslRefs, r.key)
 	}
 	osslSSL := [][]string{keepOpenSSLSSLKeys, cfgOSSLSettingKeys, osslRefs}
-	openssl := keepWords(keepOptsBackslash, append(osslSSL, keepOpenSSLChain, keepOpenSSLInclude,
+	openssl := keepWords(keepOptsOpenSSL, append(osslSSL, keepOpenSSLChain, keepOpenSSLInclude,
 		keepKeys(cfgOSSLProviders), keepKeys(cfgOSSLEngines))...)
-	opensslFragment := keepWords(keepOptsBackslash, append(osslSSL, keepOpenSSLFragment, keepOpenSSLInclude)...)
+	opensslFragment := keepWords(keepOptsOpenSSL, append(osslSSL, keepOpenSSLFragment, keepOpenSSLInclude)...)
 
 	java := keepWords(keepOptsJava, cfgJavaSettingProps, keepJavaProps, keepJavaStructure,
 		keepNumbered(cfgJavaProviderPrefix), keepNumbered(cfgJavaFIPSProviderPrefix))
@@ -286,13 +302,13 @@ var configKeepWords = func() map[string][]string {
 
 	nginx := keepWords(keepOptsNginx, keepNginxDirectives, keepKeys(cfgNgxProxy), keepNginxBlocks)
 
-	apache := keepWords(keepOptsBackslash, keepApacheDirectives, keepKeys(cfgApacheSettings), keepKeys(cfgApacheRefs),
+	apache := keepWords(keepOptsApache, keepApacheDirectives, keepKeys(cfgApacheSettings), keepKeys(cfgApacheRefs),
 		keepApacheSections)
 
 	haproxy := keepWords(keepOptsNone, keepKeys(cfgHASectionKinds), keepHAProxyGlobal, keepHAProxyServers, keepHAProxyBind)
 
-	krb5 := keepWords(keepOptsNone, keepKrb5Relations, keepKrb5Includes)
-	gnutls := keepWords(keepOptsNone, keepGnuTLSSystem, keepKeys(cfgGnuTLSDeny), keepKeys(cfgGnuTLSAllow), keepKeys(cfgGnuTLSOther))
+	krb5 := keepWords(keepOptsSections, keepKrb5Relations, keepKrb5Includes, keepKrb5Sections)
+	gnutls := keepWords(keepOptsSections, keepGnuTLSSections, keepGnuTLSSystem, keepKeys(cfgGnuTLSDeny), keepKeys(cfgGnuTLSAllow), keepKeys(cfgGnuTLSOther))
 
 	var postfixRefs []string
 	for _, r := range cfgPostfixRefSuffixes {

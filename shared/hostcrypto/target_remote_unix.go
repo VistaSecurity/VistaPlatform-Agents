@@ -34,6 +34,10 @@ type RemoteUnixTarget struct {
 	runner   hostinventory.Runner
 	platform string
 	maxBytes int64
+	// coarse makes the read scripts pin the file with whole-second times,
+	// as a host whose stat has no finer ones does. Tests only: it is how
+	// the quiescence rule is shown to hold without fine times.
+	coarse bool
 }
 
 // remoteUnixReadMax is the most a remote Unix read returns: the runner
@@ -63,10 +67,14 @@ func (t *RemoteUnixTarget) readCap() int64 { return min(t.maxBytes, remoteUnixRe
 func (t *RemoteUnixTarget) darwin() bool { return t.platform == hostinventory.PlatformDarwin }
 
 func (t *RemoteUnixTarget) platformArg() string {
+	p := hostinventory.PlatformLinux
 	if t.darwin() {
-		return hostinventory.PlatformDarwin
+		p = hostinventory.PlatformDarwin
 	}
-	return hostinventory.PlatformLinux
+	if t.coarse {
+		p += "-coarse"
+	}
+	return p
 }
 
 // Run passes argv to the runner unchanged.
@@ -157,6 +165,7 @@ function emit(s) {
   if (DROP) { if (isend(s)) DROP = 0; return }
   if (isbegin(s)) { NRED++; if (!isend(s)) DROP = 1; return }
   OUT[++NO] = redact(s)
+  OUTB += length(OUT[NO]) + 1
 }
 function fw(t,   i, c) {
   sub(/^[ \t]+/, "", t)
@@ -170,7 +179,13 @@ function fw(t,   i, c) {
 }
 function oddbs(s) { return match(s, /\\+$/) && RLENGTH % 2 == 1 }
 function iscomment(t,   c) { c = substr(t, 1, 1); return c == "#" || c == "!" || c == ";" || substr(t, 1, 2) == "//" }
-function ishdr(t) { return length(t) >= 3 && length(t) <= 130 && t ~ /^\[[A-Za-z0-9 ._:\/-]+\]$/ }
+function hdrlike(t) { return length(t) >= 2 && substr(t, 1, 1) == "[" && substr(t, length(t)) == "]" }
+function secname(t,   n) {
+  if (!hdrlike(t) || length(t) < 3) return ""
+  n = substr(t, 2, length(t) - 2); sub(/^[ \t]+/, "", n); sub(/[ \t]+$/, "", n)
+  if (n == "" || length(n) > 64 || n !~ /^[A-Za-z0-9_.-]+$/) return ""
+  return tolower(n)
+}
 function closetag(t) { if (length(t) >= 4 && length(t) <= 67 && t ~ /^<\/[A-Za-z0-9_.:-]+>$/) return tolower(substr(t, 3, length(t) - 3)); return "" }
 function opentag(t,   c) {
   if (length(t) < 3 || t !~ /^<[A-Za-z]/ || substr(t, length(t)) != ">") return ""
@@ -180,7 +195,7 @@ function opentag(t,   c) {
   if (c != ">" && c != " " && c != "\t") return ""
   return tolower(substr(t, 2, RLENGTH - 1))
 }
-function lline(s,   t, tr, w, nm) {
+function lline(s,   t, tr, w, nm, hdr) {
   t = s; sub(/^[ \t]+/, "", t)
   if (DROPB || DROPT != "") {
     if (t == "" || iscomment(t)) return
@@ -191,7 +206,17 @@ function lline(s,   t, tr, w, nm) {
     if (DDEPTH <= 0) { DROPB = 0; DROPT = "" }
     return
   }
+  tr = t; sub(/[ \t]+$/, "", tr)
+  hdr = (OPTSEC || OPTANYSEC) && hdrlike(tr) && !index(s, "\r")
+  if (DROPSEC && !hdr) return
+  if (index(s, "\r")) {
+    BSC = 0; DROPC = 0; PREVK = 0; HAVEL = 1; LKEPT = 0; CONTN = 0
+    if (tr != "" && substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
+    else if ((nm = opentag(tr)) != "" && OPTTAGS) { DROPT = nm; DDEPTH = 1 }
+    return
+  }
   if (BSC) { CONTN++; BSC = oddbs(s); if (CONTN <= ` + strconv.Itoa(maxContinuation) + ` && substr(t, 1, 1) != "#") emit(s); return }
+  if (DROPC) { DROPC = (substr(s, length(s)) == "\\"); return }
   if (OPTIND && HAVEL && t != "" && (substr(s, 1, 1) == " " || substr(s, 1, 1) == "\t")) {
     if (substr(t, 1, 1) == "#") return
     CONTN++
@@ -201,13 +226,21 @@ function lline(s,   t, tr, w, nm) {
   if (t == "") { emit(s); return }
   if (iscomment(t)) return
   HAVEL = 1; LKEPT = 0; CONTN = 0
-  tr = t; sub(/[ \t]+$/, "", tr)
-  if (closetag(tr) != "" || ishdr(tr) || tr == "}" || tr == "};" || (tr == "{" && PREVK)) { emit(s); PREVK = 0; return }
+  if (hdr) {
+    nm = secname(tr)
+    DROPSEC = (nm == "" || (!OPTANYSEC && !(nm in K)))
+    if (!DROPSEC) emit(s)
+    PREVK = 0
+    return
+  }
+  if ((nm = closetag(tr)) != "" && OPTTAGS && (nm in K)) { emit(s); PREVK = 0; return }
+  if (tr == "}" || tr == "};" || (tr == "{" && PREVK)) { emit(s); PREVK = 0; return }
   w = fw(t)
   if (w != "" && (w in K)) { emit(s); PREVK = 1; LKEPT = 1; BSC = OPTBS && oddbs(s); return }
   PREVK = 0
-  if (substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
-  else if ((nm = opentag(tr)) != "") { DROPT = nm; DDEPTH = 1 }
+  if (OPTBS && substr(s, length(s)) == "\\") DROPC = 1
+  else if (substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
+  else if ((nm = opentag(tr)) != "" && OPTTAGS) { DROPT = nm; DDEPTH = 1 }
 }
 function stadd(tok, ends, over) {
   if (OVER) return
@@ -232,6 +265,7 @@ function sttok(e) {
     qadd(e); return
   }
   if (DOLLAR) { if (e == "}") { wadd(e); DOLLAR = 0; return }; if (e != "\n") { wadd(e); return }; DOLLAR = 0 }
+  if (WESC) { WESC = 0; if (e != "\n") { wadd(e); return } }
   if (e == "\n") { wflush(); SEP = 1; if (STARTED && !OVER) { STNL++; if (STNL >= ` + strconv.Itoa(maxStatementLines) + `) { OVER = 1; BUF = "" } }; return }
   if (e == " " || e == "\t" || e == "\014" || e == "\013" || e == "\r") { wflush(); SEP = 1; return }
   if (e == ";") { wflush(); if (stkept()) emit(BUF ";"); streset(); return }
@@ -244,6 +278,7 @@ function sttok(e) {
   if (e == "}") { wflush(); streset(); if (DEPTH == 0) emit("}"); else { if (!DROPAT) emit("}"); if (DROPAT == DEPTH) DROPAT = 0; DEPTH-- }; return }
   if (!INW && e == "#") { INCOM = 1; SEP = 1; return }
   if (!INW && (e == "\"" || e == Q1)) { INQ = e; QTOK = e; QNL = 0; QESC = 0; QOVER = 0; return }
+  if (e == "\\") WESC = 1
   wadd(e)
 }
 function stline(s,   n, A, k) {
@@ -259,8 +294,7 @@ function tline(s) {
 function tproc(r,   n, P, i) {
   if (BAD || TOOMANY) return
   if (substr(r, length(r)) == "\r") r = substr(r, 1, length(r) - 1)
-  if (OPTST || !index(r, "\r")) { tline(r); return }
-  if (!OPTCR) { tline(substr(r, 1, index(r, "\r") - 1)); return }
+  if (OPTST || !OPTCR || !index(r, "\r")) { tline(r); return }
   n = split(r, P, "\r")
   for (i = 1; i <= n; i++) tline(P[i])
 }
@@ -271,8 +305,9 @@ BEGIN {
   RUN = ""
   for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
   RUN = RUN "[A-Za-z0-9+/=]*"
-  DENY = "` + privateDenyRegex + `"
-  DENYX = "` + privateExceptionRegex + `"
+  OSSL = "openssl x509 -outform PEM 2>/dev/null"
+  na = split("` + strings.Join(certificateLabels, "|") + `", CL, "|")
+  for (k = 1; k <= na; k++) CERTL[CL[k]] = 1
   na = split("` + strings.Join(publicPEMLabels, "|") + `", AL, "|")
   for (k = 1; k <= na; k++) ALLOW[AL[k]] = 1
   nt = split("` + sshKeyTable() + `", TT, ";")
@@ -284,6 +319,9 @@ BEGIN {
     else if (w == "` + KeepOptBackslash + `") OPTBS = 1
     else if (w == "` + KeepOptIndent + `") OPTIND = 1
     else if (w == "` + KeepOptCR + `") OPTCR = 1
+    else if (w == "` + KeepOptSections + `") OPTSEC = 1
+    else if (w == "` + KeepOptAnySections + `") OPTANYSEC = 1
+    else if (w == "` + KeepOptTags + `") OPTTAGS = 1
     else if (substr(w, 1, 1) == "@") BADOPT = 1
     else if (w != "") { K[w] = 1; NK++ }
   }
@@ -309,20 +347,26 @@ mode == "public" {
   if (isbegin(s)) {
     INB = 0
     if (!parsebegin(s) || !(LAB in ALLOW)) { POISON = 1; next }
-    INB = 1; BOK = 1; BN = 0; BB[++BN] = s; FIRST = 1
+    INB = 1; BOK = 1; BN = 0; BB[++BN] = s
     if (substr(s, 1, 5) == "-----") BE = "-----END " LAB "-----"; else BE = "---- END " LAB " ----"
     next
   }
   if (INB) {
-    if (s == BE) { BB[++BN] = s; if (BOK) for (i = 1; i <= BN; i++) PUB[++NP] = BB[i]; INB = 0; next }
+    if (s == BE) {
+      INB = 0
+      if (!BOK || !(LAB in CERTL) || substr(s, 1, 5) != "-----") next
+      BB[++BN] = s; c = ""
+      for (i = 1; i <= BN; i++) c = c BB[i] "\n"
+      PUB[++NP] = c; PKIND[NP] = "C"; NCERT++
+      next
+    }
     if (isend(s)) { INB = 0; next }
-    if (FIRST) { FIRST = 0; if (s ~ DENY && s !~ DENYX) POISON = 1 }
     if (!bodyline(s)) BOK = 0
     BB[++BN] = s
     next
   }
   k = sshkey(s)
-  if (k != "") PUB[++NP] = k
+  if (k != "") { PUB[++NP] = k; PKIND[NP] = "S" }
   next
 }
 mode == "identify" {
@@ -346,14 +390,21 @@ END {
   if (mode == "text") {
     if (HAVE && PREV != "") tproc(PREV)
     if (BAD || BADOPT || !NK) exit 8
-    if (TOOMANY) exit 7
+    if (TOOMANY || OUTB > ` + strconv.Itoa(maxConfigOutput) + `) exit 7
     for (i = 1; i <= NO; i++) print OUT[i]
     print "vista-redactions:" (NRED + 0) > "/dev/stderr"
     exit 0
   }
   if (mode == "public") {
     if (POISON || NP == 0) exit 8
-    for (i = 1; i <= NP; i++) print PUB[i]
+    if (NCERT && ENVIRON["HC_OPENSSL"] != "1") exit 12
+    for (i = 1; i <= NP; i++) {
+      if (PKIND[i] == "S") { print PUB[i]; continue }
+      fflush()
+      printf "%s", PUB[i] | OSSL
+      if (close(OSSL) != 0) NDROP++
+    }
+    print "vista-refused:" (NDROP + 0) > "/dev/stderr"
     exit 0
   }
   if (inpub) unterm = 1
@@ -391,7 +442,9 @@ END {
 //
 // `[ -f ]` runs before the open, so a FIFO is never opened (a FIFO swapped in
 // between the test and the open would block until the command timeout).
-const readPrelude = `p=$1; plat=$2; max=$3
+const readPrelude = `p=$1; plat=$2; max=$3; keep=$4
+coarse=0
+case $plat in *-coarse) coarse=1; plat=${plat%-coarse};; esac
 if [ ! -e "$p" ]; then
   if [ -L "$p" ]; then exit 3; fi
   e=$(stat -- "$p" 2>&1 >/dev/null)
@@ -407,18 +460,32 @@ if [ ! -r "$p" ]; then
 fi
 exec 3< "$p" || exit 11
 if [ "$plat" = darwin ]; then
-  fmt='%d:%i:%z:%Fm:%Fc:%p'
+  fmt='%d:%i:%z:%m:%c:%Fm:%Fc:%p'
+  if [ "$coarse" = 1 ]; then fmt='%d:%i:%z:%m:%c:%p'; fi
   pin=$(stat -f "$fmt" <&3 2>/dev/null) || { fmt='%d:%i:%z:%m:%c:%p'; pin=$(stat -f "$fmt" <&3 2>/dev/null); }
   F=$p
 else
-  fmt='%d:%i:%s:%y:%z:%f'
+  fmt='%d:%i:%s:%Y:%Z:%y:%z:%f'
+  if [ "$coarse" = 1 ]; then fmt='%d:%i:%s:%Y:%Z:%f'; fi
   pin=$(stat -L -c "$fmt" /proc/self/fd/3 2>/dev/null)
   F=/proc/self/fd/3
 fi
 if [ -z "$pin" ]; then exit 10; fi
 case $plat:${pin##*:} in darwin:100*|linux:8???) ;; *) exit 6;; esac
-size=${pin#*:}; size=${size#*:}; size=${size%%:*}
-case $size in ''|*[!0-9]*) exit 10;; esac
+size=${pin#*:}; size=${size#*:}; mt=${size#*:}; size=${size%%:*}
+ct=${mt#*:}; mt=${mt%%:*}; ct=${ct%%:*}
+case $size:$mt:$ct in *[!0-9:]*|:*|*::*|*:) exit 10;; esac
+`
+
+// readQuiet refuses (exit 9) a file whose modification or change time is
+// within 3 seconds of the host's clock, or ahead of it: a file still being
+// written. With it, a file system whose times have whole seconds (macOS
+// without stat's F format, coarse file systems) cannot hide a rewrite from
+// the second pin: a rewrite during the read moves a time that was at least
+// three seconds old to "now".
+const readQuiet = `now=$(date +%s)
+case $now in ''|*[!0-9]*) exit 10;; esac
+if [ "$((now - mt))" -lt 3 ] || [ "$((now - ct))" -lt 3 ]; then exit 9; fi
 `
 
 // readRepin ends ReadFile's and ReadText's scripts: $out holds what awk
@@ -451,21 +518,33 @@ win | tr '\000' '\001' | awk -v mode=identify '` + awkRules + `'
 exit 0`
 
 // readScript reads the pinned file ONCE and prints only what publicContent
-// would, after the re-pin: exit 7 over the bound, 8 not public, 9 changed
-// while read; nothing printed for any of them.
-var readScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
+// would, after the re-pin: exit 7 over the bound, 8 not public (and so when
+// every certificate block was refused and nothing is left: the shell decides
+// that from the empty output, because macOS awk's close() does not report
+// openssl's exit status), 9 changed while read, 12 no openssl; nothing
+// printed for any of them. The "vista-refused:N" count on stderr is
+// informational and is 0 where close() does not report a failure.
+var readScript = readPrelude + readQuiet + `if [ "$size" -gt "$max" ]; then exit 7; fi
 if [ "$size" -eq 0 ]; then exit 8; fi
-out=$(head -c "$size" <&3 | tr '\000\001' '\001\002' | awk -v mode=public '` + awkRules + `'; printf '.%s' "$?")` + readRepin
+if command -v openssl >/dev/null 2>&1; then o=1; else o=0; fi
+out=$(head -c "$size" <&3 | tr '\000\001' '\001\002' | HC_OPENSSL=$o awk -v mode=public '` + awkRules + `'; printf '.%s' "$?")
+case $out in .0) out=.8;; esac` + readRepin
 
 // readTextScript reads the pinned file ONCE and prints only what
 // filterConfig would, after the re-pin; $4 is the space-separated keep list.
 // Exit 7 over the bound or the line bound, 8 not text, 9 changed while read.
-var readTextScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
-out=$({ if [ "$size" -gt 0 ]; then head -c "$size" <&3; fi; printf '\n'; } | tr '\000' '\001' | HC_KEEP=$4 awk -v mode=text '` + awkRules + `'; printf '.%s' "$?")` + readRepin
+var readTextScript = readPrelude + readQuiet + `if [ "$size" -gt "$max" ]; then exit 7; fi
+out=$({ if [ "$size" -gt 0 ]; then head -c "$size" <&3; fi; printf '\n'; } | tr '\000' '\001' | HC_KEEP=$keep awk -v mode=text '` + awkRules + `'; printf '.%s' "$?")` + readRepin
 
 // errChanged is a read the host refused because the file changed between
 // being opened and being read.
 var errChanged = errors.New("hostcrypto: the file changed while it was read")
+
+// ErrNoHostParser is a remote read of a file holding certificates from a
+// host with no certificate parser (no openssl on a Unix host). A
+// certificate crosses only as a parser's re-encoding, so nothing crosses;
+// the caller reports the section partial, with this as the reason.
+var ErrNoHostParser = errors.New("hostcrypto: the host has no certificate parser (openssl), so no certificate can be read from it")
 
 // scriptArgv runs one of the fixed scripts on path.
 func (t *RemoteUnixTarget) scriptArgv(script, path string, bound int64, extra ...string) []string {
@@ -496,6 +575,8 @@ func scriptError(path string, exit int) error {
 		return fmt.Errorf("%s: %w", path, errChanged)
 	case 10:
 		return fmt.Errorf("hostcrypto: %s: the host could not describe the open file", path)
+	case 12:
+		return fmt.Errorf("%s: %w", path, ErrNoHostParser)
 	case 2, 11:
 		return fmt.Errorf("hostcrypto: %s: could not be opened", path)
 	}
@@ -595,17 +676,31 @@ func parseIdentifyOutput(out []byte, window int64) (inspection, error) {
 	return in, nil
 }
 
-// ReadFile returns the PUBLIC CONTENT of a file (publicContent: its public
-// PEM blocks and genuine SSH public key lines, nothing around them), decided
-// twice before any byte crosses and once after:
+// ReadFile returns the PUBLIC CONTENT of a file (publicContent: its
+// certificates, each as the host's openssl re-encodes it, and its genuine
+// SSH public key lines, nothing else), decided twice before any byte crosses
+// and once after:
 //
-//  1. Identify, decided in Go with the full rule (name included). Not public:
-//     ErrNotPublic, and no command that prints content is sent. Over the read
-//     cap: ErrFileTooLarge, and nothing is sent.
-//  2. readScript, which reads the pinned file once and prints, from that one
-//     buffer, only its public content, or nothing.
+//  1. Identify, decided in Go with the full rule (name included). Not public
+//     (Identity.Public: a certificate or SSH key file): ErrNotPublic, and no
+//     command that prints content is sent. Over the read cap:
+//     ErrFileTooLarge, and nothing is sent.
+//  2. readScript, which refuses a file written in the last 3 seconds, reads
+//     the pinned file once, decides from that one buffer which blocks are
+//     certificate blocks and which lines are key lines, feeds each
+//     certificate block ALONE to `openssl x509 -outform PEM` (a block it
+//     cannot parse is dropped and counted on stderr; one invocation per
+//     block because one over a bundle reads only the first certificate),
+//     holds what openssl and awk printed, pins the file again and prints
+//     only if nothing changed. A host without openssl answers
+//     ErrNoHostParser for a file with a certificate block, and prints
+//     nothing.
 //  3. What arrives must be exactly its own public content, or it is dropped
 //     (cleared): a backstop, and a check that the host ran the rule.
+//
+// OpenSSL 3 takes the first certificate of a CERTIFICATE block that has
+// bytes after it (LibreSSL and Go refuse such a block); what crosses is
+// still that certificate's encoding, never the bytes after it.
 //
 // A DER certificate is not readable remotely (see publicContent).
 func (t *RemoteUnixTarget) ReadFile(ctx context.Context, path string) ([]byte, error) {
@@ -674,8 +769,7 @@ func (t *RemoteUnixTarget) ReadText(ctx context.Context, path string, keep []str
 }
 
 // keepArg validates keep and joins it for the host: directive names of
-// [A-Za-z0-9._*+/-] and the four options ([KeepOptStatements] and the
-// rest). Anything else, a ";" or an unknown "@" entry included, is refused
+// [A-Za-z0-9._*+/-] and the options ([KeepOptStatements] and the rest). Anything else, a ";" or an unknown "@" entry included, is refused
 // rather than escaped. A keep with no directive name is ErrNotPublic.
 func keepArg(keep []string) (string, error) {
 	var words []string
@@ -686,11 +780,11 @@ func keepArg(keep []string) (string, error) {
 		}
 		if w[0] == '@' {
 			switch asciiLower(w) {
-			case KeepOptStatements, KeepOptBackslash, KeepOptIndent, KeepOptCR:
+			case KeepOptStatements, KeepOptBackslash, KeepOptIndent, KeepOptCR, KeepOptSections, KeepOptAnySections, KeepOptTags:
 				words = append(words, asciiLower(w))
 				continue
 			}
-			return "", fmt.Errorf("hostcrypto: keep option %q is not one of the four", w)
+			return "", fmt.Errorf("hostcrypto: keep option %q is not one of the options", w)
 		}
 		if !isKeepWord(w) {
 			return "", fmt.Errorf("hostcrypto: keep word %q is not a directive name", w)

@@ -110,11 +110,17 @@ func TestClassifyLabels(t *testing.T) {
 }
 
 // TestClassifyPublicPolarity is the guard in both directions: a file of
-// public labels is public, and adding any private label makes it not.
+// certificates is public (readable remotely), adding any private label makes
+// it not, and the other public labels are harmless but not readable
+// remotely (fourth review: only certificates and SSH key lines cross).
 func TestClassifyPublicPolarity(t *testing.T) {
+	for _, labels := range [][]string{{"PUBLIC KEY"}, {"CERTIFICATE REQUEST"}, {"X509 CRL"}, {"DH PARAMETERS"}, {"SSH2 PUBLIC KEY"}} {
+		if id := Classify(nil, labels); id.Public() {
+			t.Errorf("labels %q: readable remotely", labels)
+		}
+	}
 	public := [][]string{
-		{"CERTIFICATE"}, {"PUBLIC KEY"}, {"CERTIFICATE REQUEST"}, {"X509 CRL"},
-		{"DH PARAMETERS"}, {"CERTIFICATE", "CERTIFICATE"},
+		{"CERTIFICATE"}, {"CERTIFICATE", "CERTIFICATE"}, {"CERTIFICATE", "PUBLIC KEY"}, {"CERTIFICATE", "X509 CRL"},
 	}
 	private := []string{"PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY",
 		"OPENSSH PRIVATE KEY", "DSA PRIVATE KEY", "PGP PRIVATE KEY BLOCK", "UNHEARD OF THING"}
@@ -320,7 +326,7 @@ func TestPublicIsAnAllowlist(t *testing.T) {
 		{"unknown label beside cert", string(certPEM) + block("PKCS7"), false, ClassUnknown, "CERTIFICATE,PKCS7"},
 		{"crlf certificate", strings.ReplaceAll(string(certPEM), "\n", "\r\n"), true, ClassCertificate, "CERTIFICATE"},
 		{"bag attributes before cert", "Bag Attributes\n    friendlyName: web\nsubject=/CN=x\n" + string(certPEM), true, ClassCertificate, "CERTIFICATE"},
-		{"ssh2 public key", "---- BEGIN SSH2 PUBLIC KEY ----\nComment: x\nAAAA\n---- END SSH2 PUBLIC KEY ----\n", true, ClassPublicKey, "SSH2 PUBLIC KEY"},
+		{"ssh2 public key (RFC 4716: not read remotely)", "---- BEGIN SSH2 PUBLIC KEY ----\nComment: x\nAAAA\n---- END SSH2 PUBLIC KEY ----\n", false, ClassPublicKey, "SSH2 PUBLIC KEY"},
 	}
 	for _, tc := range cases {
 		id := tgtID("/x/f.pem", []byte(tc.content))
@@ -346,8 +352,9 @@ func TestPublicIsAnAllowlist(t *testing.T) {
 	}
 }
 
-// TestSSHPublicKeyFileRule: an OpenSSH .pub file is public only when every
-// line is a public key line.
+// TestSSHPublicKeyFileRule: a file of OpenSSH key lines (".pub" or not, an
+// authorized_keys options field or not) is public only when every line that
+// is not blank or a comment is a genuine key line.
 func TestSSHPublicKeyFileRule(t *testing.T) {
 	line := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC3x9g5sQ1oB7g5rQ8a8d7a3r0C2bWq3pXvJb2bq9N7a user@host\n"
 	cases := []struct {
@@ -355,7 +362,8 @@ func TestSSHPublicKeyFileRule(t *testing.T) {
 		public  bool
 	}{
 		{line, true},
-		{"# comment\n\n" + line, false}, // public by content, but the magic is not a key type: Go is stricter than the host here
+		{"# comment\n\n" + line, true},
+		{"from=\"10.0.0.1\",command=\"echo x\" " + line, true}, // fourth review: options first
 		{line + line, true},
 		{line + "PrivateKey: " + strings.Repeat("Q", 44) + "\n", true}, // a read returns the key line only
 		{"ssh-ed25519 AAAA " + strings.Repeat("Q", 44) + "\n", false},  // no genuine key line
@@ -367,7 +375,10 @@ func TestSSHPublicKeyFileRule(t *testing.T) {
 			t.Errorf("%q: public=%v", tc.content, got)
 		}
 	}
-	if tgtID("/x/id.txt", []byte(line)).Public() {
-		t.Error("an SSH key line in a non-.pub file is public")
+	if !tgtID("/home/u/.ssh/authorized_keys", []byte("no-pty "+line+line)).Public() {
+		t.Error("an authorized_keys file whose first line has options is not public")
+	}
+	if tgtID("/x/id.txt", []byte(line+"password = hunter2\n")).Public() {
+		t.Error("a key line and a text line in one file is public")
 	}
 }

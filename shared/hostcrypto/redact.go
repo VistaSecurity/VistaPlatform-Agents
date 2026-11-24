@@ -2,9 +2,10 @@ package hostcrypto
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
-	"regexp"
+	"encoding/pem"
 	"strings"
 )
 
@@ -370,50 +371,77 @@ func sshKeyLine(s string) (string, bool) {
 	return "", false
 }
 
-// privateUnderPublicLabel reports a public block's FIRST body line that
-// begins as an unencrypted private key does, whatever the label says. Every
-// unencrypted DER private key encoding starts SEQUENCE, INTEGER of one byte
-// (its version): PKCS#1 RSA and DSA (version 0, then an INTEGER), SEC1 EC
-// (version 1, then an OCTET STRING), PKCS#8 and RFC 5958 (version 0 or 1,
-// then the algorithm SEQUENCE), PKCS#12 (version 3). In base64 at offset 0,
-// with the outer length in short form, in one byte (0x81) or in two (0x82),
-// those are:
-//
-//	M..CAQ          30 LL 02 01 0v           (v < 16)
-//	MI[EFGH].AgE    30 81 LL 02 01 vv        (vv < 64)
-//	MII..[AQgw]IB   30 82 LL LL 02 01 vv
-//
-// and an OpenSSH private key's body begins with base64 "openssh-key-v1".
-// Nothing public on the allowlist begins that way (a certificate, request
-// or CRL starts SEQUENCE SEQUENCE; a SubjectPublicKeyInfo SEQUENCE SEQUENCE;
-// an RSA PUBLIC KEY or DH PARAMETERS SEQUENCE INTEGER of 64 bytes or more;
-// named EC PARAMETERS an OID; an SSH2 PUBLIC KEY a length and "ssh-") except
-// explicit EC PARAMETERS, SEQUENCE { INTEGER 1, SEQUENCE { OID
-// 1.2.840.10045.1.x (a field type) ... } }, which privateException lets
-// through in each pair of outer and inner length forms that can occur (the
-// inner SEQUENCE short or 0x81: a field of over 2,000 bits does not exist):
-// no private key structure carries a field-type OID there. The pattern was
-// checked against OpenSSL's explicit parameters for eight curves, prime and
-// binary, and is held by TestPrivateUnderPublicLabel to generated objects.
-//
-// What still passes: an ENCRYPTED PKCS#8 key (SEQUENCE SEQUENCE, like a
-// certificate) and a key whose outer length needs three bytes (over 64 KiB).
-// An encrypted key under a public label crosses as ciphertext.
-func privateUnderPublicLabel(first string) bool {
-	return privateDeny.MatchString(first) && !privateException.MatchString(first)
+// certificateLabels are the labels whose blocks may cross a remote
+// connection, and then only as a host parser's re-encoding of the
+// certificate they hold. Every other public label (a public key, a request,
+// a revocation list, parameters) is allowed in a file, but its block never
+// crosses.
+var certificateLabels = []string{"CERTIFICATE", "X509 CERTIFICATE", "TRUSTED CERTIFICATE"}
+
+func isCertificateLabel(l string) bool {
+	for _, c := range certificateLabels {
+		if l == c {
+			return true
+		}
+	}
+	return false
 }
 
-// The patterns, as POSIX extended regular expressions without interval
-// expressions, so the awk and PowerShell programs use these very strings.
-const (
-	privateDenyRegex      = `^(MII..[AQgw]IB|MI[EFGH].AgE|M..CAQ|b3BlbnNzaC1rZXktdjE)`
-	privateExceptionRegex = `^(M..CAQEw.[AQgw]YHKoZIzj0B|MI[EFGH].AgEBM..GByqGSM49AQ|MI[EFGH].AgEBMI[GH].BgcqhkjOPQE|MII..[AQgw]IBAT..BgcqhkjOPQE|MII..[AQgw]IBATCB.[AQgw]YHKoZIzj0B)`
-)
+// derFirstElement returns the length of the first DER element of b: a
+// SEQUENCE (0x30) with a definite length in short form or in one to four
+// length bytes. ok is false for anything else, or when b is shorter.
+func derFirstElement(b []byte) (int, bool) {
+	if len(b) < 2 || b[0] != 0x30 {
+		return 0, false
+	}
+	l, hdr := int(b[1]), 2
+	if l >= 0x80 {
+		n := l - 0x80
+		if n < 1 || n > 4 || len(b) < 2+n {
+			return 0, false
+		}
+		l = 0
+		for _, c := range b[2 : 2+n] {
+			l = l<<8 | int(c)
+		}
+		hdr += n
+	}
+	if l < 0 || hdr+l > len(b) {
+		return 0, false
+	}
+	return hdr + l, true
+}
 
-var (
-	privateDeny      = regexp.MustCompile(privateDenyRegex)
-	privateException = regexp.MustCompile(privateExceptionRegex)
-)
+// certificateDER is the parser step of the public rule: the DER a block's
+// body decodes to, parsed as ONE certificate and re-encoded. A TRUSTED
+// CERTIFICATE carries OpenSSL's trust settings after the certificate, so its
+// first element is taken; any other label must be exactly one certificate.
+// What is returned is cert.Raw, the parser's certificate, never the block.
+func certificateDER(label string, body []string) ([]byte, bool) {
+	der, err := base64.StdEncoding.DecodeString(strings.Join(body, ""))
+	if err != nil {
+		return nil, false
+	}
+	if label == "TRUSTED CERTIFICATE" {
+		n, ok := derFirstElement(der)
+		if !ok {
+			return nil, false
+		}
+		der = der[:n]
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, false
+	}
+	return c.Raw, true
+}
+
+// certificatePEM is the canonical PEM of a certificate's DER: the label
+// CERTIFICATE and 64-character lines, as openssl, PowerShell and Go all
+// write it.
+func certificatePEM(der []byte) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
 
 // isPEMBodyLine is 1 to 76 characters of [A-Za-z0-9+/=].
 func isPEMBodyLine(s string) bool {
@@ -428,82 +456,98 @@ func isPEMBodyLine(s string) bool {
 	return true
 }
 
-// publicContent is the remote ReadFile rule: the public PEM blocks and the
-// genuine OpenSSH public key lines of b, and NOTHING else — no text before,
-// between or after them, no options, no comments.
+// publicContent is the remote ReadFile rule: the CERTIFICATES of b, each as
+// a parser's re-encoding (certificateDER), and its genuine OpenSSH public
+// key lines, and NOTHING else: no text before, between or after them, no
+// options, no comments, no other block.
+//
+// No pattern over a block's bytes can tell a certificate from a private key
+// written under a certificate's label (a first body line of a few
+// characters, an unencrypted PKCS#12, a long-form length all defeated one),
+// so a block crosses only after a certificate parser on the host has parsed
+// it, and what crosses is the parser's output. On a remote host the parser
+// is openssl (Unix) or .NET's X509Certificate2 after GetCertContentType says
+// Cert (Windows); here it is crypto/x509.
 //
 //   - A block runs from a valid BEGIN line with a label on the allowlist to
 //     the matching END line; every body line must be 1 to 76 base64
 //     characters, or the whole block is dropped. An unterminated block, or
 //     one cut by another BEGIN or a different END, is dropped.
+//   - Only a five-dash block labelled CERTIFICATE, X509 CERTIFICATE or
+//     TRUSTED CERTIFICATE can cross, and only when it parses; one that does not is
+//     dropped. Every other allowlisted block is dropped.
 //   - A NUL byte anywhere, a BEGIN line that is not valid, or a valid label
-//     off the allowlist refuses the whole file (ok false): such a file is not
-//     one whose public parts can be told apart safely. (Other control bytes
-//     are ordinary bytes: they can never be part of a printed line.)
-//   - A public block whose first body line begins as a private key does
-//     (privateUnderPublicLabel) refuses the whole file: a private key under
-//     a certificate's label is still a private key.
-//   - No public content at all refuses the file.
+//     off the allowlist refuses the whole file (ok false).
+//   - No certificate and no key line refuses the file.
 //
-// A DER certificate is therefore never readable remotely: it has no PEM
-// frame to cut public bytes out by, and eight bytes of magic cannot tell it
-// from a DER private key. The local collector parses DER in memory.
+// A DER certificate file is not readable remotely: it has no PEM frame. The
+// local collector parses DER in memory.
 //
-// Each line is returned with "\n". A leading UTF-8 byte-order mark is
+// Each certificate is returned as CERTIFICATE PEM with 64-character lines,
+// each key line as "type blob\n". A leading UTF-8 byte-order mark is
 // tolerated.
 func publicContent(b []byte) ([]byte, bool) {
+	out, _, ok := publicContentCount(b)
+	return out, ok
+}
+
+// publicContentCount is publicContent with the number of certificate blocks
+// the parser refused.
+func publicContentCount(b []byte) ([]byte, int, bool) {
 	if bytes.IndexByte(b, 0) >= 0 {
-		return nil, false
+		return nil, 0, false
 	}
-	var out []string
-	var block []string
+	var out strings.Builder
+	var body []string
 	inBlock, blockOK := false, false
-	var endLine string
+	var endLine, label string
+	refused := 0
 	for _, s := range pemLines(b) {
 		if isBeginLine(s) {
 			// A BEGIN line ends any open block (it is dropped, unterminated).
-			label, ok := parseBeginLine(s)
-			if !ok || !isPublicLabel(label) {
-				return nil, false
+			l, ok := parseBeginLine(s)
+			if !ok || !isPublicLabel(l) {
+				return nil, 0, false
 			}
-			inBlock, blockOK, block = true, true, []string{s}
+			inBlock, blockOK, body, label = true, true, nil, l
 			if strings.HasPrefix(s, "-----") {
-				endLine = "-----END " + label + "-----"
+				endLine = "-----END " + l + "-----"
 			} else {
-				endLine = "---- END " + label + " ----"
+				endLine = "---- END " + l + " ----"
 			}
 			continue
 		}
 		if inBlock {
 			if s == endLine {
-				if blockOK {
-					out = append(out, block...)
-					out = append(out, s)
-				}
 				inBlock = false
+				if !blockOK || !isCertificateLabel(label) || !strings.HasPrefix(endLine, "-----") {
+					continue
+				}
+				if der, ok := certificateDER(label, body); ok {
+					out.WriteString(certificatePEM(der))
+				} else {
+					refused++
+				}
 				continue
 			}
 			if isEndLine(s) {
 				inBlock = false
 				continue
 			}
-			if len(block) == 1 && privateUnderPublicLabel(s) {
-				return nil, false
-			}
 			if !isPEMBodyLine(s) {
 				blockOK = false
 			}
-			block = append(block, s)
+			body = append(body, s)
 			continue
 		}
 		if k, ok := sshKeyLine(s); ok {
-			out = append(out, k)
+			out.WriteString(k + "\n")
 		}
 	}
-	if len(out) == 0 {
-		return nil, false
+	if out.Len() == 0 {
+		return nil, refused, false
 	}
-	return []byte(strings.Join(out, "\n") + "\n"), true
+	return []byte(out.String()), refused, true
 }
 
 // configStatus is why filterConfig refused.
@@ -532,7 +576,22 @@ const (
 	KeepOptIndent = "@indent"
 	// KeepOptCR ends a line at a lone carriage return (Java properties).
 	KeepOptCR = "@cr"
+	// KeepOptSections makes a "[name]" header structure when name is in
+	// keep (krb5, GnuTLS); KeepOptAnySections does for any name of the
+	// header shape (OpenSSL, whose section names the file chooses). With
+	// either, a header that does not cross drops its whole section.
+	KeepOptSections    = "@sections"
+	KeepOptAnySections = "@anysections"
+	// KeepOptTags makes "</Name>" structure when Name is in keep, and drops
+	// a dropped "<Name ...>" through its matching "</Name>" (Apache).
+	KeepOptTags = "@tags"
 )
+
+// maxConfigOutput bounds what a configuration read returns: over it the
+// read is ErrFileTooLarge. 6,000,000 bytes is what fits the runner's 8 MiB
+// output once a Windows host base64-encodes it; @statements output can be
+// larger than its input ("a;" becomes "a;\n").
+const maxConfigOutput = 6000000
 
 // Bounds of the rule. A statement or continuation past them is dropped, never
 // returned in part.
@@ -553,9 +612,9 @@ const (
 // keepSet is the caller's keep list: directive names, lower-cased once, and
 // options.
 type keepSet struct {
-	words                             map[string]bool
-	statements, backslash, indent, cr bool
-	badOption                         bool
+	words                                  map[string]bool
+	statements, backslash, indent, cr      bool
+	sections, anySections, tags, badOption bool
 }
 
 func newKeepSet(keep []string) keepSet {
@@ -575,6 +634,12 @@ func newKeepSet(keep []string) keepSet {
 				k.indent = true
 			case KeepOptCR:
 				k.cr = true
+			case KeepOptSections:
+				k.sections = true
+			case KeepOptAnySections:
+				k.anySections = true
+			case KeepOptTags:
+				k.tags = true
 			default:
 				k.badOption = true
 			}
@@ -626,6 +691,9 @@ func firstWord(t string) string {
 	return asciiLower(strings.TrimSuffix(t[:i], ">"))
 }
 
+// endsInBackslash reports a line whose last byte is a backslash.
+func endsInBackslash(s string) bool { return strings.HasSuffix(s, `\`) }
+
 // endsInOddBackslashes reports a line whose last bytes are an odd number of
 // backslashes: one that escapes the line end. Trailing blanks are not
 // skipped: "a \ " does not continue.
@@ -637,24 +705,14 @@ func endsInOddBackslashes(s string) bool {
 	return n%2 == 1
 }
 
-// What a lone "\r" (one not before "\n") does to a line.
-type crMode int
-
-const (
-	crCut   crMode = iota // the line ends there and the rest of it is dropped
-	crSplit               // it ends the line (@cr)
-	crKeep                // it stays, as a blank (@statements: nginx reads it so)
-)
-
 // ruleLines splits a file for the rule: a leading UTF-8 byte-order mark is
 // removed; "\n" ends a line, and one "\r" before it is part of the line end.
-// A lone "\r" left inside a line is handled by mode: in line mode it ends
-// the line when @cr is set (Java properties) and otherwise CUTS it, the rest
-// dropped, so bytes some reader takes for two lines never cross as one; in
-// @statements mode it is a blank, as it is to nginx, and the canonical
-// output never holds one. A final empty segment (the file ends in "\n") is
+// A lone "\r" left inside a line ends it when split is set (@cr, Java
+// properties); otherwise it stays in the line, for the mode to deal with: a
+// line-mode line holding one is dropped whole, and to @statements it is a
+// blank, as it is to nginx. A final empty segment (the file ends in "\n") is
 // not a line. ok is false past maxConfigLines.
-func ruleLines(b []byte, mode crMode) ([]string, bool) {
+func ruleLines(b []byte, split bool) ([]string, bool) {
 	b = bytes.TrimPrefix(b, utf8BOM)
 	var out []string
 	for len(b) > 0 {
@@ -665,17 +723,12 @@ func ruleLines(b []byte, mode crMode) ([]string, bool) {
 			seg, b = b, nil
 		}
 		seg = bytes.TrimSuffix(seg, []byte{'\r'})
-		for {
-			i := bytes.IndexByte(seg, '\r')
-			if i < 0 || mode == crKeep {
-				out = append(out, string(seg))
-				break
+		if split {
+			for _, p := range bytes.Split(seg, []byte{'\r'}) {
+				out = append(out, string(p))
 			}
-			out = append(out, string(seg[:i]))
-			if mode == crCut {
-				break
-			}
-			seg = seg[i+1:]
+		} else {
+			out = append(out, string(seg))
 		}
 		if len(out) > maxConfigLines {
 			return nil, false
@@ -690,18 +743,28 @@ func isCommentLine(t string) bool {
 	return t != "" && (t[0] == '#' || t[0] == '!' || t[0] == ';' || strings.HasPrefix(t, "//"))
 }
 
-// isSectionHeader is ^\[[A-Za-z0-9 ._:/-]{1,128}\]$ on a trimmed line.
-func isSectionHeader(tr string) bool {
-	if len(tr) < 3 || len(tr) > 130 || tr[0] != '[' || tr[len(tr)-1] != ']' {
-		return false
+// sectionName returns the name of a trimmed line of the header shape
+// ^\[[ \t]*[A-Za-z0-9_.-]{1,64}[ \t]*\]$, lower-cased.
+func sectionName(tr string) (string, bool) {
+	if len(tr) < 3 || tr[0] != '[' || tr[len(tr)-1] != ']' {
+		return "", false
 	}
-	for i := 1; i < len(tr)-1; i++ {
-		c := tr[i]
-		if !isASCIIAlnum(c) && strings.IndexByte(" ._:/-", c) < 0 {
-			return false
+	name := strings.Trim(tr[1:len(tr)-1], " \t")
+	if name == "" || len(name) > 64 {
+		return "", false
+	}
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; !isASCIIAlnum(c) && c != '_' && c != '.' && c != '-' {
+			return "", false
 		}
 	}
-	return true
+	return asciiLower(name), true
+}
+
+// isHeaderLike is a trimmed line that a section syntax would read as a
+// header: "[" ... "]".
+func isHeaderLike(tr string) bool {
+	return len(tr) >= 2 && tr[0] == '[' && tr[len(tr)-1] == ']'
 }
 
 func isASCIIAlnum(c byte) bool {
@@ -753,48 +816,59 @@ func openingTag(tr string) (string, bool) {
 // awk in target_remote_unix.go, the PowerShell in target_remote_win.go). It
 // returns the parts of b a parser asked for, redacted, and how many
 // redactions it made; ok is false when the file must be refused (not text,
-// an unusable keep, or more than 200,000 lines; the targets turn the last
-// into ErrFileTooLarge).
+// an unusable keep, more than 200,000 lines or more than 6,000,000 bytes of
+// output; the targets turn the last two into ErrFileTooLarge).
 //
 // keep holds lower-case ASCII directive names, compared with a line's first
 // word without regard to ASCII case, and options, which begin with "@":
-// [KeepOptStatements], [KeepOptBackslash], [KeepOptIndent], [KeepOptCR]. A
-// keep with no name, or with an unknown option, is refused.
+// [KeepOptStatements], [KeepOptBackslash], [KeepOptIndent], [KeepOptCR],
+// [KeepOptSections], [KeepOptAnySections], [KeepOptTags]. A keep with no
+// name, or with an unknown option, is refused.
 //
 //  1. Not text — a NUL or 0x01 byte anywhere, a UTF-16 byte-order mark, or a
 //     keystore's magic (at the start, or after a UTF-8 byte-order mark) — is
 //     refused. A UTF-8 byte-order mark is removed; a file that is only one
 //     yields nothing.
-//  2. Lines end at "\n" and "\r\n". A lone "\r" ends a line with @cr, is a
-//     blank with @statements, and otherwise cuts its line there, the rest of
-//     the line dropped (ruleLines).
+//  2. Lines end at "\n" and "\r\n". A lone "\r" ends a line with @cr and
+//     is a blank to @statements; in any other line it DROPS THE LINE WHOLE,
+//     and that line neither starts nor continues a continuation (it is a
+//     dropped logical line), so what follows the "\r" never crosses and a
+//     backslash before it continues nothing.
 //  3. Line mode (no @statements). Comment lines (first non-blank "#", "!",
 //     ";" or "//") are dropped. Structure is kept and is strict: a blank
-//     line; a section header ^\[[A-Za-z0-9 ._:/-]{1,128}\]$; a closing tag
-//     ^</[A-Za-z0-9_.:-]{1,64}>$; a lone "}" or "};"; a lone "{" only
-//     directly after a kept line (blank and comment lines between do not
-//     count). Any other line is KEPT when its first word (firstWord) is in
-//     keep, else DROPPED. A dropped line that ends in "{" drops everything
-//     to its matching "}" (a line starting with "}" closes one level, one
-//     ending in "{" opens one, comment lines do not count); a dropped
-//     opening tag ("<Name ...>") drops everything to its matching "</Name>".
-//     There is no continuation without an option. With @backslash a kept
-//     line ending in an odd number of backslashes continues onto the next
-//     line; with @indent a line beginning with a blank continues the
-//     previous logical line, kept iff that was kept, and blank and comment
-//     lines between do not end it. Inside a continuation only "#" starts a
-//     comment line (a Postfix value may begin with "!"); it is dropped. A
-//     logical line has at most 32 continuation lines; the rest are dropped.
+//     line; a lone "}" or "};"; a lone "{" only directly after a kept line
+//     (blank and comment lines between do not count); with @sections a
+//     header "[name]" (name [A-Za-z0-9_.-]{1,64}, blanks around it) whose
+//     name is in keep, with @anysections any such header; with @tags a
+//     closing tag "</Name>" whose Name is in keep. A header-like line ("["
+//     ... "]") under a section option that does not cross drops its whole
+//     section, to the next header that does. Any other line is KEPT when
+//     its first word (firstWord) is in keep, else DROPPED. A dropped line
+//     that ends in "{" drops everything to its matching "}" (a line starting
+//     with "}" closes one level, one ending in "{" opens one, comment lines
+//     do not count); with @tags a dropped opening tag ("<Name ...>") drops
+//     everything to its matching "</Name>". There is no continuation without
+//     an option. With @backslash a kept line ending in an odd number of
+//     backslashes continues onto the next line, and a DROPPED line ending in
+//     any backslash drops the lines that continue it (a dropped line's
+//     continuation is never read as a line of its own); with @indent a line
+//     beginning with a blank continues the previous logical line, kept iff
+//     that was kept, and blank and comment lines between do not end it.
+//     Inside a continuation only "#" starts a comment line (a Postfix value
+//     may begin with "!"); it is dropped. A kept logical line has at most 32
+//     continuation lines; the rest are dropped.
 //  4. @statements: the text is read as statements, honouring single and
 //     double quotes (a backslash escapes the quote or a backslash inside
-//     them) and "#" comments, exactly as the nginx parser tokenises: a
-//     statement ends at ";", or at "{" (it opens a block), and "}" closes a
-//     block. A statement is kept iff its first word is in keep; a block
-//     opener likewise, and a dropped opener drops its whole block. A
-//     statement over 16 KiB or 64 lines is dropped. The output is
-//     canonical: one statement per line, its words joined by one blank
-//     (comments and line ends between them gone, a line end inside quotes
-//     a blank), ending in ";"; an opener as "<words> {"; a closer as "}".
+//     them), a backslash outside quotes (it makes the next byte part of the
+//     word, so "\;" and "\}" end nothing, as in nginx) and "#" comments,
+//     as the nginx parser tokenises: a statement ends at ";", or at "{" (it
+//     opens a block), and "}" closes a block. A statement is kept iff its
+//     first word is in keep; a block opener likewise, and a dropped opener
+//     drops its whole block. A statement over 16 KiB or 64 lines is dropped.
+//     The output is canonical: one statement per line, its words joined by
+//     one blank (comments and line ends between them gone, a line end
+//     inside quotes a blank), ending in ";"; an opener as "<words> {"; a
+//     closer as "}".
 //  5. Of what is kept, every PEM block is dropped and every run of
 //     [RedactRunLength] or more [A-Za-z0-9+/=] is replaced by
 //     [RedactedMarker]; each counts one redaction. Every returned line ends
@@ -820,14 +894,7 @@ func filterConfig(b []byte, keep []string) ([]byte, int, configStatus) {
 	if textRefused(b) {
 		return nil, 0, configNotText
 	}
-	mode := crCut
-	switch {
-	case ks.statements:
-		mode = crKeep
-	case ks.cr:
-		mode = crSplit
-	}
-	lines, ok := ruleLines(b, mode)
+	lines, ok := ruleLines(b, ks.cr && !ks.statements)
 	if !ok {
 		return nil, 0, configTooManyLines
 	}
@@ -856,6 +923,9 @@ func filterConfig(b []byte, keep []string) ([]byte, int, configStatus) {
 	} else {
 		filterLines(lines, ks, emit)
 	}
+	if len(out) > maxConfigOutput {
+		return nil, 0, configTooManyLines
+	}
 	return out, n, configOK
 }
 
@@ -865,12 +935,15 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 		dropTag     string // the tag of a dropped tag block
 		dropBrace   bool   // a dropped brace block is open
 		dropDepth   int
+		dropSection bool // inside a section whose header did not cross
 		prevKept    bool // the last line that was neither blank nor a comment was kept by its word
 		bsCont      bool // @backslash: this line continues a kept line
+		dropCont    bool // @backslash: this line continues a dropped line
 		contN       int  // continuation lines of the current logical line
 		haveLogical bool // @indent: a logical line has started
 		logicalKept bool
 	)
+	withSections := ks.sections || ks.anySections
 	for _, s := range lines {
 		t := strings.TrimLeft(s, " \t")
 		if dropBrace || dropTag != "" {
@@ -895,12 +968,33 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			}
 			continue
 		}
+		tr := strings.TrimRight(t, " \t")
+		header := withSections && isHeaderLike(tr) && !strings.Contains(s, "\r")
+		if dropSection && !header {
+			continue
+		}
+		if strings.IndexByte(s, '\r') >= 0 {
+			// A lone CR: the line is dropped whole, ends any continuation and
+			// starts none; it is a dropped logical line.
+			bsCont, dropCont, prevKept = false, false, false
+			haveLogical, logicalKept, contN = true, false, 0
+			if tr != "" && tr[len(tr)-1] == '{' {
+				dropBrace, dropDepth = true, 1
+			} else if name, ok := openingTag(tr); ok && ks.tags {
+				dropTag, dropDepth = name, 1
+			}
+			continue
+		}
 		if bsCont {
 			contN++
 			bsCont = endsInOddBackslashes(s)
 			if contN <= maxContinuation && !strings.HasPrefix(t, "#") {
 				emit(s)
 			}
+			continue
+		}
+		if dropCont {
+			dropCont = endsInBackslash(s)
 			continue
 		}
 		if ks.indent && haveLogical && t != "" && (s[0] == ' ' || s[0] == '\t') {
@@ -921,8 +1015,21 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			continue
 		}
 		haveLogical, logicalKept, contN = true, false, 0
-		tr := strings.TrimRight(t, " \t")
-		if _, closing := closingTag(tr); closing || isSectionHeader(tr) || tr == "}" || tr == "};" || (tr == "{" && prevKept) {
+		if header {
+			name, ok := sectionName(tr)
+			dropSection = !ok || (!ks.anySections && !ks.words[name])
+			if !dropSection {
+				emit(s)
+			}
+			prevKept = false
+			continue
+		}
+		if name, ok := closingTag(tr); ok && ks.tags && ks.words[name] {
+			emit(s)
+			prevKept = false
+			continue
+		}
+		if tr == "}" || tr == "};" || (tr == "{" && prevKept) {
 			emit(s)
 			prevKept = false
 			continue
@@ -934,10 +1041,15 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			continue
 		}
 		prevKept = false
-		if tr[len(tr)-1] == '{' {
+		switch {
+		case ks.backslash && endsInBackslash(s):
+			dropCont = true
+		case tr[len(tr)-1] == '{':
 			dropBrace, dropDepth = true, 1
-		} else if name, ok := openingTag(tr); ok {
-			dropTag, dropDepth = name, 1
+		default:
+			if name, ok := openingTag(tr); ok && ks.tags {
+				dropTag, dropDepth = name, 1
+			}
 		}
 	}
 }
@@ -1048,6 +1160,10 @@ func filterStatements(lines []string, ks keepSet, emit func(string)) {
 			j := i
 			for j < len(text) {
 				d := text[j]
+				if d == '\\' && j+1 < len(text) && text[j+1] != '\n' {
+					j += 2 // an escaped byte is part of the word, whatever it is
+					continue
+				}
 				if d == ' ' || d == '\t' || d == '\f' || d == '\v' || d == '\r' || d == '\n' || d == ';' || d == '}' {
 					break
 				}

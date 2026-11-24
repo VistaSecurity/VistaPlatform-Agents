@@ -399,6 +399,12 @@ func identityFrom(name string, in inspection) Identity {
 			id.Class = ClassPrivateKey
 		}
 	}
+	// A file of key lines without the ".pub" name or starting with an
+	// authorized_keys options field ("from=...", "command=..."): every line
+	// that is not blank or a comment is a genuine key line.
+	if id.Class == ClassText && in.nLabel == 0 && in.sshLines > 0 && !in.sshBad && !in.nul && !in.truncated && !in.bad {
+		id.Class = ClassPublicKey
+	}
 	if !id.Public() {
 		return id
 	}

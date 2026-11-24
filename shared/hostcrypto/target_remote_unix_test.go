@@ -501,6 +501,7 @@ func TestRemoteUnixRealTools(t *testing.T) {
 	if err := os.Symlink("server.key", filepath.Join(dir, "link.key")); err != nil {
 		t.Fatal(err)
 	}
+	fxSettle()
 
 	rr := &tgtRecordingRunner{inner: hostinventory.NewLocalRunner()}
 	rt := NewRemoteUnixTarget(rr, runtime.GOOS)

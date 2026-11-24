@@ -477,7 +477,7 @@ func TestLocalRunnerRunInput(t *testing.T) {
 func TestReadConfigIsTheOnlyPath(t *testing.T) {
 	saved := configKeepWords
 	t.Cleanup(func() { configKeepWords = saved })
-	configKeepWords = map[string][]string{"wireguard": {"address", "listenport"}}
+	configKeepWords = map[string][]string{"wireguard": {"address", "interface", "listenport", KeepOptSections}}
 
 	conf := []byte("[Interface]\nPrivateKey = " + strings.Repeat("Q", 44) + "\nAddress = 10.0.0.1/24\npassword = hunter2\n")
 	ft := newTgtFakeTarget(false).file("/etc/wireguard/wg0.conf", conf)
@@ -486,7 +486,7 @@ func TestReadConfigIsTheOnlyPath(t *testing.T) {
 	if err != nil || string(got) != "[Interface]\nAddress = 10.0.0.1/24\n" {
 		t.Fatalf("readConfig = %q, %v", got, err)
 	}
-	if len(ft.keeps) != 1 || strings.Join(ft.keeps[0], ",") != "address,listenport" {
+	if len(ft.keeps) != 1 || strings.Join(ft.keeps[0], ",") != "address,interface,listenport,"+KeepOptSections {
 		t.Fatalf("keep words sent: %q", ft.keeps)
 	}
 	before := len(ft.recorded())

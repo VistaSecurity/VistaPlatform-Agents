@@ -24,6 +24,7 @@ import (
 	"math/big"
 	mrand "math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -53,6 +54,7 @@ func TestFilterConfigRuleTable(t *testing.T) {
 	}
 	st := KeepOptStatements
 	bs, ind, cr := KeepOptBackslash, KeepOptIndent, KeepOptCR
+	sec, anysec, tags := KeepOptSections, KeepOptAnySections, KeepOptTags
 	cases := []struct {
 		name string
 		in   string
@@ -82,7 +84,10 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"one line end", "\n", []string{"a"}, "\n", 0, true},
 		{"CRLF", "a 1\r\nb 2\r\n", []string{"a", "b"}, "a 1\nb 2\n", 0, true},
 		{"no final line end", "a 1\nb 2", []string{"a", "b"}, "a 1\nb 2\n", 0, true},
-		{"lone CR cuts the line", "a 1\rpassword S3cr3t\nb 2\n", []string{"a", "b", "password"}, "a 1\nb 2\n", 0, true},
+		{"a line with a lone CR is dropped whole", "a 1\rpassword S3cr3t\nb 2\n", []string{"a", "b", "password"}, "b 2\n", 0, true},
+		{"reviewer: lone CR and a trailing backslash", "SSLProtocol all \\\rx\nSSLPassPhraseDialog exec:/bin/echo hunter2\n", []string{"sslprotocol", bs, tags}, "", 0, true},
+		{"a lone CR ends a continuation", "a 1\\\nb\r2\\\nc 3\n", []string{"a", "c", bs}, "a 1\\\nc 3\n", 0, true},
+		{"a lone CR is a dropped logical line to @indent", "a = 1\n  x\ry\n  z\nb = 2\n", []string{"a", "b", ind}, "a = 1\nb = 2\n", 0, true},
 		{"lone CR cuts a dropped line too", "password S3cr3t\ra 1\n", []string{"a"}, "", 0, true},
 		{"lone CR ends a line with @cr", "a=1\rb=S3cr3t\rc=2\n", []string{"a", "c", cr}, "a=1\nc=2\n", 0, true},
 		{"CR CR LF with @cr", "a=1\r\r\nc=2\n", []string{"a", "c", cr}, "a=1\n\nc=2\n", 0, true},
@@ -101,32 +106,34 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"yaml colon", "client-key-data: " + q + "x\nserver: https://k\n", []string{"server"}, "server: https://k\n", 0, true},
 
 		// Structure is strict.
-		{"structure", "[Interface]\n\n  \n};\n</VirtualHost>\n}\nPrivateKey = x\n", []string{"address"}, "[Interface]\n\n  \n};\n</VirtualHost>\n}\n", 0, true},
-		{"reviewer: a header that is not one", "[S3cr3t-section!]\n[ \"S3cr3t\", \"tok\" ]\n[ok section.1:/x-y_z]\n", []string{"a"}, "[ok section.1:/x-y_z]\n", 0, true},
-		{"reviewer: text after a closing tag", "</VirtualHost> S3cr3t\n</VirtualHost>\n", []string{"a"}, "</VirtualHost>\n", 0, true},
-		{"a header over 128 bytes is not one", "[" + strings.Repeat("a.", 64) + "a]\n[" + strings.Repeat("a.", 64) + "]\n", []string{"x"}, "[" + strings.Repeat("a.", 64) + "]\n", 0, true},
+		{"no headers or tags without an option", "[Interface]\n\n  \n};\n</VirtualHost>\n}\nPrivateKey = x\n", []string{"address", "interface", "virtualhost"}, "\n  \n};\n}\n", 0, true},
+		{"reviewer: @sections crosses only listed names", "a = 0\n[libdefaults]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[pass:word/x]\na = S3cr3t2\n[realms]\na = S3cr3t3\n[ LibDefaults ]\na = 2\n",
+			[]string{"a", "libdefaults", sec}, "a = 0\n[libdefaults]\na = 1\n[ LibDefaults ]\na = 2\n", 0, true},
+		{"@anysections crosses any name of the shape", "[ ssl_sect ]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[S3cr3t-section!]\na = S3cr3t2\n[ \"S3cr3t\", \"tok\" ]\na = S3\n[x.y-z_1]\na = 2\n[" + strings.Repeat("a", 65) + "]\na = S4\n",
+			[]string{"a", anysec}, "[ ssl_sect ]\na = 1\n[x.y-z_1]\na = 2\n", 0, true},
+		{"reviewer: @tags crosses only listed closing tags", "</VirtualHost> S3cr3t\n</VirtualHost>\n</Directory>\n</S3cr3t>\n", []string{"virtualhost", tags}, "</VirtualHost>\n", 0, true},
 		{"{ after a kept line is structure", "server\n\n# c\n{\nlisten 1\n}\n", []string{"server", "listen"}, "server\n\n{\nlisten 1\n}\n", 0, true},
 		{"{ after a dropped line drops its block", "password\n{\nlisten S3cr3t\n}\nlisten 2\n", []string{"listen"}, "listen 2\n", 0, true},
-		{"{ after structure drops its block", "[s]\n{\nlisten S3cr3t\n}\n", []string{"listen"}, "[s]\n", 0, true},
+		{"{ after structure drops its block", "[s]\n{\nlisten S3cr3t\n}\n", []string{"listen", "s", sec}, "[s]\n", 0, true},
 
 		// Dropped blocks.
 		{"reviewer: krb5 REALM = { inside [libdefaults]",
 			"[libdefaults]\n permitted_enctypes = aes256\n EXAMPLE.COM = {\n  permitted_enctypes = des\n  pkinit_identities = PKCS11:S3cr3t\n }\n default_tkt_enctypes = x\n",
-			[]string{"permitted_enctypes", "default_tkt_enctypes", "pkinit_identities"},
+			[]string{"permitted_enctypes", "default_tkt_enctypes", "pkinit_identities", "libdefaults", sec},
 			"[libdefaults]\n permitted_enctypes = aes256\n default_tkt_enctypes = x\n", 0, true},
 		{"nested dropped braces", "a {\n b {\n  c 1\n }\n # }\n c S3cr3t\n} else {\n c S3cr3t2\n}\nc ok\n", []string{"c"}, "c ok\n", 0, true},
 		{"an unclosed dropped block drops the rest", "x {\nc S3cr3t\n", []string{"c"}, "", 0, true},
 		{"a dropped tag drops through its match", "<Directory />\n  AuthPass S3cr3t\n  <directory /x>\n  </Directory>\n  SSLProtocol S3cr3t\n</DIRECTORY>\nSSLProtocol y\n",
-			[]string{"sslprotocol"}, "SSLProtocol y\n", 0, true},
-		{"a kept tag is a word", "<VirtualHost *:443>\nSSLCertificateFile /a\nSSLPassPhraseDialog exec:/x\n</VirtualHost>\n", []string{"virtualhost", "sslcertificatefile"},
+			[]string{"sslprotocol", tags}, "SSLProtocol y\n", 0, true},
+		{"a kept tag is a word", "<VirtualHost *:443>\nSSLCertificateFile /a\nSSLPassPhraseDialog exec:/x\n</VirtualHost>\n", []string{"virtualhost", "sslcertificatefile", tags},
 			"<VirtualHost *:443>\nSSLCertificateFile /a\n</VirtualHost>\n", 0, true},
 		{"reviewer: apache", "<VirtualHost *:443>\n  SSLEngine on\n  SSLCertificateKeyFile /k\n  SSLCipherSuite HIGH\n  SetEnv DB_PASS S3cr3t-1\n</VirtualHost> S3cr3t-2\n</IfModule>\n<Directory />\n  AuthPass S3cr3t-3\n</Directory>\n",
-			[]string{"virtualhost", "sslengine", "sslcertificatekeyfile", "sslciphersuite", "ifmodule"},
+			[]string{"virtualhost", "sslengine", "sslcertificatekeyfile", "sslciphersuite", "ifmodule", tags},
 			"<VirtualHost *:443>\n  SSLEngine on\n  SSLCertificateKeyFile /k\n  SSLCipherSuite HIGH\n</IfModule>\n", 0, true},
 
 		// No continuation without an option.
 		{"reviewer: win.ini CertPath=C:\\certs\\ without @backslash", "[Certs]\nCertPath=C:\\certs\\\nPassword=S3cr3t-1\nCipherList=HIGH\n", []string{"certpath", "cipherlist"},
-			"[Certs]\nCertPath=C:\\certs\\\nCipherList=HIGH\n", 0, true},
+			"CertPath=C:\\certs\\\nCipherList=HIGH\n", 0, true},
 		{"reviewer: a kept word without ; and 5,000 secret lines, line mode", "ssl_protocols TLSv1.2\n" + secretLines(5000), []string{"ssl_protocols"}, "ssl_protocols TLSv1.2\n", 0, true},
 
 		// @backslash.
@@ -136,7 +143,9 @@ func TestFilterConfigRuleTable(t *testing.T) {
 			[]string{"javax.net.ssl.truststore", bs, cr}, "javax.net.ssl.trustStore=C:\\\\certs\\\\\n", 0, true},
 		{"three backslashes continue", "a x\\\\\\\nb\n", []string{"a", bs}, "a x\\\\\\\nb\n", 0, true},
 		{"a blank after the backslash ends it", "a x\\ \nS3cr3t\n", []string{"a", bs}, "a x\\ \n", 0, true},
-		{"a dropped line does not continue", "password = \\\nciphers x\n", []string{"ciphers", bs}, "ciphers x\n", 0, true},
+		{"reviewer: a dropped line's continuation is dropped", "password LEAK \\\nciphers X\nciphers ok\n", []string{"ciphers", bs}, "ciphers ok\n", 0, true},
+		{"a dropped line with an even backslash count continues too", "password \"a \\\\\nciphers X\\\nciphers Y\nciphers ok\n", []string{"ciphers", bs}, "ciphers ok\n", 0, true},
+		{"without @backslash a dropped line does not continue", "password = \\\nciphers x\n", []string{"ciphers"}, "ciphers x\n", 0, true},
 		{"a # line inside a continuation is dropped", "a 1\\\n# S3cr3t \\\nb 2\nc 3\n", []string{"a", bs}, "a 1\\\nb 2\n", 0, true},
 		{"a ! line inside a continuation is data", "a 1\\\n  !b\n", []string{"a", bs}, "a 1\\\n  !b\n", 0, true},
 		{"at most 32 continuation lines", "a 0\\\n" + strings.Repeat("x\\\n", 40) + "end\nb 1\n", []string{"a", "b", bs},
@@ -178,6 +187,10 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"PEM inside a kept statement", "ssl_certificate -----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----;\nssl_ciphers a;\n", []string{"ssl_certificate", "ssl_ciphers", st}, "ssl_ciphers a;\n", 1, true},
 		{"a run in a statement", "ssl_ciphers " + q + ";\n", []string{"ssl_ciphers", st}, "ssl_ciphers " + RedactedMarker + ";\n", 1, true},
 		{"empty statements", ";;{}\nssl_ciphers a;\n", []string{"ssl_ciphers", st}, "ssl_ciphers a;\n", 0, true},
+		{"reviewer: an escaped ; does not end a statement", "ssl_password_file /x\\; ssl_ciphers hunter2;\nssl_ciphers ok;\n", []string{"ssl_ciphers", st}, "ssl_ciphers ok;\n", 0, true},
+		{"reviewer: an escaped } does not close a dropped block", "location / { a \\} ; ssl_ciphers S3cr3t; }\nssl_ciphers ok;\n", []string{"ssl_ciphers", st}, "ssl_ciphers ok;\n", 0, true},
+		{"escapes in a kept statement", "ssl_ciphers a\\ b\\{c \\\\;\n", []string{"ssl_ciphers", st}, "ssl_ciphers a\\ b\\{c \\\\;\n", 0, true},
+		{"a backslash before a line end is a character", "ssl_ciphers a\\\nb;\n", []string{"ssl_ciphers", st}, "ssl_ciphers a\\ b;\n", 0, true},
 
 		// Redaction.
 		{"run at 39 kept, 40 redacted", "a " + q[:39] + "\na " + q + "\n", []string{"a"}, "a " + q[:39] + "\na " + RedactedMarker + "\n", 1, true},
@@ -199,50 +212,128 @@ func TestFilterConfigRuleTable(t *testing.T) {
 	if _, _, st := filterConfig([]byte(strings.Repeat("a\r", maxConfigLines+1)), []string{"a", KeepOptCR}); st != configTooManyLines {
 		t.Fatalf("line bound counts @cr lines: %v", st)
 	}
+	// Output past the bound is too large, never cut: @statements output
+	// grows ("a;" becomes "a;\n").
+	big := []byte(strings.Repeat("a;", maxConfigOutput/3+1))
+	if _, _, st := filterConfig(big, []string{"a", KeepOptStatements}); st != configTooManyLines {
+		t.Fatalf("output bound: %v", st)
+	}
+	if _, _, st := filterConfig(big[:2*(maxConfigOutput/3-1)], []string{"a", KeepOptStatements}); st != configOK {
+		t.Fatalf("under the output bound: %v", st)
+	}
 }
 
-// TestPrivateUnderPublicLabel holds the deny rule to real objects of every
-// kind and size this test can make: every private key encoding must be
-// refused under a public label, every public object must pass, and the rule
-// must refuse the whole file.
-func TestPrivateUnderPublicLabel(t *testing.T) {
+// TestPublicContentCertificatesOnly: a block crosses only as a parser's
+// re-encoding of the certificate in it. The fourth review's carriers of a
+// private key under a certificate's label (a first body line of a few
+// characters, an unencrypted PKCS#12, long-form and indefinite lengths) and
+// every private key encoding under CERTIFICATE and PUBLIC KEY return
+// nothing; real certificates return their exact DER.
+func TestPublicContentCertificatesOnly(t *testing.T) {
+	for name, tc := range fxCertCases(t) {
+		out, ok := publicContent(tc.in)
+		if tc.want == nil {
+			if ok || len(out) != 0 {
+				t.Errorf("%s: %d bytes crossed: %q", name, len(out), tgtShort(out))
+			}
+			continue
+		}
+		if !ok || !bytes.Equal(out, tc.want) {
+			t.Errorf("%s: got %q, want %q", name, tgtShort(out), tgtShort(tc.want))
+		}
+		for _, secret := range tc.secrets {
+			if tgtLeaks(out, secret) {
+				t.Errorf("%s: private bytes crossed", name)
+			}
+		}
+	}
+}
+
+// fxCertCase is one public-content case: the file, what must cross (nil:
+// nothing), and private bytes that must never cross.
+type fxCertCase struct {
+	in, want []byte
+	secrets  [][]byte
+}
+
+// fxPEMWrapped is a PEM block of der under label with its body lines cut at
+// the given widths (the last width repeats).
+func fxPEMWrapped(label string, der []byte, widths ...int) []byte {
+	b64 := base64.StdEncoding.EncodeToString(der)
+	var b strings.Builder
+	b.WriteString("-----BEGIN " + label + "-----\n")
+	for i := 0; len(b64) > 0; i++ {
+		w := widths[min(i, len(widths)-1)]
+		if w > len(b64) {
+			w = len(b64)
+		}
+		b.WriteString(b64[:w] + "\n")
+		b64 = b64[w:]
+	}
+	b.WriteString("-----END " + label + "-----\n")
+	return []byte(b.String())
+}
+
+// fxCertCases builds the cases: the reviewer's and every key type.
+func fxCertCases(t *testing.T) map[string]fxCertCase {
+	t.Helper()
 	private, public := fxDenyObjects(t)
+	cases := map[string]fxCertCase{}
+	rsaKey := private["PKCS#1 RSA 2048"]
 	for name, der := range private {
-		for _, label := range []string{"CERTIFICATE", "PUBLIC KEY", "EC PARAMETERS", "X509 CRL"} {
-			block := pem.EncodeToMemory(&pem.Block{Type: label, Bytes: der})
-			first := strings.Split(string(block), "\n")[1]
-			if !privateUnderPublicLabel(first) {
-				t.Errorf("%s under %s passes: %.24s", name, label, first)
-			}
-			cert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: public["certificate tiny"]})
-			if out, ok := publicContent(append(cert, block...)); ok {
-				t.Errorf("%s under %s: the file was not refused: %q", name, label, tgtShort(out))
-			}
+		for _, label := range []string{"CERTIFICATE", "PUBLIC KEY", "TRUSTED CERTIFICATE"} {
+			cases["key "+name+" under "+label] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: label, Bytes: der}), secrets: [][]byte{der[len(der)/2:]}}
+		}
+		for _, w := range []int{1, 3, 5} {
+			cases[fmt.Sprintf("key %s, first line of %d", name, w)] = fxCertCase{in: fxPEMWrapped("CERTIFICATE", der, w, 64), secrets: [][]byte{der[len(der)/2:]}}
 		}
 	}
-	for name, der := range public {
-		block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-		first := strings.Split(string(block), "\n")[1]
-		if privateUnderPublicLabel(first) {
-			t.Errorf("%s refused: %.24s", name, first)
+	// An unencrypted PKCS#12 (keypbe NONE) holding a key: SEQUENCE { 3,
+	// ContentInfo { data, [0] OCTET STRING { the key } } }.
+	p12, _ := asn1.Marshal(struct {
+		V    int
+		Auth struct {
+			OID  asn1.ObjectIdentifier
+			Data asn1.RawValue `asn1:"explicit,tag:0"`
 		}
+	}{3, struct {
+		OID  asn1.ObjectIdentifier
+		Data asn1.RawValue `asn1:"explicit,tag:0"`
+	}{asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}, asn1.RawValue{Tag: asn1.TagOctetString, Bytes: rsaKey}}})
+	cases["unencrypted PKCS#12"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p12}), secrets: [][]byte{rsaKey[len(rsaKey)/2:]}}
+	// Long-form and indefinite lengths around a key.
+	long := append([]byte{0x30, 0x84, 0, 0, byte(len(rsaKey) >> 8), byte(len(rsaKey))}, rsaKey...)
+	cases["four-byte length"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: long}), secrets: [][]byte{rsaKey[len(rsaKey)/2:]}}
+	indef := append(append([]byte{0x30, 0x80}, rsaKey...), 0, 0)
+	cases["indefinite length"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: indef}), secrets: [][]byte{rsaKey[len(rsaKey)/2:]}}
+	// Real certificates cross as their DER.
+	var bundle, want []byte
+	for _, name := range []string{"certificate RSA 4096", "certificate EC P-256", "certificate EC P-384", "certificate tiny", "certificate huge"} {
+		der := public[name]
+		in := fxPEMWrapped("CERTIFICATE", der, 76)
+		cases[name] = fxCertCase{in: in, want: []byte(certificatePEM(der))}
+		bundle = append(bundle, in...)
+		want = append(want, certificatePEM(der)...)
 	}
-	// OpenSSH under a public label.
-	_, edPriv, _ := ed25519.GenerateKey(rand.Reader)
-	op, err := ssh.MarshalPrivateKey(edPriv, "")
-	if err != nil {
-		t.Fatal(err)
+	cases["bundle"] = fxCertCase{in: bundle, want: want}
+	cert := public["certificate EC P-256"]
+	// A key under a certificate label between two certificates: the
+	// certificates cross, the key does not.
+	mixed := append(append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rsaKey})...),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: public["certificate tiny"]})...)
+	cases["key between certificates"] = fxCertCase{in: mixed, want: []byte(certificatePEM(cert) + certificatePEM(public["certificate tiny"])), secrets: [][]byte{rsaKey[len(rsaKey)/2:]}}
+	// TRUSTED CERTIFICATE: the certificate, without the trust settings.
+	aux, _ := asn1.Marshal(struct{ Trust []asn1.ObjectIdentifier }{[]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 1}}})
+	cases["trusted certificate"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "TRUSTED CERTIFICATE", Bytes: append(append([]byte(nil), cert...), aux...)}), want: []byte(certificatePEM(cert))}
+	cases["X509 CERTIFICATE label"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "X509 CERTIFICATE", Bytes: cert}), want: []byte(certificatePEM(cert))}
+	// Public blocks that are not certificates do not cross.
+	for _, n := range []string{"SPKI RSA 2048", "RSA PUBLIC KEY 2048", "DH PARAMETERS 256", "CSR RSA", "CRL"} {
+		label := map[string]string{"SPKI RSA 2048": "PUBLIC KEY", "RSA PUBLIC KEY 2048": "RSA PUBLIC KEY", "DH PARAMETERS 256": "DH PARAMETERS", "CSR RSA": "CERTIFICATE REQUEST", "CRL": "X509 CRL"}[n]
+		cases["not a certificate: "+n] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: label, Bytes: public[n]})}
+		cases["certificate and "+n] = fxCertCase{in: append(pem.EncodeToMemory(&pem.Block{Type: label, Bytes: public[n]}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert})...),
+			want: []byte(certificatePEM(cert))}
 	}
-	op.Type = "PUBLIC KEY"
-	if _, ok := publicContent(pem.EncodeToMemory(op)); ok {
-		t.Error("an OpenSSH private key under PUBLIC KEY passes")
-	}
-	// What still passes, stated: an encrypted PKCS#8 key is SEQUENCE
-	// SEQUENCE, like a certificate.
-	enc := []byte{0x30, 0x82, 0x01, 0x00, 0x30, 0x57, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d}
-	if privateUnderPublicLabel(base64.StdEncoding.EncodeToString(append(enc, make([]byte, 60)...))[:64]) {
-		t.Error("the encrypted PKCS#8 prefix is refused; update the comment that says it passes")
-	}
+	return cases
 }
 
 // fxDenyObjects builds DER of every private key encoding and every public
@@ -638,7 +729,9 @@ func fxGenerated(n int) [][]byte {
 		"@SECLEVEL=2:HIGH", "${var}", "$x{y}", "$z{", "#hash", "\t", "  ", "\r", "\f", "\v", "kept = value", "smtpd_tls_ciphers = high",
 		"  !aNULL", "EXAMPLE.COM = {", "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----", "-----BEGIN X-----", strings.Repeat("QUJD", 11),
 		"\xe9\xff", "=", ":", "ssl_ciphers", "\\", "\"", "'", "{x}", "<", ">", "</", "kept", "KEPT=1", "secret", "if ($a) {", "} else {",
-		"ssl_ciphers \"a\nb\";", "\xef\xbb\xbf", "[ok]", "  [ok]  ", "<IfModule x>", "</IfModule>"}
+		"ssl_ciphers \"a\nb\";", "\xef\xbb\xbf", "[ok]", "  [ok]  ", "<IfModule x>", "</IfModule>",
+		"\\;", "\\}", "\\{", "\\\\", "x\\\r", "[libdefaults]", "[ libdefaults ]", "[hunter2 STRUCT]", "[pass:word/x]", "[ ssl_sect ]",
+		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {"}
 	seps := []string{" ", "", "\t", ";", "{", "}", " # ", "\"", "\\"}
 	ends := []string{"\n", "\n", "\n", "\n", "\r\n", "\r", "\r\r\n", "\\\n", "\\\\\n"}
 	rnd := mrand.New(mrand.NewPCG(2026, 11))
@@ -675,7 +768,7 @@ func fxGenerated(n int) [][]byte {
 }
 
 // fxKeepGen is the keep list of the generated corpus.
-var fxKeepGen = []string{"ssl_ciphers", "ssl_protocols", "server", "listen", "kept", "smtpd_tls_ciphers", "virtualhost", "ifmodule", "seclevel",
+var fxKeepGen = []string{"ssl_ciphers", "ssl_protocols", "server", "listen", "kept", "smtpd_tls_ciphers", "virtualhost", "ifmodule", "seclevel", "libdefaults", "ok",
 	"javax.net.ssl.keystore", "a", "b", "c", "x", "http", "if", "location"}
 
 // fxParityKeeps are the keep lists the host programs are compared under:
@@ -683,7 +776,8 @@ var fxKeepGen = []string{"ssl_ciphers", "ssl_protocols", "server", "listen", "ke
 // word lists.
 func fxParityKeeps(short bool) map[string][]string {
 	opts := map[string][]string{"": nil, "+statements": {KeepOptStatements}, "+java": {KeepOptCR, KeepOptBackslash},
-		"+backslash": {KeepOptBackslash}, "+indent": {KeepOptIndent}}
+		"+backslash": {KeepOptBackslash}, "+indent": {KeepOptIndent}, "+sections": {KeepOptSections},
+		"+anysections": {KeepOptBackslash, KeepOptAnySections}, "+tags": {KeepOptBackslash, KeepOptTags}}
 	bases := map[string][]string{"gen": fxKeepGen, "realistic": tgtRealisticKeep}
 	if !short {
 		bases["broad"] = tgtBroadKeep
@@ -740,6 +834,12 @@ func fxWriteCorpus(t *testing.T, dir string, corpus map[string][]byte) {
 	}
 }
 
+// fxSettle waits out the quiescence rule: a remote read refuses a file
+// whose modification or change time is within 3 seconds of the host's clock
+// (readQuiet, psQuietLine), and a test that has just written its files must
+// let them age. A change time cannot be set back, so this is a wait.
+func fxSettle() { time.Sleep(3200 * time.Millisecond) }
+
 // fxCheckText compares one host ReadText answer with filterConfig and
 // returns a self-explanatory complaint, or "".
 func fxCheckText(b []byte, keep []string, got []byte, n int, err error) string {
@@ -778,6 +878,7 @@ func TestFilterAwkParity(t *testing.T) {
 	corpus := fxTextCorpus(t, gen)
 	dir := t.TempDir()
 	fxWriteCorpus(t, dir, corpus)
+	fxSettle()
 	keeps := fxParityKeeps(testing.Short())
 	ctx := context.Background()
 	for impl, runner := range tgtAwks(t) {
@@ -818,28 +919,8 @@ func fxFileCorpus(t *testing.T) map[string][]byte {
 	for k, v := range r.files {
 		out["review2/"+k] = v
 	}
-	private, public := fxDenyObjects(t)
-	cert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: public["certificate tiny"]})
-	for name, der := range private {
-		out["deny/"+strings.ReplaceAll(name, " ", "_")] = append(append([]byte(nil), cert...), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
-	}
-	for name, der := range public {
-		label := "CERTIFICATE"
-		switch {
-		case strings.HasPrefix(name, "SPKI"):
-			label = "PUBLIC KEY"
-		case strings.HasPrefix(name, "RSA PUBLIC"):
-			label = "RSA PUBLIC KEY"
-		case strings.HasPrefix(name, "DH"):
-			label = "DH PARAMETERS"
-		case strings.HasPrefix(name, "EC PARAMETERS"):
-			label = "EC PARAMETERS"
-		case name == "CRL":
-			label = "X509 CRL"
-		case name == "CSR RSA":
-			label = "CERTIFICATE REQUEST"
-		}
-		out["pass/"+strings.ReplaceAll(name, " ", "_")] = pem.EncodeToMemory(&pem.Block{Type: label, Bytes: der})
+	for name, c := range fxCertCases(t) {
+		out["cert/"+strings.NewReplacer(" ", "_", ":", "", "#", "").Replace(name)] = c.in
 	}
 	_, ed, _ := ed25519.GenerateKey(rand.Reader)
 	p, _ := ssh.NewPublicKey(ed.Public())
@@ -870,6 +951,11 @@ func TestPublicAwkParity(t *testing.T) {
 	corpus := fxFileCorpus(t)
 	dir := t.TempDir()
 	fxWriteCorpus(t, dir, corpus)
+	fxSettle()
+	secrets := map[string][][]byte{}
+	for name, c := range fxCertCases(t) {
+		secrets["cert/"+strings.NewReplacer(" ", "_", ":", "", "#", "").Replace(name)] = c.secrets
+	}
 	ctx := context.Background()
 	for impl, runner := range tgtAwks(t) {
 		t.Run(impl, func(t *testing.T) {
@@ -882,8 +968,10 @@ func TestPublicAwkParity(t *testing.T) {
 				if ok != (exit == 0) || (ok && !bytes.Equal(out, want)) {
 					t.Errorf("%s: host exit %d, Go ok=%v; %s", name, exit, ok, fxFirstDiff(out, want))
 				}
-				if strings.HasPrefix(name, "deny/") && (ok || exit == 0) {
-					t.Errorf("%s: a private key under a public label was not refused", name)
+				for _, secret := range secrets[name] {
+					if tgtLeaks(out, secret) {
+						t.Errorf("%s: private bytes crossed", name)
+					}
 				}
 				in, err := rt.identify(ctx, p)
 				if wantIn := inspect(b, int64(len(b))); err != nil || (!wantIn.nul && !reflect.DeepEqual(in, wantIn)) {
@@ -894,19 +982,60 @@ func TestPublicAwkParity(t *testing.T) {
 	}
 }
 
-// TestRemoteUnixTornReads is the third review's in-place rewrite: two files
-// of the same size, one with a kept line where the other has a secret, written
-// over each other in 4,096-byte pieces (dd conv=notrunc) while the host reads.
-// Every answer must be exactly the filter of one version or a refusal: never
-// a line of one joined to the other. The same for ReadFile with a
-// certificate and a same-size private key.
+// TestRemoteUnixNoHostParser: a host with no openssl reads no certificate
+// and says why (ErrNoHostParser); a file of SSH key lines needs no parser.
+func TestRemoteUnixNoHostParser(t *testing.T) {
+	if !tgtRealToolsAvailable() {
+		t.Skip("POSIX tools not available")
+	}
+	bin := t.TempDir()
+	for _, tool := range []string{"sh", "stat", "head", "tr", "awk", "date", "od", "wc"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("no %s", tool)
+		}
+		if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	certPEM, _, _, _ := tgtMaterial(t)
+	_, ed, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _ := ssh.NewPublicKey(ed.Public())
+	dir := t.TempDir()
+	tgtWrite(t, dir, "c.pem", certPEM, 0o644)
+	tgtWrite(t, dir, "k.pub", ssh.MarshalAuthorizedKey(pub), 0o644)
+	fxSettle()
+	rt := NewRemoteUnixTarget(tgtPathRunner{inner: hostinventory.NewLocalRunner(), path: bin}, runtime.GOOS)
+	out, err := rt.ReadFile(context.Background(), filepath.Join(dir, "c.pem"))
+	if !errors.Is(err, ErrNoHostParser) || len(out) != 0 {
+		t.Errorf("certificate without openssl: %v, %d bytes", err, len(out))
+	}
+	if out, err := rt.ReadFile(context.Background(), filepath.Join(dir, "k.pub")); err != nil || len(out) == 0 {
+		t.Errorf("key lines without openssl: %v", err)
+	}
+	// With openssl the certificate crosses.
+	if out, err := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS).ReadFile(context.Background(), filepath.Join(dir, "c.pem")); err != nil || !bytes.Equal(out, certPEM) {
+		t.Errorf("certificate with openssl: %v", err)
+	}
+}
+
+// TestRemoteUnixTornReads is the in-place rewrite of the third and fourth
+// reviews: two files of the same size, one with a kept line where the other
+// has a secret, the differing line straddling byte 4,096, written over each
+// other in 4,096-byte pieces (dd conv=notrunc) in bursts, with quiet spells
+// of 3.5 seconds between them, while the host reads without pause. Every
+// answer must be exactly the filter of one version (or the certificate) or a
+// refusal, and some answers must succeed, or the test proves nothing. It
+// runs with the host's fine times and again with whole-second times forced
+// (the macOS fallback, coarse file systems), where only the quiescence rule
+// stands between a rewrite and a torn read.
 func TestRemoteUnixTornReads(t *testing.T) {
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
-	reads := 2000
+	cycles := 3
 	if testing.Short() {
-		reads = 200
+		cycles = 1
 	}
 	text := fxReview3Text()
 	a, b := text["race_a.conf"], text["race_b.conf"]
@@ -917,90 +1046,96 @@ func TestRemoteUnixTornReads(t *testing.T) {
 	}
 	same = same[:len(certPEM)]
 	keep := []string{"ssl_ciphers", "ssl_protocols", KeepOptStatements}
-	for _, c := range []struct {
-		name   string
-		x, y   []byte
-		accept func([]byte) bool
-		read   func(rt *RemoteUnixTarget, p string) ([]byte, error)
-	}{
-		{"text", a, b, func(out []byte) bool {
-			wa, _, _ := FilterConfigText(a, keep)
-			wb, _, _ := FilterConfigText(b, keep)
-			return bytes.Equal(out, wa) || bytes.Equal(out, wb)
-		}, func(rt *RemoteUnixTarget, p string) ([]byte, error) {
-			out, _, err := rt.ReadText(context.Background(), p, keep)
-			return out, err
-		}},
-		{"public", certPEM, same, func(out []byte) bool { return bytes.Equal(out, certPEM) },
-			func(rt *RemoteUnixTarget, p string) ([]byte, error) { return rt.ReadFile(context.Background(), p) }},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			p := filepath.Join(dir, "swap")
-			tgtWrite(t, dir, "swap", c.x, 0o644)
-			stop := make(chan struct{})
-			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				f, err := os.OpenFile(p, os.O_WRONLY, 0)
-				if err != nil {
-					return
+	wa, _, _ := FilterConfigText(a, keep)
+	wb, _, _ := FilterConfigText(b, keep)
+	for _, coarse := range []bool{false, true} {
+		for _, c := range []struct {
+			name   string
+			x, y   []byte
+			accept func([]byte) bool
+			read   func(rt *RemoteUnixTarget, p string) ([]byte, error)
+		}{
+			{"text", a, b, func(out []byte) bool { return bytes.Equal(out, wa) || bytes.Equal(out, wb) },
+				func(rt *RemoteUnixTarget, p string) ([]byte, error) {
+					out, _, err := rt.ReadText(context.Background(), p, keep)
+					return out, err
+				}},
+			{"public", certPEM, same, func(out []byte) bool { return bytes.Equal(out, certPEM) },
+				func(rt *RemoteUnixTarget, p string) ([]byte, error) { return rt.ReadFile(context.Background(), p) }},
+		} {
+			t.Run(fmt.Sprintf("%s/coarse=%v", c.name, coarse), func(t *testing.T) {
+				ok, changed, other, torn, reads := fxTornRun(t, c.x, c.y, cycles, func(p string) ([]byte, error) {
+					rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+					rt.coarse = coarse
+					return c.read(rt, p)
+				}, c.accept)
+				t.Logf("ok=%d changed=%d other=%d torn=%d of %d", ok, changed, other, torn, reads)
+				if torn != 0 {
+					t.Fatalf("%d torn reads", torn)
 				}
-				defer func() { _ = f.Close() }()
-				for i := 0; ; i++ {
-					select {
-					case <-stop:
-						return
-					default:
-					}
-					src := c.x
-					if i%2 == 1 {
-						src = c.y
-					}
-					for off := 0; off < len(src); off += 4096 {
-						_, _ = f.WriteAt(src[off:min(off+4096, len(src))], int64(off))
-						// dd's gap between its two writes, which is what
-						// lets a read take one page of each version.
-						time.Sleep(50 * time.Microsecond)
-					}
-					// Every fifth rewrite pauses, so some reads fall between
-					// rewrites and succeed: if every read were refused the
-					// test would prove nothing.
-					if i%5 == 4 {
-						time.Sleep(15 * time.Millisecond)
-					}
+				if ok == 0 {
+					t.Fatal("no read succeeded: the test proves nothing")
 				}
-			}()
-			rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
-			ok, changed, other, torn := 0, 0, 0, 0
-			for i := 0; i < reads; i++ {
-				out, err := c.read(rt, p)
-				switch {
-				case err == nil:
-					ok++
-					if !c.accept(out) {
-						torn++
-						if torn <= 3 {
-							t.Errorf("read %d returned neither version: %q", i, tgtShort(out))
-						}
-					}
-				case errors.Is(err, errChanged):
-					changed++
-				default:
-					other++
+			})
+		}
+	}
+}
+
+// fxTornRun writes x and y over each other in bursts separated by quiet
+// spells, for cycles cycles, reading without pause meanwhile.
+func fxTornRun(t *testing.T, x, y []byte, cycles int, read func(string) ([]byte, error), accept func([]byte) bool) (ok, changed, other, torn, reads int) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "swap")
+	tgtWrite(t, dir, "swap", x, 0o644)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f, err := os.OpenFile(p, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		i := 0
+		for c := 0; c < cycles; c++ {
+			time.Sleep(3500 * time.Millisecond)
+			for end := time.Now().Add(800 * time.Millisecond); time.Now().Before(end); i++ {
+				src := x
+				if i%2 == 1 {
+					src = y
+				}
+				for off := 0; off < len(src); off += 4096 {
+					_, _ = f.WriteAt(src[off:min(off+4096, len(src))], int64(off))
+					// dd's gap between its two writes, which is what lets a
+					// read take one page of each version.
+					time.Sleep(50 * time.Microsecond)
 				}
 			}
-			close(stop)
-			wg.Wait()
-			t.Logf("%s: ok=%d changed=%d other=%d torn=%d of %d", c.name, ok, changed, other, torn, reads)
-			if torn != 0 {
-				t.Fatalf("%d torn reads", torn)
+		}
+		time.Sleep(3500 * time.Millisecond) // a last quiet spell
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		out, err := read(p)
+		reads++
+		switch {
+		case err == nil:
+			ok++
+			if !accept(out) {
+				torn++
+				if torn <= 3 {
+					t.Errorf("read %d returned neither version: %q", reads, tgtShort(out))
+				}
 			}
-			if ok == 0 {
-				t.Fatal("no read succeeded: the test proves nothing")
-			}
-		})
+		case errors.Is(err, errChanged):
+			changed++
+		default:
+			other++
+		}
 	}
 }
 

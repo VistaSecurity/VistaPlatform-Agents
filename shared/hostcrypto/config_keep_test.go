@@ -219,14 +219,17 @@ var keepExpectedDiff = []struct {
 	// says, so only jvm.options (one option per line) is read through
 	// ReadText.
 	{"java-options", keepOptionAfterFirstWord, "an option after a first word that is not an option (JAVA_OPTS=\"..., a quote): the line is not kept"},
-	// A lone CR cuts its line (FilterConfigText rule 2), so what follows it
-	// never crosses. These two parsers read such a line WHOLE and reject it
-	// for what follows the CR, so the whole file reports nothing while the
-	// cut line reports the directive before the CR. Closing it needs the
-	// parser to cut there too; every other line-mode parser already reads
-	// the line as the filter does.
-	{"apache", keepLoneCR, "a lone CR: the filter cuts the line, the Apache parser rejects the whole line"},
-	{"crypto-policies", keepLoneCR, "a lone CR: the filter cuts the line, the crypto-policies parser rejects the whole line"},
+	// A line holding a lone CR is dropped whole (FilterConfigText rule 2,
+	// the fourth review): what follows the CR never crosses, and the line
+	// can neither start nor continue a continuation. These parsers read such
+	// a line whole and take the directive before the CR (the CR is a blank
+	// to them), so the whole file reports that directive and the filtered
+	// text does not. The Apache and crypto-policies parsers reject such a
+	// line, as the filter does, and need no entry.
+	{"sshd", keepLoneCR, "a lone CR: the filter drops the line, the sshd parser reads the directive before the CR"},
+	{"ssh", keepLoneCR, "a lone CR: the filter drops the line, the ssh parser reads the directive before the CR"},
+	{"haproxy", keepLoneCR, "a lone CR: the filter drops the line, the HAProxy parser reads the directive before the CR"},
+	{"postfix", keepLoneCR, "a lone CR: the filter drops the line, the Postfix parser reads the parameter before the CR"},
 }
 
 // keepLoneCR is a "\r" not followed by "\n".
@@ -804,6 +807,8 @@ func TestKeepSlicesMatchTheParsers(t *testing.T) {
 		{"keepHAProxyBind", keepHAProxyBind, keepUnion(keepCompared(t, "cfgParseHAProxy", "f[0]"), keepCompared(t, "cfgHAServerDefaults.add", "f[0]"))},
 		{"keepKrb5Relations", keepKrb5Relations, keepSwitchCases(t, "cfgKrb5Relation", "k")},
 		{"keepKrb5Includes", keepKrb5Includes, keepCallArgs(t, "cfgParseKrb5", "EqualFold")},
+		{"keepKrb5Sections", keepKrb5Sections, keepCompared(t, "cfgParseKrb5", "section")},
+		{"keepGnuTLSSections", keepGnuTLSSections, keepMinus(keepSwitchCases(t, "cfgParseGnuTLS", "section"), []string{""})},
 		{"keepGnuTLSSystem", keepGnuTLSSystem, keepCompared(t, "cfgParseGnuTLS", "k")},
 		{"keepNSSPolicy", keepNSSPolicy, keepCallArgs(t, "cfgParseNSSPolicy", "EqualFold")},
 	} {
@@ -871,12 +876,12 @@ func TestKeepFixtureTestsAreAllListed(t *testing.T) {
 // its syntax (see the comment at the top of config_keep.go).
 func TestKeepOptionsPerProduct(t *testing.T) {
 	want := map[string]string{
-		"nginx": "@statements", "java": "@backslash @cr", "java-options": "@backslash @cr", "apache": "@backslash",
-		"openssl": "@backslash", "postfix": "@indent", "sshd": "", "ssh": "", "haproxy": "", "krb5": "", "gnutls": "", "crypto-policies": "",
-		"crypto-policies/opensslcnf.config": "@backslash", "crypto-policies/openssl_fips.config": "@backslash",
+		"nginx": "@statements", "java": "@backslash @cr", "java-options": "@backslash @cr", "apache": "@backslash @tags",
+		"openssl": "@anysections @backslash", "postfix": "@indent", "sshd": "", "ssh": "", "haproxy": "", "krb5": "@sections", "gnutls": "@sections",
+		"crypto-policies": "", "crypto-policies/opensslcnf.config": "@anysections @backslash", "crypto-policies/openssl_fips.config": "@anysections @backslash",
 		"crypto-policies/openssl.config": "", "crypto-policies/openssh.config": "@backslash", "crypto-policies/libssh.config": "@backslash",
-		"crypto-policies/opensshserver.config": "@backslash", "crypto-policies/gnutls.config": "", "crypto-policies/java.config": "@backslash @cr",
-		"crypto-policies/javasystem.config": "@backslash @cr", "crypto-policies/nss.config": "", "crypto-policies/krb5.config": "",
+		"crypto-policies/opensshserver.config": "@backslash", "crypto-policies/gnutls.config": "@sections", "crypto-policies/java.config": "@backslash @cr",
+		"crypto-policies/javasystem.config": "@backslash @cr", "crypto-policies/nss.config": "", "crypto-policies/krb5.config": "@sections",
 	}
 	if len(want) != len(configKeepWords) {
 		t.Errorf("%d keys listed here, %d in the table", len(want), len(configKeepWords))
