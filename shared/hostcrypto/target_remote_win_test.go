@@ -419,8 +419,14 @@ func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
 // TestRemoteWindowsListBudget: the listing reports Truncated when the
 // host's time budget stops it, and the budget is below the runner timeout.
 func TestRemoteWindowsListBudget(t *testing.T) {
-	if !strings.Contains(psList, "Stopwatch") || !strings.Contains(psList, "$sw.Elapsed.TotalSeconds -ge $budget") {
+	if !strings.Contains(psList, "Stopwatch") || strings.Count(psList, "$vSw.Elapsed.TotalSeconds -ge $lsBudget") < 2 {
 		t.Fatal("psList has no time budget")
+	}
+	// ReadText's budget: below the 90-second command timeout, checked in
+	// both the line loop and the statement loop, answered "too_large".
+	if !strings.HasPrefix(psReadText, psBudgetLine(remoteWindowsTextBudget)) || remoteWindowsTextBudget >= 90 ||
+		strings.Count(psReadText, "$vSw.Elapsed.TotalSeconds -ge $vBudget) { return [pscustomobject]@{ Status = 'too_large' } }") != 2 {
+		t.Fatal("psReadText has no time budget")
 	}
 	fr := newTgtFakeInputRunner(func([]string, []byte) tgtResult {
 		return tgtResult{stdout: tgtJRaw(`{"Files":[{"Path":"C:\\a.pem","Size":1,"Modified":"2026-01-02T03:04:05Z","IsLink":false,"Target":""}],"Denied":[],"DeniedCount":0,"Unreadable":0,"OverSize":0,"Truncated":true}`)}

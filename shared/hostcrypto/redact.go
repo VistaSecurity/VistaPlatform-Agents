@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"regexp"
 	"strings"
 )
 
@@ -224,26 +225,36 @@ type sshKeyType struct {
 }
 
 // sshKeyTypes are the key types a public key line may declare. A blob must
-// begin with its type's encoded name and be within the length bounds:
-// exact for Ed25519 and each ECDSA curve, a 16384-bit modulus for RSA, and
-// generous but finite for security keys and certificates.
+// begin with its type's encoded name and be within the length bounds, which
+// are as tight as each type allows, because the blob is the one part of a
+// line that crosses whole and a loose bound is room for a payload:
+//
+//   - Ed25519 and each ECDSA curve: exact (the key is fixed-size);
+//   - ssh-rsa: up to an 8192-bit modulus with an exponent of up to eight
+//     bytes (1,400 characters; a 1024-bit key is about 200);
+//   - security keys (sk-*): 300 characters, room for an application string
+//     of about 100 bytes;
+//   - certificates: 4,096 characters, which holds an 8192-bit RSA CA key,
+//     a signature and a few dozen principals.
+//
+// ssh-dss is not listed: the parsers no longer read it, so its bytes would
+// cross only to be refused.
 var sshKeyTypes = func() []sshKeyType {
 	types := []sshKeyType{
 		{name: "ssh-ed25519", minLen: 68, maxLen: 68},
 		{name: "ecdsa-sha2-nistp256", minLen: 140, maxLen: 140},
 		{name: "ecdsa-sha2-nistp384", minLen: 184, maxLen: 184},
 		{name: "ecdsa-sha2-nistp521", minLen: 232, maxLen: 232},
-		{name: "ssh-rsa", minLen: 100, maxLen: 2844},
-		{name: "ssh-dss", minLen: 100, maxLen: 2000},
-		{name: "sk-ssh-ed25519@openssh.com", minLen: 96, maxLen: 600},
-		{name: "sk-ecdsa-sha2-nistp256@openssh.com", minLen: 160, maxLen: 700},
-		{name: "ssh-ed25519-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "ssh-rsa-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "ecdsa-sha2-nistp256-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "ecdsa-sha2-nistp384-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "ecdsa-sha2-nistp521-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "sk-ssh-ed25519-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
-		{name: "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com", minLen: 100, maxLen: 16384},
+		{name: "ssh-rsa", minLen: 100, maxLen: 1400},
+		{name: "sk-ssh-ed25519@openssh.com", minLen: 96, maxLen: 300},
+		{name: "sk-ecdsa-sha2-nistp256@openssh.com", minLen: 160, maxLen: 300},
+		{name: "ssh-ed25519-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "ssh-rsa-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "ecdsa-sha2-nistp256-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "ecdsa-sha2-nistp384-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "ecdsa-sha2-nistp521-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "sk-ssh-ed25519-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
+		{name: "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com", minLen: 100, maxLen: 4096},
 	}
 	for i := range types {
 		raw := binary.BigEndian.AppendUint32(nil, uint32(len(types[i].name)))
@@ -283,26 +294,126 @@ func isSSHBlob(b string) bool {
 	return true
 }
 
-// sshKeyLine finds a genuine OpenSSH public key in a line ("[options] type
-// blob [comment]", authorized_keys or .pub): the first token that names a
-// known type, and the token after it, whose base64 must begin with that
-// type's encoded name and fit its length bounds. It returns "type blob" only:
-// options and comment never.
+func isBlank(c byte) bool { return c == ' ' || c == '\t' }
+
+// sshKeyLine finds a genuine OpenSSH public key in a line: ".pub" form
+// ("type blob [comment]") or authorized_keys form ("options type blob
+// [comment]"). Leading blanks are skipped. When the first field is not a key
+// type it is the options field, which runs to the first blank outside double
+// quotes (a backslash escapes the next byte inside them); a key type must
+// follow it. The blob must begin with that type's encoded name and fit its
+// length bounds. It returns "type blob" only: options and comment never.
 func sshKeyLine(s string) (string, bool) {
-	tok := strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' })
-	for i := 0; i+1 < len(tok); i++ {
-		t, ok := findSSHKeyType(tok[i])
-		if !ok {
-			continue
-		}
-		b := tok[i+1]
-		if isSSHBlob(b) && len(b) >= t.minLen && len(b) <= t.maxLen && strings.HasPrefix(b, t.prefix) {
-			return t.name + " " + b, true
-		}
+	// Every type name holds "ssh-" or "ecdsa-": a line with neither is not a
+	// key line, decided without the option scan below.
+	if !strings.Contains(s, "ssh-") && !strings.Contains(s, "ecdsa-") {
 		return "", false
+	}
+	i := 0
+	for i < len(s) && isBlank(s[i]) {
+		i++
+	}
+	field := func() string {
+		j := i
+		for j < len(s) && !isBlank(s[j]) {
+			j++
+		}
+		f := s[i:j]
+		i = j
+		for i < len(s) && isBlank(s[i]) {
+			i++
+		}
+		return f
+	}
+	start := i
+	typ := field()
+	if _, ok := findSSHKeyType(typ); !ok {
+		// The options field.
+		i = start
+		inQ := false
+		for i < len(s) {
+			c := s[i]
+			if inQ {
+				if c == '\\' && i+1 < len(s) {
+					i += 2
+					continue
+				}
+				if c == '"' {
+					inQ = false
+				}
+			} else {
+				if isBlank(c) {
+					break
+				}
+				if c == '"' {
+					inQ = true
+				}
+			}
+			i++
+		}
+		if inQ {
+			return "", false
+		}
+		for i < len(s) && isBlank(s[i]) {
+			i++
+		}
+		typ = field()
+	}
+	t, ok := findSSHKeyType(typ)
+	if !ok {
+		return "", false
+	}
+	b := field()
+	if isSSHBlob(b) && len(b) >= t.minLen && len(b) <= t.maxLen && strings.HasPrefix(b, t.prefix) {
+		return t.name + " " + b, true
 	}
 	return "", false
 }
+
+// privateUnderPublicLabel reports a public block's FIRST body line that
+// begins as an unencrypted private key does, whatever the label says. Every
+// unencrypted DER private key encoding starts SEQUENCE, INTEGER of one byte
+// (its version): PKCS#1 RSA and DSA (version 0, then an INTEGER), SEC1 EC
+// (version 1, then an OCTET STRING), PKCS#8 and RFC 5958 (version 0 or 1,
+// then the algorithm SEQUENCE), PKCS#12 (version 3). In base64 at offset 0,
+// with the outer length in short form, in one byte (0x81) or in two (0x82),
+// those are:
+//
+//	M..CAQ          30 LL 02 01 0v           (v < 16)
+//	MI[EFGH].AgE    30 81 LL 02 01 vv        (vv < 64)
+//	MII..[AQgw]IB   30 82 LL LL 02 01 vv
+//
+// and an OpenSSH private key's body begins with base64 "openssh-key-v1".
+// Nothing public on the allowlist begins that way (a certificate, request
+// or CRL starts SEQUENCE SEQUENCE; a SubjectPublicKeyInfo SEQUENCE SEQUENCE;
+// an RSA PUBLIC KEY or DH PARAMETERS SEQUENCE INTEGER of 64 bytes or more;
+// named EC PARAMETERS an OID; an SSH2 PUBLIC KEY a length and "ssh-") except
+// explicit EC PARAMETERS, SEQUENCE { INTEGER 1, SEQUENCE { OID
+// 1.2.840.10045.1.x (a field type) ... } }, which privateException lets
+// through in each pair of outer and inner length forms that can occur (the
+// inner SEQUENCE short or 0x81: a field of over 2,000 bits does not exist):
+// no private key structure carries a field-type OID there. The pattern was
+// checked against OpenSSL's explicit parameters for eight curves, prime and
+// binary, and is held by TestPrivateUnderPublicLabel to generated objects.
+//
+// What still passes: an ENCRYPTED PKCS#8 key (SEQUENCE SEQUENCE, like a
+// certificate) and a key whose outer length needs three bytes (over 64 KiB).
+// An encrypted key under a public label crosses as ciphertext.
+func privateUnderPublicLabel(first string) bool {
+	return privateDeny.MatchString(first) && !privateException.MatchString(first)
+}
+
+// The patterns, as POSIX extended regular expressions without interval
+// expressions, so the awk and PowerShell programs use these very strings.
+const (
+	privateDenyRegex      = `^(MII..[AQgw]IB|MI[EFGH].AgE|M..CAQ|b3BlbnNzaC1rZXktdjE)`
+	privateExceptionRegex = `^(M..CAQEw.[AQgw]YHKoZIzj0B|MI[EFGH].AgEBM..GByqGSM49AQ|MI[EFGH].AgEBMI[GH].BgcqhkjOPQE|MII..[AQgw]IBAT..BgcqhkjOPQE|MII..[AQgw]IBATCB.[AQgw]YHKoZIzj0B)`
+)
+
+var (
+	privateDeny      = regexp.MustCompile(privateDenyRegex)
+	privateException = regexp.MustCompile(privateExceptionRegex)
+)
 
 // isPEMBodyLine is 1 to 76 characters of [A-Za-z0-9+/=].
 func isPEMBodyLine(s string) bool {
@@ -329,6 +440,9 @@ func isPEMBodyLine(s string) bool {
 //     off the allowlist refuses the whole file (ok false): such a file is not
 //     one whose public parts can be told apart safely. (Other control bytes
 //     are ordinary bytes: they can never be part of a printed line.)
+//   - A public block whose first body line begins as a private key does
+//     (privateUnderPublicLabel) refuses the whole file: a private key under
+//     a certificate's label is still a private key.
 //   - No public content at all refuses the file.
 //
 // A DER certificate is therefore never readable remotely: it has no PEM
@@ -373,6 +487,9 @@ func publicContent(b []byte) ([]byte, bool) {
 				inBlock = false
 				continue
 			}
+			if len(block) == 1 && privateUnderPublicLabel(s) {
+				return nil, false
+			}
 			if !isPEMBodyLine(s) {
 				blockOK = false
 			}
@@ -399,38 +516,105 @@ const (
 	configNoKeep
 )
 
-// keepSet is the caller's directive allowlist, lower-cased once. A word
-// written with a trailing ";" ("ssl_protocols;") is a directive that runs to
-// the next ";", across lines.
+// The keep OPTIONS. A keep entry that begins with "@" is one of these, never
+// a directive name, and any other "@" entry refuses the read. They say how
+// the product's syntax continues a line or groups statements; without them
+// a line is a line.
+const (
+	// KeepOptStatements reads brace-and-semicolon syntax (nginx) as
+	// statements rather than lines.
+	KeepOptStatements = "@statements"
+	// KeepOptBackslash continues a KEPT line that ends in an odd number of
+	// backslashes onto the next line.
+	KeepOptBackslash = "@backslash"
+	// KeepOptIndent continues a logical line onto every following line that
+	// begins with a blank (Postfix).
+	KeepOptIndent = "@indent"
+	// KeepOptCR ends a line at a lone carriage return (Java properties).
+	KeepOptCR = "@cr"
+)
+
+// Bounds of the rule. A statement or continuation past them is dropped, never
+// returned in part.
+const (
+	// maxStatementBytes and maxStatementLines bound one @statements
+	// statement; a longer one is dropped and scanning resumes at the next
+	// ";" or brace.
+	maxStatementBytes = 16 << 10
+	maxStatementLines = 64
+	// maxContinuation is how many continuation lines one logical line may
+	// have; the rest of it is dropped.
+	maxContinuation = 32
+	// maxBlockDepth is how deep @statements blocks are followed: a block
+	// opened deeper than this is dropped whole.
+	maxBlockDepth = 64
+)
+
+// keepSet is the caller's keep list: directive names, lower-cased once, and
+// options.
 type keepSet struct {
-	words map[string]bool
-	semi  map[string]bool
+	words                             map[string]bool
+	statements, backslash, indent, cr bool
+	badOption                         bool
 }
 
 func newKeepSet(keep []string) keepSet {
-	k := keepSet{words: map[string]bool{}, semi: map[string]bool{}}
+	k := keepSet{words: map[string]bool{}}
 	for _, w := range keep {
 		w = asciiLower(w)
-		semi := strings.HasSuffix(w, ";")
-		w = strings.TrimSuffix(w, ";")
 		if w == "" {
 			continue
 		}
-		k.words[w] = true
-		if semi {
-			k.semi[w] = true
+		if w[0] == '@' {
+			switch w {
+			case KeepOptStatements:
+				k.statements = true
+			case KeepOptBackslash:
+				k.backslash = true
+			case KeepOptIndent:
+				k.indent = true
+			case KeepOptCR:
+				k.cr = true
+			default:
+				k.badOption = true
+			}
+			continue
 		}
+		if !isKeepWord(w) {
+			k.badOption = true
+			continue
+		}
+		k.words[w] = true
 	}
 	return k
 }
 
-// firstWord is a configuration line's directive name: leading blanks
-// removed, a leading "<" (an opening tag) and a leading "-D" (a JVM option)
-// removed, then the longest prefix without a blank, '=', ':', ';', '{' or
-// '}', a trailing '>' removed, lower-cased.
+// isKeepWord is a directive name as a keep list may hold one:
+// [A-Za-z0-9._*+/-]+. keepArg refuses anything else before it is sent.
+func isKeepWord(w string) bool {
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if (!redactClass(c) || c == '=') && c != '.' && c != '_' && c != '-' && c != '*' {
+			return false
+		}
+	}
+	return w != ""
+}
+
+// usable reports a keep list that names at least one directive and holds
+// no unknown option and no entry that is not a directive name.
+func (k keepSet) usable() bool { return len(k.words) > 0 && !k.badOption }
+
+// firstWord is a configuration line's (or statement's) directive name:
+// leading blanks removed, then a leading "<" (an opening tag), "-D" (a JVM
+// option) and "@" (crypto-policies' "@SECLEVEL=") removed in that order,
+// then the longest prefix without a blank, '=', ':', ';', '{' or '}', a
+// trailing '>' removed, lower-cased.
 func firstWord(t string) string {
+	t = strings.TrimLeft(t, " \t")
 	t = strings.TrimPrefix(t, "<")
 	t = strings.TrimPrefix(t, "-D")
+	t = strings.TrimPrefix(t, "@")
 	i := 0
 	for i < len(t) {
 		c := t[i]
@@ -442,35 +626,179 @@ func firstWord(t string) string {
 	return asciiLower(strings.TrimSuffix(t[:i], ">"))
 }
 
-// endsWithBackslash reports a line whose last non-blank byte is '\'.
-func endsWithBackslash(s string) bool {
-	s = strings.TrimRight(s, " \t")
-	return strings.HasSuffix(s, `\`)
+// endsInOddBackslashes reports a line whose last bytes are an odd number of
+// backslashes: one that escapes the line end. Trailing blanks are not
+// skipped: "a \ " does not continue.
+func endsInOddBackslashes(s string) bool {
+	n := 0
+	for i := len(s) - 1; i >= 0 && s[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
+}
+
+// What a lone "\r" (one not before "\n") does to a line.
+type crMode int
+
+const (
+	crCut   crMode = iota // the line ends there and the rest of it is dropped
+	crSplit               // it ends the line (@cr)
+	crKeep                // it stays, as a blank (@statements: nginx reads it so)
+)
+
+// ruleLines splits a file for the rule: a leading UTF-8 byte-order mark is
+// removed; "\n" ends a line, and one "\r" before it is part of the line end.
+// A lone "\r" left inside a line is handled by mode: in line mode it ends
+// the line when @cr is set (Java properties) and otherwise CUTS it, the rest
+// dropped, so bytes some reader takes for two lines never cross as one; in
+// @statements mode it is a blank, as it is to nginx, and the canonical
+// output never holds one. A final empty segment (the file ends in "\n") is
+// not a line. ok is false past maxConfigLines.
+func ruleLines(b []byte, mode crMode) ([]string, bool) {
+	b = bytes.TrimPrefix(b, utf8BOM)
+	var out []string
+	for len(b) > 0 {
+		var seg []byte
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			seg, b = b[:i], b[i+1:]
+		} else {
+			seg, b = b, nil
+		}
+		seg = bytes.TrimSuffix(seg, []byte{'\r'})
+		for {
+			i := bytes.IndexByte(seg, '\r')
+			if i < 0 || mode == crKeep {
+				out = append(out, string(seg))
+				break
+			}
+			out = append(out, string(seg[:i]))
+			if mode == crCut {
+				break
+			}
+			seg = seg[i+1:]
+		}
+		if len(out) > maxConfigLines {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// isCommentLine reports a line (left-trimmed) whose first bytes are "#", "!",
+// ";" or "//".
+func isCommentLine(t string) bool {
+	return t != "" && (t[0] == '#' || t[0] == '!' || t[0] == ';' || strings.HasPrefix(t, "//"))
+}
+
+// isSectionHeader is ^\[[A-Za-z0-9 ._:/-]{1,128}\]$ on a trimmed line.
+func isSectionHeader(tr string) bool {
+	if len(tr) < 3 || len(tr) > 130 || tr[0] != '[' || tr[len(tr)-1] != ']' {
+		return false
+	}
+	for i := 1; i < len(tr)-1; i++ {
+		c := tr[i]
+		if !isASCIIAlnum(c) && strings.IndexByte(" ._:/-", c) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlnum(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+}
+
+func isTagNameByte(c byte) bool {
+	return isASCIIAlnum(c) || c == '_' || c == '.' || c == ':' || c == '-'
+}
+
+// closingTag returns the lower-cased name of a trimmed line that is exactly
+// a closing tag, ^</[A-Za-z0-9_.:-]{1,64}>$.
+func closingTag(tr string) (string, bool) {
+	if len(tr) < 4 || len(tr) > 67 || !strings.HasPrefix(tr, "</") || tr[len(tr)-1] != '>' {
+		return "", false
+	}
+	name := tr[2 : len(tr)-1]
+	for i := 0; i < len(name); i++ {
+		if !isTagNameByte(name[i]) {
+			return "", false
+		}
+	}
+	return asciiLower(name), true
+}
+
+// openingTag returns the lower-cased name of a trimmed line that opens a
+// tag: "<", a letter, up to 64 name bytes in all, then ">" or a blank, and
+// the line ends in ">".
+func openingTag(tr string) (string, bool) {
+	if len(tr) < 3 || tr[0] != '<' || tr[len(tr)-1] != '>' {
+		return "", false
+	}
+	c := tr[1]
+	if !isASCIIAlnum(c) || c >= '0' && c <= '9' {
+		return "", false
+	}
+	i := 1
+	for i < len(tr) && isTagNameByte(tr[i]) {
+		i++
+	}
+	if i-1 > 64 || (tr[i] != '>' && tr[i] != ' ' && tr[i] != '\t') {
+		return "", false
+	}
+	return asciiLower(tr[1:i]), true
 }
 
 // FilterConfigText is [Target.ReadText]'s rule, applied by every target (on
-// the host, for a remote one, by a program that mirrors this function line
-// for line). It returns the lines of b a parser asked for, redacted, and how
-// many redactions it made; ok is false when the file must be refused (not
-// text, an empty keep, or more than 200,000 lines; the targets turn the last
+// the host, for a remote one, by programs that mirror this function: the
+// awk in target_remote_unix.go, the PowerShell in target_remote_win.go). It
+// returns the parts of b a parser asked for, redacted, and how many
+// redactions it made; ok is false when the file must be refused (not text,
+// an unusable keep, or more than 200,000 lines; the targets turn the last
 // into ErrFileTooLarge).
 //
-//  1. Not text — a NUL or 0x01 byte anywhere, or a keystore's magic — is
-//     refused. A leading UTF-8 byte-order mark is removed. "\r\n", "\n" and a
-//     lone "\r" all end a line; every returned line ends in "\n".
-//  2. keep is lower-cased; an entry with a trailing ";" names a directive
-//     that runs to the next ";" (nginx). An empty keep is refused.
-//  3. A line is KEPT when its first word (see firstWord) is in keep; when it
-//     is structure — blank, a "[section]" header, only "{", "}" or "};", or
-//     a closing tag "</...>"; or when it continues a kept line (the kept
-//     line ended with "\", or its directive runs to ";" and the line had
-//     none yet). Comment lines (first non-blank "#", "!", ";" or "//") are
-//     dropped, as is every other line. Opening tags and block openers
-//     ("<VirtualHost ...>", "server {", "Match ...") are ordinary words the
-//     caller must list.
-//  4. Of the kept lines, every PEM block (any label) is dropped and every run
-//     of [RedactRunLength] or more [A-Za-z0-9+/=] is replaced by
-//     [RedactedMarker]; each counts one redaction.
+// keep holds lower-case ASCII directive names, compared with a line's first
+// word without regard to ASCII case, and options, which begin with "@":
+// [KeepOptStatements], [KeepOptBackslash], [KeepOptIndent], [KeepOptCR]. A
+// keep with no name, or with an unknown option, is refused.
+//
+//  1. Not text — a NUL or 0x01 byte anywhere, a UTF-16 byte-order mark, or a
+//     keystore's magic (at the start, or after a UTF-8 byte-order mark) — is
+//     refused. A UTF-8 byte-order mark is removed; a file that is only one
+//     yields nothing.
+//  2. Lines end at "\n" and "\r\n". A lone "\r" ends a line with @cr, is a
+//     blank with @statements, and otherwise cuts its line there, the rest of
+//     the line dropped (ruleLines).
+//  3. Line mode (no @statements). Comment lines (first non-blank "#", "!",
+//     ";" or "//") are dropped. Structure is kept and is strict: a blank
+//     line; a section header ^\[[A-Za-z0-9 ._:/-]{1,128}\]$; a closing tag
+//     ^</[A-Za-z0-9_.:-]{1,64}>$; a lone "}" or "};"; a lone "{" only
+//     directly after a kept line (blank and comment lines between do not
+//     count). Any other line is KEPT when its first word (firstWord) is in
+//     keep, else DROPPED. A dropped line that ends in "{" drops everything
+//     to its matching "}" (a line starting with "}" closes one level, one
+//     ending in "{" opens one, comment lines do not count); a dropped
+//     opening tag ("<Name ...>") drops everything to its matching "</Name>".
+//     There is no continuation without an option. With @backslash a kept
+//     line ending in an odd number of backslashes continues onto the next
+//     line; with @indent a line beginning with a blank continues the
+//     previous logical line, kept iff that was kept, and blank and comment
+//     lines between do not end it. Inside a continuation only "#" starts a
+//     comment line (a Postfix value may begin with "!"); it is dropped. A
+//     logical line has at most 32 continuation lines; the rest are dropped.
+//  4. @statements: the text is read as statements, honouring single and
+//     double quotes (a backslash escapes the quote or a backslash inside
+//     them) and "#" comments, exactly as the nginx parser tokenises: a
+//     statement ends at ";", or at "{" (it opens a block), and "}" closes a
+//     block. A statement is kept iff its first word is in keep; a block
+//     opener likewise, and a dropped opener drops its whole block. A
+//     statement over 16 KiB or 64 lines is dropped. The output is
+//     canonical: one statement per line, its words joined by one blank
+//     (comments and line ends between them gone, a line end inside quotes
+//     a blank), ending in ";"; an opener as "<words> {"; a closer as "}".
+//  5. Of what is kept, every PEM block is dropped and every run of
+//     [RedactRunLength] or more [A-Za-z0-9+/=] is replaced by
+//     [RedactedMarker]; each counts one redaction. Every returned line ends
+//     in "\n".
 //
 // What this does NOT do, stated plainly: a KEPT line's value crosses as
 // written unless it holds a 40-character run. A 24-character password, a
@@ -486,21 +814,27 @@ func FilterConfigText(b []byte, keep []string) (out []byte, redactions int, ok b
 // filterConfig is FilterConfigText with the reason for a refusal.
 func filterConfig(b []byte, keep []string) ([]byte, int, configStatus) {
 	ks := newKeepSet(keep)
-	if len(ks.words) == 0 {
+	if !ks.usable() {
 		return nil, 0, configNoKeep
 	}
 	if textRefused(b) {
 		return nil, 0, configNotText
 	}
-	lines := configLines(b)
-	if len(lines) > maxConfigLines {
+	mode := crCut
+	switch {
+	case ks.statements:
+		mode = crKeep
+	case ks.cr:
+		mode = crSplit
+	}
+	lines, ok := ruleLines(b, mode)
+	if !ok {
 		return nil, 0, configTooManyLines
 	}
 	out := make([]byte, 0, len(b)/4)
 	n := 0
-	cont, contSemi := false, false
 	drop := false
-	keepLine := func(s string) {
+	emit := func(s string) {
 		if drop {
 			if isEndLine(s) {
 				drop = false
@@ -517,42 +851,224 @@ func filterConfig(b []byte, keep []string) ([]byte, int, configStatus) {
 		out = append(out, red...)
 		out = append(out, '\n')
 	}
+	if ks.statements {
+		filterStatements(lines, ks, emit)
+	} else {
+		filterLines(lines, ks, emit)
+	}
+	return out, n, configOK
+}
+
+// filterLines is the line mode of filterConfig (rule 3).
+func filterLines(lines []string, ks keepSet, emit func(string)) {
+	var (
+		dropTag     string // the tag of a dropped tag block
+		dropBrace   bool   // a dropped brace block is open
+		dropDepth   int
+		prevKept    bool // the last line that was neither blank nor a comment was kept by its word
+		bsCont      bool // @backslash: this line continues a kept line
+		contN       int  // continuation lines of the current logical line
+		haveLogical bool // @indent: a logical line has started
+		logicalKept bool
+	)
 	for _, s := range lines {
-		if cont {
-			keepLine(s)
-			if contSemi {
-				cont = !strings.Contains(s, ";")
-			} else {
-				cont = endsWithBackslash(s)
+		t := strings.TrimLeft(s, " \t")
+		if dropBrace || dropTag != "" {
+			if t == "" || isCommentLine(t) {
+				continue
+			}
+			tr := strings.TrimRight(t, " \t")
+			if dropBrace {
+				if tr[0] == '}' {
+					dropDepth--
+				}
+				if tr[len(tr)-1] == '{' {
+					dropDepth++
+				}
+			} else if name, ok := openingTag(tr); ok && name == dropTag {
+				dropDepth++
+			} else if name, ok := closingTag(tr); ok && name == dropTag {
+				dropDepth--
+			}
+			if dropDepth <= 0 {
+				dropBrace, dropTag = false, ""
 			}
 			continue
 		}
-		t := strings.TrimLeft(s, " \t")
+		if bsCont {
+			contN++
+			bsCont = endsInOddBackslashes(s)
+			if contN <= maxContinuation && !strings.HasPrefix(t, "#") {
+				emit(s)
+			}
+			continue
+		}
+		if ks.indent && haveLogical && t != "" && (s[0] == ' ' || s[0] == '\t') {
+			if t[0] == '#' {
+				continue
+			}
+			contN++
+			if logicalKept && contN <= maxContinuation {
+				emit(s)
+			}
+			continue
+		}
 		if t == "" {
-			keepLine(s)
+			emit(s)
 			continue
 		}
-		if strings.HasPrefix(t, "#") || strings.HasPrefix(t, "!") || strings.HasPrefix(t, ";") || strings.HasPrefix(t, "//") {
+		if isCommentLine(t) {
 			continue
 		}
+		haveLogical, logicalKept, contN = true, false, 0
 		tr := strings.TrimRight(t, " \t")
-		if strings.HasPrefix(tr, "[") && strings.HasSuffix(tr, "]") || tr == "{" || tr == "}" || tr == "};" || strings.HasPrefix(t, "</") {
-			keepLine(s)
+		if _, closing := closingTag(tr); closing || isSectionHeader(tr) || tr == "}" || tr == "};" || (tr == "{" && prevKept) {
+			emit(s)
+			prevKept = false
 			continue
 		}
-		w := firstWord(t)
-		if w == "" || !ks.words[w] {
+		if w := firstWord(t); w != "" && ks.words[w] {
+			emit(s)
+			prevKept, logicalKept = true, true
+			bsCont = ks.backslash && endsInOddBackslashes(s)
 			continue
 		}
-		keepLine(s)
-		switch {
-		case endsWithBackslash(s):
-			cont, contSemi = true, false
-		case ks.semi[w] && !strings.Contains(s, ";"):
-			cont, contSemi = true, true
+		prevKept = false
+		if tr[len(tr)-1] == '{' {
+			dropBrace, dropDepth = true, 1
+		} else if name, ok := openingTag(tr); ok {
+			dropTag, dropDepth = name, 1
 		}
 	}
-	return out, n, configOK
+}
+
+// filterStatements is the @statements mode of filterConfig (rule 4). The
+// tokens are those of the nginx parser (cfgNgxTokens): blanks (a lone "\r"
+// among them) and line ends
+// separate words; "#" at the start of a token comments to the end of the
+// line; a quote at the start of a token opens a quoted word, in which a
+// backslash before the quote or a backslash is an escape; inside a word, "{"
+// after "$" opens a "${...}" that runs to "}" or the line end.
+func filterStatements(lines []string, ks keepSet, emit func(string)) {
+	text := strings.Join(lines, "\n") + "\n"
+	var buf []byte
+	started, sep, overlong := false, false, false
+	nl, depth, dropAt := 0, 0, 0
+	reset := func() {
+		buf = buf[:0]
+		started, sep, overlong, nl = false, false, false, 0
+	}
+	add := func(tok string, lineEnds int) {
+		if overlong {
+			return
+		}
+		if started && sep {
+			buf = append(buf, ' ')
+		}
+		buf = append(buf, tok...)
+		started, sep = true, false
+		nl += lineEnds
+		if len(buf) > maxStatementBytes || nl >= maxStatementLines {
+			overlong, buf = true, buf[:0]
+		}
+	}
+	kept := func() bool {
+		if overlong || !started || dropAt != 0 {
+			return false
+		}
+		w := firstWord(string(buf))
+		return w != "" && ks.words[w]
+	}
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch c {
+		case ' ', '\t', '\f', '\v', '\r':
+			sep = true
+			i++
+		case '\n':
+			sep = true
+			if started && !overlong {
+				nl++
+				if nl >= maxStatementLines {
+					overlong, buf = true, buf[:0]
+				}
+			}
+			i++
+		case ';':
+			if kept() {
+				emit(string(buf) + ";")
+			}
+			reset()
+			i++
+		case '{':
+			depth++
+			switch {
+			case kept() && depth <= maxBlockDepth:
+				emit(string(buf) + " {")
+			case dropAt == 0:
+				dropAt = depth
+			}
+			reset()
+			i++
+		case '}':
+			reset()
+			if depth == 0 {
+				emit("}")
+			} else {
+				if dropAt == 0 {
+					emit("}")
+				}
+				if dropAt == depth {
+					dropAt = 0
+				}
+				depth--
+			}
+			i++
+		case '#':
+			for i < len(text) && text[i] != '\n' {
+				i++
+			}
+			sep = true
+		case '"', '\'':
+			j := i + 1
+			for j < len(text) && text[j] != c {
+				if text[j] == '\\' && j+1 < len(text) && (text[j+1] == c || text[j+1] == '\\') {
+					j++
+				}
+				j++
+			}
+			if j < len(text) {
+				j++
+			}
+			tok := text[i:j]
+			ends := strings.Count(tok, "\n")
+			add(strings.NewReplacer("\n", " ", "\r", " ").Replace(tok), ends)
+			i = j
+		default:
+			j := i
+			for j < len(text) {
+				d := text[j]
+				if d == ' ' || d == '\t' || d == '\f' || d == '\v' || d == '\r' || d == '\n' || d == ';' || d == '}' {
+					break
+				}
+				if d == '{' {
+					if j > i && text[j-1] == '$' {
+						for j < len(text) && text[j] != '}' && text[j] != '\n' {
+							j++
+						}
+						if j < len(text) && text[j] == '}' {
+							j++
+						}
+						continue
+					}
+					break
+				}
+				j++
+			}
+			add(text[i:j], 0)
+			i = j
+		}
+	}
 }
 
 // inspection is what the public rule learns from a window of a file. The
@@ -676,7 +1192,20 @@ func keystoreMagic(m []byte) bool {
 
 // textRefused reports a file that is not text: a NUL or 0x01 byte anywhere
 // (0x01 because the remote programs see a NUL as 0x01: `tr` maps it so that
-// every awk sees it the same way), or a keystore's magic.
+// every awk sees it the same way), a UTF-16 byte-order mark, or a keystore's
+// magic at the start or after a UTF-8 byte-order mark.
 func textRefused(b []byte) bool {
-	return bytes.IndexByte(b, 0) >= 0 || bytes.IndexByte(b, 1) >= 0 || keystoreMagic(b[:min(len(b), MagicBytes)])
+	if bytes.IndexByte(b, 0) >= 0 || bytes.IndexByte(b, 1) >= 0 {
+		return true
+	}
+	if bytes.HasPrefix(b, []byte{0xFF, 0xFE}) || bytes.HasPrefix(b, []byte{0xFE, 0xFF}) {
+		return true
+	}
+	if keystoreMagic(b[:min(len(b), MagicBytes)]) {
+		return true
+	}
+	if r, ok := bytes.CutPrefix(b, utf8BOM); ok && keystoreMagic(r[:min(len(r), MagicBytes)]) {
+		return true
+	}
+	return false
 }

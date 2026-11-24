@@ -29,65 +29,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// TestFilterConfigTextRules is the rule of ReadText, case by case.
-func TestFilterConfigTextRules(t *testing.T) {
-	q := strings.Repeat("Q", RedactRunLength)
-	b64u43 := "dGhpcy1pcy1hLXRlc3Qtc2VjcmV0LXdpdGgtZGFzaGV_"[:43]
-	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-	ghp := "ghp_" + strings.Repeat("aB3", 12)
-	akia := "AKIAABCDEFGHIJKLMNOP"
-	hexc := "3a:4f:9b:00:12:7e:aa:bc:de:f0:11:22:33:44:55:66"
-	cases := []struct {
-		name string
-		in   string
-		keep []string
-		out  string
-		n    int
-		ok   bool
-	}{
-		{"kept and dropped", "Ciphers aes256-gcm@openssh.com\npassword = hunter2-Secret!\n", []string{"ciphers"}, "Ciphers aes256-gcm@openssh.com\n", 0, true},
-		{"case-insensitive keep", "SSLProtocol all\n", []string{"sslprotocol"}, "SSLProtocol all\n", 0, true},
-		{"secrets on dropped lines are gone",
-			"token = " + jwt + "\nwg = " + b64u43 + "\nghp = " + ghp + "\naws = " + akia + "\nmac = " + hexc + "\nprotocol = TLSv1.2\n",
-			[]string{"protocol"}, "protocol = TLSv1.2\n", 0, true},
-		{"secrets on a KEPT line cross unless a run (the parser's responsibility)",
-			"token = " + jwt + "\nmac " + hexc + "\nkey = " + q + "\n",
-			[]string{"token", "mac", "key"}, "token = " + jwt + "\nmac " + hexc + "\nkey = " + RedactedMarker + "\n", 1, true},
-		{"structure", "[Interface]\n\n  \n{\n}\n};\n</VirtualHost>\nPrivateKey = x\n", []string{"address"}, "[Interface]\n\n  \n{\n}\n};\n</VirtualHost>\n", 0, true},
-		{"comments dropped even with a keep word", "# Ciphers x\n; Ciphers y\n! Ciphers z\n// Ciphers w\nCiphers v\n", []string{"ciphers"}, "Ciphers v\n", 0, true},
-		{"opening tag is a word", "<VirtualHost *:443>\nSSLCertificateFile /a\nSSLPassPhraseDialog exec:/x\n</VirtualHost>\n", []string{"virtualhost", "sslcertificatefile"}, "<VirtualHost *:443>\nSSLCertificateFile /a\n</VirtualHost>\n", 0, true},
-		{"jvm option", "-Djavax.net.ssl.keyStore=/a.jks\n-Djavax.net.ssl.keyStorePassword=changeit\n", []string{"javax.net.ssl.keystore"}, "-Djavax.net.ssl.keyStore=/a.jks\n", 0, true},
-		{"yaml colon", "client-key-data: " + q + "x\nserver: https://k\n", []string{"server"}, "server: https://k\n", 0, true},
-		{"semicolon directive continues", "ssl_ciphers\n  ECDHE-RSA-AES128-GCM-SHA256:\n  ECDHE-ECDSA-AES128;\nssl_password_file /x;\n", []string{"ssl_ciphers;"}, "ssl_ciphers\n  ECDHE-RSA-AES128-GCM-SHA256:\n  ECDHE-ECDSA-AES128;\n", 0, true},
-		{"without ; the word does not continue", "ssl_ciphers\n  ECDHE-RSA;\n", []string{"ssl_ciphers"}, "ssl_ciphers\n", 0, true},
-		{"backslash continues", "Ciphers a,\\\n  b,\\\n  c\nPasswordX y\n", []string{"ciphers"}, "Ciphers a,\\\n  b,\\\n  c\n", 0, true},
-		{"PEM on kept lines dropped", "cert = \\\n-----BEGIN CERTIFICATE-----\\\nMIIB\\\n-----END CERTIFICATE-----\\\nx\n", []string{"cert"}, "cert = \\\nx\n", 1, true},
-		{"line ends", "a 1\r\nb 2\rc 3\nd 4", []string{"a", "b", "c", "d"}, "a 1\nb 2\nc 3\nd 4\n", 0, true},
-		{"bom stripped", "\xef\xbb\xbfa 1\n", []string{"a"}, "a 1\n", 0, true},
-		{"run at 39 kept, 40 redacted", "a " + q[:39] + "\na " + q + "\n", []string{"a"}, "a " + q[:39] + "\na " + RedactedMarker + "\n", 1, true},
-		{"latin-1 bytes", "a caf\xe9 \xff\n", []string{"a"}, "a caf\xe9 \xff\n", 0, true},
-		{"empty file", "", []string{"a"}, "", 0, true},
-		{"empty keep refused", "a 1\n", nil, "", 0, false},
-		{"only empty keep words refused", "a 1\n", []string{"", ";"}, "", 0, false},
-		{"NUL refused", "a 1\n\x00", []string{"a"}, "", 0, false},
-		{"0x01 refused", "a \x01\n", []string{"a"}, "", 0, false},
-		{"keystore magic refused", "\xfe\xed\xfe\xedtext\n", []string{"text"}, "", 0, false},
-	}
-	for _, tc := range cases {
-		out, n, ok := FilterConfigText([]byte(tc.in), tc.keep)
-		if ok != tc.ok || (ok && (string(out) != tc.out || n != tc.n)) {
-			t.Errorf("%s: got %q (%d, %v), want %q (%d, %v)", tc.name, out, n, ok, tc.out, tc.n, tc.ok)
-		}
-	}
-	many := strings.Repeat("a\n", maxConfigLines+1)
-	if _, _, st := filterConfig([]byte(many), []string{"a"}); st != configTooManyLines {
-		t.Fatalf("line bound: %v", st)
-	}
-	if _, _, st := filterConfig([]byte(strings.Repeat("a\n", maxConfigLines)), []string{"a"}); st != configOK {
-		t.Fatalf("at the line bound: %v", st)
-	}
-}
-
 // tgtReview is the reviewer's corpus (review-core-2/gen.py), regenerated in
 // the test with fresh keys: nothing of it is committed.
 type tgtReview struct {
@@ -302,7 +243,7 @@ func tgtRandom(t *testing.T, n int) []byte {
 // tgtRealisticKeep is what configuration parsers list: names, paths and
 // policy, never credentials.
 var tgtRealisticKeep = []string{"address", "listenport", "allowedips", "server", "apiversion", "kind",
-	"ssl_protocols;", "ssl_ciphers;", "ciphers", "kexalgorithms", "macs", "hostkey", "protocol", "minprotocol",
+	"ssl_protocols", "ssl_ciphers", "ciphers", "kexalgorithms", "macs", "hostkey", "protocol", "minprotocol",
 	"cipherstring", "jdk.tls.disabledalgorithms", "javax.net.ssl.keystore", "sslprotocol", "sslciphersuite"}
 
 // tgtBroadKeep keeps the secret-bearing lines too, to exercise kept-line
@@ -450,10 +391,24 @@ func (r tgtPathRunner) ReadFile(ctx context.Context, p string) ([]byte, error) {
 // BWK awk of macOS when that is absent).
 func tgtAwks(t *testing.T) map[string]hostinventory.Runner {
 	runners := map[string]hostinventory.Runner{"system awk": hostinventory.NewLocalRunner()}
+	// The same binary under several names (nawk and awk are often mawk) is
+	// run once.
+	seen := map[string]bool{}
+	if sys, err := exec.LookPath("awk"); err == nil {
+		if r, err := filepath.EvalSymlinks(sys); err == nil {
+			seen[r] = true
+		}
+	}
 	for _, impl := range []string{"busybox", "original-awk", "nawk", "gawk", "mawk"} {
 		bin, err := exec.LookPath(impl)
 		if err != nil {
 			continue
+		}
+		if r, err := filepath.EvalSymlinks(bin); err == nil {
+			if seen[r] {
+				continue
+			}
+			seen[r] = true
 		}
 		dir := t.TempDir()
 		if impl == "busybox" {
@@ -555,7 +510,7 @@ func TestRemoteParity(t *testing.T) {
 func TestRemoteReadStructure(t *testing.T) {
 	for name, script := range map[string]string{"read": readScript, "text": readTextScript} {
 		body := strings.TrimPrefix(script, readPrelude)
-		if strings.Count(body, "<&3") != 1 || strings.Count(script, "<&3") != 2 {
+		if strings.Count(body, `head -c "$size" <&3`) != 1 || strings.Count(script, "head -c") != 2 {
 			t.Errorf("%s: fd 3 is read other than once", name)
 		}
 		for _, w := range []string{"cat ", "$F", "\"$p\"", "tail", "repin"} {
@@ -565,6 +520,12 @@ func TestRemoteReadStructure(t *testing.T) {
 		}
 		if !strings.Contains(body, "| awk -v mode=") && !strings.Contains(body, "awk -v mode=") {
 			t.Errorf("%s: no awk", name)
+		}
+		// What awk decided is held, the file pinned again, and printed only
+		// when the pin is unchanged.
+		if !strings.HasSuffix(script, readRepin) || !strings.Contains(body, "out=$(") ||
+			strings.Index(readRepin, `if [ "$pin2" != "$pin" ]; then exit 9; fi`) > strings.Index(readRepin, `printf '%s' "$out"`) {
+			t.Errorf("%s: the output is not held until the second pin", name)
 		}
 	}
 	for _, mode := range []string{"mode == \"public\"", "mode == \"text\""} {

@@ -102,7 +102,14 @@ func sshKeyTable() string {
 //	text      buffer, then print the kept, redacted lines and the count on
 //	          stderr, or nothing and exit 8 (not text) or 7 (too many lines)
 //	          (filterConfig; the keep words come from ENVIRON["HC_KEEP"], so
-//	          awk -v never processes an escape in them)
+//	          awk -v never processes an escape in them). The shell appends
+//	          one "\n" to the file, so the last record is always the file's
+//	          last segment, and it is a line only when it is not empty: that
+//	          is how awk tells "x" from "x\n" and a file that is only a
+//	          byte-order mark from one that is a mark and a line end.
+//	          @statements splits each record at the bytes that matter to the
+//	          tokeniser (gsub then split, linear in the record) rather than
+//	          walking it byte by byte.
 //
 // In public and text modes NOTHING is printed before END: what is printed is
 // what was decided on, from the one read the shell gave it.
@@ -118,15 +125,26 @@ function parsebegin(s,   n, l) {
   return 1
 }
 function namespriv(s,   u) { u = toupper(s); return index(u, "PRIVATE") || index(u, "SECRET") || index(u, "KEY") }
-function sshkey(s,   n, T, i, t, b) {
-  n = split(s, T, /[ \t]+/)
-  for (i = 1; i < n; i++) {
-    t = T[i]
-    if (!(t in KMIN)) continue
-    b = T[i + 1]
-    if (b ~ /^[A-Za-z0-9+\/]+=*$/ && length(b) >= KMIN[t] && length(b) <= KMAX[t] && substr(b, 1, length(KP[t])) == KP[t]) return t " " b
-    return ""
+function field1(s,   t) { t = s; sub(/[ \t].*$/, "", t); return t }
+function sshkey(s,   r, t, b, n, i, c, q) {
+  if (!index(s, "ssh-") && !index(s, "ecdsa-")) return ""
+  r = s; sub(/^[ \t]+/, "", r)
+  t = field1(r)
+  if (!(t in KMIN)) {
+    n = length(r); q = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(r, i, 1)
+      if (q) { if (c == "\\" && i < n) { i++; continue }; if (c == "\"") q = 0 }
+      else { if (c == " " || c == "\t") break; if (c == "\"") q = 1 }
+    }
+    if (q) return ""
+    r = substr(r, i); sub(/^[ \t]+/, "", r)
+    t = field1(r)
+    if (!(t in KMIN)) return ""
   }
+  r = substr(r, length(t) + 1); sub(/^[ \t]+/, "", r)
+  b = field1(r)
+  if (b ~ /^[A-Za-z0-9+\/]+=*$/ && length(b) >= KMIN[t] && length(b) <= KMAX[t] && substr(b, 1, length(KP[t])) == KP[t]) return t " " b
   return ""
 }
 function redact(s,   o) {
@@ -135,57 +153,150 @@ function redact(s,   o) {
   return o s
 }
 function bodyline(s) { return length(s) >= 1 && length(s) <= ` + strconv.Itoa(maxPEMBodyLine) + ` && s ~ /^[A-Za-z0-9+\/=]+$/ }
-function keepl(s) {
+function emit(s) {
   if (DROP) { if (isend(s)) DROP = 0; return }
   if (isbegin(s)) { NRED++; if (!isend(s)) DROP = 1; return }
   OUT[++NO] = redact(s)
 }
 function fw(t,   i, c) {
+  sub(/^[ \t]+/, "", t)
   if (substr(t, 1, 1) == "<") t = substr(t, 2)
   if (substr(t, 1, 2) == "-D") t = substr(t, 3)
+  if (substr(t, 1, 1) == "@") t = substr(t, 2)
   for (i = 1; i <= length(t); i++) { c = substr(t, i, 1); if (c == " " || c == "\t" || c == "=" || c == ":" || c == ";" || c == "{" || c == "}") break }
   t = substr(t, 1, i - 1)
   if (substr(t, length(t)) == ">") t = substr(t, 1, length(t) - 1)
   return tolower(t)
 }
-function bslash(s,   t) { t = s; sub(/[ \t]+$/, "", t); return substr(t, length(t)) == "\\" }
-function cline(s,   t, tr, w) {
-  NL++
-  if (NL > ` + strconv.Itoa(maxConfigLines) + `) TOOMANY = 1
-  if (BAD || TOOMANY) return
-  if (CONT) { keepl(s); if (CSEMI) CONT = !index(s, ";"); else CONT = bslash(s); return }
-  t = s; sub(/^[ \t]+/, "", t)
-  if (t == "") { keepl(s); return }
-  if (substr(t, 1, 1) == "#" || substr(t, 1, 1) == "!" || substr(t, 1, 1) == ";" || substr(t, 1, 2) == "//") return
-  tr = t; sub(/[ \t]+$/, "", tr)
-  if ((substr(tr, 1, 1) == "[" && substr(tr, length(tr)) == "]") || tr == "{" || tr == "}" || tr == "};" || substr(t, 1, 2) == "</") { keepl(s); return }
-  w = fw(t)
-  if (w == "" || !(w in K)) return
-  keepl(s)
-  if (bslash(s)) { CONT = 1; CSEMI = 0 } else if ((w in S) && !index(s, ";")) { CONT = 1; CSEMI = 1 }
+function oddbs(s) { return match(s, /\\+$/) && RLENGTH % 2 == 1 }
+function iscomment(t,   c) { c = substr(t, 1, 1); return c == "#" || c == "!" || c == ";" || substr(t, 1, 2) == "//" }
+function ishdr(t) { return length(t) >= 3 && length(t) <= 130 && t ~ /^\[[A-Za-z0-9 ._:\/-]+\]$/ }
+function closetag(t) { if (length(t) >= 4 && length(t) <= 67 && t ~ /^<\/[A-Za-z0-9_.:-]+>$/) return tolower(substr(t, 3, length(t) - 3)); return "" }
+function opentag(t,   c) {
+  if (length(t) < 3 || t !~ /^<[A-Za-z]/ || substr(t, length(t)) != ">") return ""
+  match(t, /^<[A-Za-z0-9_.:-]+/)
+  if (RLENGTH - 1 > 64) return ""
+  c = substr(t, RLENGTH + 1, 1)
+  if (c != ">" && c != " " && c != "\t") return ""
+  return tolower(substr(t, 2, RLENGTH - 1))
 }
+function lline(s,   t, tr, w, nm) {
+  t = s; sub(/^[ \t]+/, "", t)
+  if (DROPB || DROPT != "") {
+    if (t == "" || iscomment(t)) return
+    tr = t; sub(/[ \t]+$/, "", tr)
+    if (DROPB) { if (substr(tr, 1, 1) == "}") DDEPTH--; if (substr(tr, length(tr)) == "{") DDEPTH++ }
+    else if ((nm = opentag(tr)) != "" && nm == DROPT) DDEPTH++
+    else if ((nm = closetag(tr)) != "" && nm == DROPT) DDEPTH--
+    if (DDEPTH <= 0) { DROPB = 0; DROPT = "" }
+    return
+  }
+  if (BSC) { CONTN++; BSC = oddbs(s); if (CONTN <= ` + strconv.Itoa(maxContinuation) + ` && substr(t, 1, 1) != "#") emit(s); return }
+  if (OPTIND && HAVEL && t != "" && (substr(s, 1, 1) == " " || substr(s, 1, 1) == "\t")) {
+    if (substr(t, 1, 1) == "#") return
+    CONTN++
+    if (LKEPT && CONTN <= ` + strconv.Itoa(maxContinuation) + `) emit(s)
+    return
+  }
+  if (t == "") { emit(s); return }
+  if (iscomment(t)) return
+  HAVEL = 1; LKEPT = 0; CONTN = 0
+  tr = t; sub(/[ \t]+$/, "", tr)
+  if (closetag(tr) != "" || ishdr(tr) || tr == "}" || tr == "};" || (tr == "{" && PREVK)) { emit(s); PREVK = 0; return }
+  w = fw(t)
+  if (w != "" && (w in K)) { emit(s); PREVK = 1; LKEPT = 1; BSC = OPTBS && oddbs(s); return }
+  PREVK = 0
+  if (substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
+  else if ((nm = opentag(tr)) != "") { DROPT = nm; DDEPTH = 1 }
+}
+function stadd(tok, ends, over) {
+  if (OVER) return
+  if (over) { OVER = 1; STARTED = 1; BUF = ""; return }
+  if (STARTED && SEP) BUF = BUF " "
+  BUF = BUF tok; STARTED = 1; SEP = 0; STNL += ends
+  if (length(BUF) > ` + strconv.Itoa(maxStatementBytes) + ` || STNL >= ` + strconv.Itoa(maxStatementLines) + `) { OVER = 1; BUF = "" }
+}
+function stkept(   w) { if (OVER || !STARTED || DROPAT) return 0; w = fw(BUF); return w != "" && (w in K) }
+function streset() { BUF = ""; STARTED = 0; SEP = 0; OVER = 0; STNL = 0 }
+function wadd(e) { INW = 1; WLAST = substr(e, length(e)); if (!WOVER) { W = W e; if (length(W) > ` + strconv.Itoa(maxStatementBytes) + `) WOVER = 1 } }
+function wflush() { if (INW) { stadd(W, 0, WOVER); W = ""; INW = 0; WOVER = 0 } }
+function qadd(e) { if (!QOVER) { QTOK = QTOK e; if (length(QTOK) > ` + strconv.Itoa(maxStatementBytes) + `) QOVER = 1 } }
+function sttok(e) {
+  if (INCOM) { if (e != "\n") return; INCOM = 0 }
+  if (INQ != "") {
+    if (QESC) { QESC = 0; if (e == INQ || e == "\\") { qadd(e); return } }
+    if (e == "\\") { qadd(e); QESC = 1; return }
+    if (e == INQ) { qadd(e); INQ = ""; stadd(QTOK, QNL, QOVER); return }
+    if (e == "\n") { qadd(" "); QNL++; return }
+    if (e == "\r") { qadd(" "); return }
+    qadd(e); return
+  }
+  if (DOLLAR) { if (e == "}") { wadd(e); DOLLAR = 0; return }; if (e != "\n") { wadd(e); return }; DOLLAR = 0 }
+  if (e == "\n") { wflush(); SEP = 1; if (STARTED && !OVER) { STNL++; if (STNL >= ` + strconv.Itoa(maxStatementLines) + `) { OVER = 1; BUF = "" } }; return }
+  if (e == " " || e == "\t" || e == "\014" || e == "\013" || e == "\r") { wflush(); SEP = 1; return }
+  if (e == ";") { wflush(); if (stkept()) emit(BUF ";"); streset(); return }
+  if (e == "{") {
+    if (INW && WLAST == "$") { wadd(e); DOLLAR = 1; return }
+    wflush(); DEPTH++
+    if (stkept() && DEPTH <= ` + strconv.Itoa(maxBlockDepth) + `) emit(BUF " {"); else if (!DROPAT) DROPAT = DEPTH
+    streset(); return
+  }
+  if (e == "}") { wflush(); streset(); if (DEPTH == 0) emit("}"); else { if (!DROPAT) emit("}"); if (DROPAT == DEPTH) DROPAT = 0; DEPTH-- }; return }
+  if (!INW && e == "#") { INCOM = 1; SEP = 1; return }
+  if (!INW && (e == "\"" || e == Q1)) { INQ = e; QTOK = e; QNL = 0; QESC = 0; QOVER = 0; return }
+  wadd(e)
+}
+function stline(s,   n, A, k) {
+  gsub(SPECIAL, "\n&\n", s)
+  n = split(s, A, "\n")
+  for (k = 1; k <= n; k++) if (A[k] != "") sttok(A[k])
+  sttok("\n")
+}
+function tline(s) {
+  if (++NLINES > ` + strconv.Itoa(maxConfigLines) + `) { TOOMANY = 1; return }
+  if (OPTST) stline(s); else lline(s)
+}
+function tproc(r,   n, P, i) {
+  if (BAD || TOOMANY) return
+  if (substr(r, length(r)) == "\r") r = substr(r, 1, length(r) - 1)
+  if (OPTST || !index(r, "\r")) { tline(r); return }
+  if (!OPTCR) { tline(substr(r, 1, index(r, "\r") - 1)); return }
+  n = split(r, P, "\r")
+  for (i = 1; i <= n; i++) tline(P[i])
+}
+function magic(r) { return substr(r, 1, 4) == "\376\355\376\355" || substr(r, 1, 4) == "\316\316\316\316" || substr(r, 1, 2) == "\005\002" || substr(r, 1, 2) == "\005\001" || substr(r, 1, 8) == "SQLite f" }
 BEGIN {
+  Q1 = sprintf("%c", 39)
+  SPECIAL = "[ \t\014\013\r;{}#\"" Q1 "\\\\]"
   RUN = ""
   for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
   RUN = RUN "[A-Za-z0-9+/=]*"
+  DENY = "` + privateDenyRegex + `"
+  DENYX = "` + privateExceptionRegex + `"
   na = split("` + strings.Join(publicPEMLabels, "|") + `", AL, "|")
   for (k = 1; k <= na; k++) ALLOW[AL[k]] = 1
   nt = split("` + sshKeyTable() + `", TT, ";")
   for (k = 1; k <= nt; k++) { split(TT[k], F, "|"); KMIN[F[1]] = F[2] + 0; KMAX[F[1]] = F[3] + 0; KP[F[1]] = F[4] }
   nk = split(ENVIRON["HC_KEEP"], KW, " ")
-  for (k = 1; k <= nk; k++) { w = tolower(KW[k]); sm = 0; if (substr(w, length(w)) == ";") { w = substr(w, 1, length(w) - 1); sm = 1 }; if (w != "") { K[w] = 1; if (sm) S[w] = 1 } }
+  for (k = 1; k <= nk; k++) {
+    w = tolower(KW[k])
+    if (w == "` + KeepOptStatements + `") OPTST = 1
+    else if (w == "` + KeepOptBackslash + `") OPTBS = 1
+    else if (w == "` + KeepOptIndent + `") OPTIND = 1
+    else if (w == "` + KeepOptCR + `") OPTCR = 1
+    else if (substr(w, 1, 1) == "@") BADOPT = 1
+    else if (w != "") { K[w] = 1; NK++ }
+  }
 }
 mode == "text" {
   r = $0
   if (NR == 1) {
-    if (substr(r, 1, 4) == "\376\355\376\355" || substr(r, 1, 4) == "\316\316\316\316" || substr(r, 1, 2) == "\005\002" || substr(r, 1, 2) == "\005\001" || substr(r, 1, 8) == "SQLite f") BAD = 1
-    if (substr(r, 1, 3) == "\357\273\277") r = substr(r, 4)
+    if (magic(r) || substr(r, 1, 2) == "\377\376" || substr(r, 1, 2) == "\376\377") BAD = 1
+    if (substr(r, 1, 3) == "\357\273\277") { r = substr(r, 4); if (magic(r)) BAD = 1 }
   }
   if (index(r, "\001")) BAD = 1
-  if (substr(r, length(r)) == "\r") r = substr(r, 1, length(r) - 1)
-  if (r == "") { cline(""); next }
-  n = split(r, P, "\r")
-  for (i = 1; i <= n; i++) cline(P[i])
+  if (HAVE) tproc(PREV)
+  PREV = r; HAVE = 1
   next
 }
 {
@@ -198,13 +309,14 @@ mode == "public" {
   if (isbegin(s)) {
     INB = 0
     if (!parsebegin(s) || !(LAB in ALLOW)) { POISON = 1; next }
-    INB = 1; BOK = 1; BN = 0; BB[++BN] = s
+    INB = 1; BOK = 1; BN = 0; BB[++BN] = s; FIRST = 1
     if (substr(s, 1, 5) == "-----") BE = "-----END " LAB "-----"; else BE = "---- END " LAB " ----"
     next
   }
   if (INB) {
     if (s == BE) { BB[++BN] = s; if (BOK) for (i = 1; i <= BN; i++) PUB[++NP] = BB[i]; INB = 0; next }
     if (isend(s)) { INB = 0; next }
+    if (FIRST) { FIRST = 0; if (s ~ DENY && s !~ DENYX) POISON = 1 }
     if (!bodyline(s)) BOK = 0
     BB[++BN] = s
     next
@@ -232,7 +344,8 @@ mode == "identify" {
 }
 END {
   if (mode == "text") {
-    if (BAD) exit 8
+    if (HAVE && PREV != "") tproc(PREV)
+    if (BAD || BADOPT || !NK) exit 8
     if (TOOMANY) exit 7
     for (i = 1; i <= NO; i++) print OUT[i]
     print "vista-redactions:" (NRED + 0) > "/dev/stderr"
@@ -251,19 +364,27 @@ END {
 // platform, $3 the byte bound. It refuses with an exit code rather than a
 // message (3 missing, 4 permission denied, 5 directory, 6 not a regular file,
 // 10 cannot pin, 11 could not open for another reason), then opens the file
-// ONCE, on fd 3, and takes its identity from that descriptor:
+// ONCE, on fd 3, and takes its identity (the PIN) from that descriptor:
 //
-//   - Linux: stat of /proc/self/fd/3, the open file itself.
+//   - Linux: stat of /proc/self/fd/3, the open file itself: device, inode,
+//     size, modification and change times with nanoseconds (%y, %z), type.
 //   - macOS: `stat -f ... <&3`, which BSD stat answers with fstat of its
-//     standard input. (stat of /dev/fd/3 answers for the devfs node, not the
-//     file, and a second open of /dev/fd/3 shares fd 3's offset.)
+//     standard input: device, inode, size, modification and change times as
+//     seconds with nanoseconds (%Fm, %Fc; whole seconds if that stat lacks
+//     the F format), mode. (stat of /dev/fd/3 answers for the devfs node,
+//     not the file, and a second open of /dev/fd/3 shares fd 3's offset.)
 //
-// The size and type come from that identity, so they describe the file that
-// will be read. ReadFile and ReadText then read fd 3 exactly ONCE, from
-// offset 0 (`head -c "$size" <&3`), into an awk program that decides and
-// prints from that one buffer: what crosses is what was decided on, whatever
-// happens to the path or the file meanwhile. A file rewritten in place while
-// it is read gives awk a mixture, which it judges as it would any file.
+// The size and type come from the pin, so they describe the file that will
+// be read. ReadFile and ReadText then read fd 3 exactly ONCE, from offset 0
+// (`head -c "$size" <&3`), into an awk program that decides from that one
+// buffer; the shell holds what awk decided, takes the pin AGAIN
+// (readRepin), and prints only if nothing changed, else exits 9 having
+// printed nothing. A file rewritten in place while it is read (same inode,
+// same size: `dd conv=notrunc`) gives awk a mixture of two versions, and a
+// mixture can join a kept word of one version to a secret of the other; the
+// second pin catches the rewrite by its times. What it cannot catch is a
+// rewrite whose times the file system does not move (a write in the same
+// clock tick as the one before the pin, on a kernel with coarse timestamps).
 //
 // "Permission denied" is reported only when the host's own error says so: a
 // path that vanishes during a swap is not a permission problem.
@@ -286,10 +407,12 @@ if [ ! -r "$p" ]; then
 fi
 exec 3< "$p" || exit 11
 if [ "$plat" = darwin ]; then
-  pin=$(stat -f '%d:%i:%z:%m:%p' <&3 2>/dev/null)
+  fmt='%d:%i:%z:%Fm:%Fc:%p'
+  pin=$(stat -f "$fmt" <&3 2>/dev/null) || { fmt='%d:%i:%z:%m:%c:%p'; pin=$(stat -f "$fmt" <&3 2>/dev/null); }
   F=$p
 else
-  pin=$(stat -L -c '%d:%i:%s:%Y:%f' /proc/self/fd/3 2>/dev/null)
+  fmt='%d:%i:%s:%y:%z:%f'
+  pin=$(stat -L -c "$fmt" /proc/self/fd/3 2>/dev/null)
   F=/proc/self/fd/3
 fi
 if [ -z "$pin" ]; then exit 10; fi
@@ -297,6 +420,17 @@ case $plat:${pin##*:} in darwin:100*|linux:8???) ;; *) exit 6;; esac
 size=${pin#*:}; size=${size#*:}; size=${size%%:*}
 case $size in ''|*[!0-9]*) exit 10;; esac
 `
+
+// readRepin ends ReadFile's and ReadText's scripts: $out holds what awk
+// printed followed by "." and awk's exit code. The file is pinned again from
+// fd 3; a different pin exits 9 and prints nothing, else the output is
+// printed and the script exits with awk's code.
+const readRepin = `
+rc=${out##*.}; out=${out%.*}
+if [ "$plat" = darwin ]; then pin2=$(stat -f "$fmt" <&3 2>/dev/null); else pin2=$(stat -L -c "$fmt" /proc/self/fd/3 2>/dev/null); fi
+if [ "$pin2" != "$pin" ]; then exit 9; fi
+printf '%s' "$out"
+exit "$rc"`
 
 // identifyScript prints ONLY markers: the size, the first eight bytes in hex,
 // whether the scanned window holds a NUL, whether a UTF-16 file names a
@@ -317,16 +451,17 @@ win | tr '\000' '\001' | awk -v mode=identify '` + awkRules + `'
 exit 0`
 
 // readScript reads the pinned file ONCE and prints only what publicContent
-// would: exit 7 over the bound, 8 not public; nothing printed for either.
+// would, after the re-pin: exit 7 over the bound, 8 not public, 9 changed
+// while read; nothing printed for any of them.
 var readScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
 if [ "$size" -eq 0 ]; then exit 8; fi
-head -c "$size" <&3 | tr '\000\001' '\001\002' | awk -v mode=public '` + awkRules + `'`
+out=$(head -c "$size" <&3 | tr '\000\001' '\001\002' | awk -v mode=public '` + awkRules + `'; printf '.%s' "$?")` + readRepin
 
 // readTextScript reads the pinned file ONCE and prints only what
-// filterConfig would; $4 is the space-separated keep list. Exit 7 over the
-// bound or the line bound, 8 not text.
+// filterConfig would, after the re-pin; $4 is the space-separated keep list.
+// Exit 7 over the bound or the line bound, 8 not text, 9 changed while read.
 var readTextScript = readPrelude + `if [ "$size" -gt "$max" ]; then exit 7; fi
-{ if [ "$size" -gt 0 ]; then head -c "$size" <&3; fi; } | tr '\000' '\001' | HC_KEEP=$4 awk -v mode=text '` + awkRules + `'`
+out=$({ if [ "$size" -gt 0 ]; then head -c "$size" <&3; fi; printf '\n'; } | tr '\000' '\001' | HC_KEEP=$4 awk -v mode=text '` + awkRules + `'; printf '.%s' "$?")` + readRepin
 
 // errChanged is a read the host refused because the file changed between
 // being opened and being read.
@@ -538,28 +673,32 @@ func (t *RemoteUnixTarget) ReadText(ctx context.Context, path string, keep []str
 	return checkFiltered(path, out, n)
 }
 
-// keepArg validates keep and joins it for the host: words of
-// [A-Za-z0-9._@/*+-] with an optional trailing ";". Anything else is refused
-// rather than escaped. An empty keep is ErrNotPublic.
+// keepArg validates keep and joins it for the host: directive names of
+// [A-Za-z0-9._*+/-] and the four options ([KeepOptStatements] and the
+// rest). Anything else, a ";" or an unknown "@" entry included, is refused
+// rather than escaped. A keep with no directive name is ErrNotPublic.
 func keepArg(keep []string) (string, error) {
 	var words []string
+	names := 0
 	for _, w := range keep {
 		if w == "" {
 			continue
 		}
-		body := strings.TrimSuffix(w, ";")
-		if body == "" {
-			continue
-		}
-		for i := 0; i < len(body); i++ {
-			c := body[i]
-			if !redactClass(c) && c != '.' && c != '_' && c != '@' && c != '-' && c != '*' || c == '=' {
-				return "", fmt.Errorf("hostcrypto: keep word %q is not a directive name", w)
+		if w[0] == '@' {
+			switch asciiLower(w) {
+			case KeepOptStatements, KeepOptBackslash, KeepOptIndent, KeepOptCR:
+				words = append(words, asciiLower(w))
+				continue
 			}
+			return "", fmt.Errorf("hostcrypto: keep option %q is not one of the four", w)
 		}
-		words = append(words, w)
+		if !isKeepWord(w) {
+			return "", fmt.Errorf("hostcrypto: keep word %q is not a directive name", w)
+		}
+		words = append(words, asciiLower(w))
+		names++
 	}
-	if len(words) == 0 {
+	if names == 0 {
 		return "", ErrNotPublic
 	}
 	return strings.Join(words, " "), nil

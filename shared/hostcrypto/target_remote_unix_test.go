@@ -69,7 +69,7 @@ func TestRemoteUnixArgv(t *testing.T) {
 			rt := NewRemoteUnixTarget(fr, platform)
 			_, _ = rt.Identify(context.Background(), p)
 			_, _ = rt.Stat(context.Background(), p)
-			_, _, _ = rt.ReadText(context.Background(), p, []string{"ciphers", "ssl_protocols;"})
+			_, _, _ = rt.ReadText(context.Background(), p, []string{"ciphers", "SSL_Protocols", KeepOptStatements})
 			runs := fr.recordedRuns()
 			if len(runs) != 3 {
 				t.Fatalf("%s %q: %d runs", platform, p, len(runs))
@@ -85,7 +85,7 @@ func TestRemoteUnixArgv(t *testing.T) {
 			if !reflect.DeepEqual(runs[1], wantStat) {
 				t.Errorf("%s stat argv for %q:\n got %q\nwant %q", platform, p, runs[1], wantStat)
 			}
-			wantText := []string{"env", "LC_ALL=C", "sh", "-c", readTextScript, "sh", p, platform, "8000000", "ciphers ssl_protocols;"}
+			wantText := []string{"env", "LC_ALL=C", "sh", "-c", readTextScript, "sh", p, platform, "8000000", "ciphers ssl_protocols @statements"}
 			if !reflect.DeepEqual(runs[2], wantText) {
 				t.Errorf("%s readtext argv for %q:\n got %q", platform, p, runs[2])
 			}

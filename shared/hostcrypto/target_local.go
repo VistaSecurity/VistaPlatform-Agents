@@ -175,7 +175,7 @@ func (t *LocalTarget) ReadFile(ctx context.Context, path string) ([]byte, error)
 // sees the same bytes in both modes. An empty keep is refused before the file
 // is opened.
 func (t *LocalTarget) ReadText(ctx context.Context, path string, keep []string) ([]byte, int, error) {
-	if len(newKeepSet(keep).words) == 0 {
+	if !newKeepSet(keep).usable() {
 		return nil, 0, fmt.Errorf("%s: %w (no keep words)", path, ErrNotPublic)
 	}
 	b, err := t.ReadFile(ctx, path)

@@ -270,7 +270,7 @@ func (t *tgtFakeTarget) ReadText(_ context.Context, p string, keep []string) ([]
 	defer t.mu.Unlock()
 	t.record("readtext", p)
 	t.keeps = append(t.keeps, append([]string(nil), keep...))
-	if len(newKeepSet(keep).words) == 0 {
+	if !newKeepSet(keep).usable() {
 		return nil, 0, fmt.Errorf("%s: %w (no keep words)", p, ErrNotPublic)
 	}
 	n, err := t.regularLocked(p)

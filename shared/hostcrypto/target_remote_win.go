@@ -52,10 +52,13 @@ import (
 //
 // Identify, ReadFile and ReadText each read the file's bytes ONCE into a
 // buffer ([System.IO.FileStream], bounded) and decide from a Latin-1 decoding
-// of that buffer, byte for byte, as `grep -a` and the awk rules see it on
-// Unix. ReadFile prints base64 of the same buffer it decided on, so there is
-// no window between the check and the output on Windows. Go re-checks
-// everything that arrives.
+// of that buffer, byte for byte, as the awk rules see it on Unix. The
+// file's length and last-write time are taken before and after the read; if
+// either moved, the file changed while it was read and the script answers
+// "changed" ([errChanged]) instead of anything decided from a buffer that may
+// mix two versions. ReadFile prints the public content of the same buffer it
+// decided on, so there is no window between the check and the output. Go
+// re-checks everything that arrives.
 type RemoteWindowsTarget struct {
 	runner   hostinventory.Runner
 	maxBytes int64
@@ -112,15 +115,6 @@ func psQuoteList(items []string) string {
 	return "@(" + strings.Join(q, ",") + ")"
 }
 
-// sshKeyTypeNames lists the SSH key type names, for -ccontains.
-func sshKeyTypeNames() []string {
-	n := make([]string, len(sshKeyTypes))
-	for i, k := range sshKeyTypes {
-		n[i] = k.name
-	}
-	return n
-}
-
 // psSSHTable renders sshKeyTypes as a PowerShell array of
 // @(name, min, max, prefix). Names and base64 prefixes hold no quote.
 func psSSHTable() string {
@@ -131,334 +125,563 @@ func psSSHTable() string {
 	return "@(" + strings.Join(rows, ",") + ")"
 }
 
+// The PowerShell programs are the rules of redact.go a third time, so they
+// are written against PowerShell's traps (fxPS* tests enforce the first
+// three on every script):
+//
+//   - Variable names are case-insensitive: $S and $s are ONE variable, which
+//     is how the previous filter returned unlisted lines on a real host. No
+//     two names here differ only by case, and the prelude's names carry a
+//     per-function prefix so a callee never reads a caller's variable
+//     through dynamic scoping.
+//   - -eq, -ne, -contains, -match, -like and -replace ignore case, and so do
+//     @{} hashtables, while the Go rules do not. String and character
+//     comparisons are -ceq / -cne or .NET methods with Ordinal comparison;
+//     lookups use Dictionary/HashSet with an explicit comparer (OrdinalIgnoreCase
+//     only for the keep words, which the rule compares without ASCII case:
+//     on a Latin-1 view no non-ASCII character folds to an ASCII one).
+//   - No automatic variable is assigned ($input, $args, $matches, $host,
+//     $error, $foreach, $switch, $this, ...); $_ is read only in catch.
+//   - A function returning an array is unrolled by the pipeline; none here
+//     returns one (results travel as properties of an object).
+//   - Speed: a call to a PowerShell function costs tens of microseconds and
+//     a cmdlet or pipeline far more, so the per-line and per-token loops
+//     call none: the shared fragments (psEmit, psFirstWord) are spliced in
+//     by Go where they are used.
+
+// psEmit is filterConfig's emit on the variable $fE: the PEM-dropping state
+// $fDrop, the redaction count $fRed, the output $fSB.
+var psEmit = `if ($fDrop) { if ($fE.Contains('----END') -or $fE.Contains('---- END')) { $fDrop = $false } }
+      elseif ($fE.Contains('----BEGIN') -or $fE.Contains('---- BEGIN')) { $fRed++; $fDrop = -not ($fE.Contains('----END') -or $fE.Contains('---- END')) }
+      else { if ($fE.Length -ge ` + strconv.Itoa(RedactRunLength) + `) { $fMc = $vRunRx.Matches($fE).Count; if ($fMc -gt 0) { $fRed += $fMc; $fE = $vRunRx.Replace($fE, '` + RedactedMarker + `') } }; [void]$fSB.Append($fE).Append($vNL) }`
+
+// psFirstWord is firstWord on $fWd (already left-trimmed), in place.
+const psFirstWord = `if ($fWd.StartsWith('<', [StringComparison]::Ordinal)) { $fWd = $fWd.Substring(1) }
+      if ($fWd.StartsWith('-D', [StringComparison]::Ordinal)) { $fWd = $fWd.Substring(2) }
+      if ($fWd.StartsWith('@', [StringComparison]::Ordinal)) { $fWd = $fWd.Substring(1) }
+      $fK = $fWd.IndexOfAny($vStop)
+      if ($fK -ge 0) { $fWd = $fWd.Substring(0, $fK) }
+      if ($fWd.EndsWith('>', [StringComparison]::Ordinal)) { $fWd = $fWd.Substring(0, $fWd.Length - 1) }`
+
+// psOddBackslashes sets $fOdd for the line $fS: does it end in an odd number
+// of backslashes?
+const psOddBackslashes = `$fK = $fS.Length - 1
+      while ($fK -ge 0 -and $fS[$fK] -ceq '\') { $fK-- }
+      $fOdd = ((($fS.Length - 1 - $fK) % 2) -eq 1)`
+
+// psStatementToken is the nginx tokeniser (cfgNgxTokens, filterStatements)
+// as one .NET pattern, matched repeatedly from the start: every byte belongs
+// to exactly one alternative, so the matches are contiguous. Blanks (a lone
+// CR among them), a line end, ";", "{", "}", a "#" comment, a double- or
+// single-quoted word (a backslash escapes the quote or a backslash), and a
+// word, in which "{" right after "$" opens a "${...}" running to "}" or the
+// line end.
+const psStatementToken = `[ \t\f\v\r]+|\n|[;{}]|#[^\n]*|"(?:\\["\\]|[^"])*"?|''(?:\\[''\\]|[^''])*''?|(?:[^ \t\f\v\r\n;{}]|(?<=\$)\{[^}\n]*\}?)+`
+
 // psPrelude decodes the arguments and defines the helpers every script uses.
 // psErr turns an exception into "not_found", "denied" or "other"; psAcl
 // projects Get-Acl onto the owner and ONE boolean worked out on the host
 // (read granted to Everyone, BUILTIN\Users or Authenticated Users); the v*
 // functions are the text rules of redact.go, on a Latin-1 view of the bytes.
 var psPrelude = `$ErrorActionPreference='Stop'
+$vSw = [System.Diagnostics.Stopwatch]::StartNew()
 $a = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($vistaArgs)) | ConvertFrom-Json
 $vL1 = [Text.Encoding]::GetEncoding(28591)
-$vAllow = ` + psQuoteList(publicPEMLabels) + `
-$vRun = '[A-Za-z0-9+/=]{` + strconv.Itoa(RedactRunLength) + `,}'
-function psErr($e) {
-  while ($e -is [System.Management.Automation.MethodInvocationException] -and $e.InnerException) { $e = $e.InnerException }
-  if ($e -is [System.Management.Automation.ItemNotFoundException] -or $e -is [System.IO.FileNotFoundException] -or $e -is [System.IO.DirectoryNotFoundException]) { return 'not_found' }
-  if ($e -is [System.UnauthorizedAccessException] -or $e -is [System.Security.SecurityException]) { return 'denied' }
+$vNL = [string][char]10
+$vCR = [string][char]13
+$vBOM = [string][char]0xEF + [char]0xBB + [char]0xBF
+$vWin = ([System.IO.Path]::DirectorySeparatorChar -ceq [char]92)
+$vAllowSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+foreach ($vLbl in ` + psQuoteList(publicPEMLabels) + `) { [void]$vAllowSet.Add($vLbl) }
+$vKT = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+foreach ($vRow in ` + psSSHTable() + `) { $vKT[$vRow[0]] = $vRow }
+$vRunRx = [regex]::new('[A-Za-z0-9+/=]{` + strconv.Itoa(RedactRunLength) + `,}')
+$vDenyRx = [regex]::new('` + privateDenyRegex + `')
+$vDenyXRx = [regex]::new('` + privateExceptionRegex + `')
+$vLabelRx = [regex]::new('^[A-Z0-9 -]+\z')
+$vBlobRx = [regex]::new('^[A-Za-z0-9+/]+=*\z')
+$vBodyRx = [regex]::new('^[A-Za-z0-9+/=]+\z')
+$vBlankRx = [regex]::new('^[ \t]*\z')
+$vHdrRx = [regex]::new('^\[[A-Za-z0-9 ._:/-]{1,128}\]\z')
+$vCloseRx = [regex]::new('^</([A-Za-z0-9_.:-]{1,64})>\z')
+$vOpenRx = [regex]::new('^<([A-Za-z][A-Za-z0-9_.:-]*)[> \t]')
+$vPrivRx = [regex]::new('PRIVATE|SECRET|KEY', 'IgnoreCase, CultureInvariant')
+$vU16Rx = [regex]::new('[\x00\xFE\xFF]')
+$vU16PrivRx = [regex]::new('BEGIN[^\n]*PRIVATE|PRIVATE[^\n]*BEGIN', 'IgnoreCase, CultureInvariant')
+$vTokRx = [regex]::new('` + psStatementToken + `')
+$vStop = [char[]]@([char]32, [char]9, [char]61, [char]58, [char]59, [char]123, [char]125)
+$vBlanks = [char[]]@([char]32, [char]9)
+function psErr($peX) {
+  while ($peX -is [System.Management.Automation.MethodInvocationException] -and $peX.InnerException) { $peX = $peX.InnerException }
+  if ($peX -is [System.Management.Automation.ItemNotFoundException] -or $peX -is [System.IO.FileNotFoundException] -or $peX -is [System.IO.DirectoryNotFoundException]) { return 'not_found' }
+  if ($peX -is [System.UnauthorizedAccessException] -or $peX -is [System.Security.SecurityException]) { return 'denied' }
   return 'other'
 }
-function psOut($o) { [Console]::Out.Write('J:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 4 -InputObject $o)))) }
-function psAcl([string]$p) {
+function psOut($poX) { [Console]::Out.Write('J:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 4 -InputObject $poX)))) }
+function psAcl([string]$paPath) {
   try {
-    $acl = Get-Acl -LiteralPath $p
-    $allow = @{}; $deny = @{}
-    foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-      $sid = $r.IdentityReference.Value
-      if (@('S-1-1-0','S-1-5-32-545','S-1-5-11') -notcontains $sid) { continue }
-      if (($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-      $m = ([int64]$r.FileSystemRights) -band 0xFFFFFFFFL
-      if (($m -band 0x90000001L) -eq 0) { continue }
-      if ($r.AccessControlType -eq 'Allow') { $allow[$sid] = $true } else { $deny[$sid] = $true }
+    $paAcl = Get-Acl -LiteralPath $paPath
+    $paAllow = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $paDeny = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($paRule in $paAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+      $paSid = [string]$paRule.IdentityReference.Value
+      if (-not ($paSid -ceq 'S-1-1-0' -or $paSid -ceq 'S-1-5-32-545' -or $paSid -ceq 'S-1-5-11')) { continue }
+      if (($paRule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
+      $paMask = ([int64]$paRule.FileSystemRights) -band 0xFFFFFFFFL
+      if (($paMask -band 0x90000001L) -eq 0) { continue }
+      if ($paRule.AccessControlType -ceq 'Allow') { [void]$paAllow.Add($paSid) } else { [void]$paDeny.Add($paSid) }
     }
-    $broad = $false
-    foreach ($k in $allow.Keys) { if (-not $deny.ContainsKey($k)) { $broad = $true } }
-    return [pscustomobject]@{ Owner = [string]$acl.Owner; Broad = $broad; Ok = $true }
+    $paBroad = $false
+    foreach ($paK in $paAllow) { if (-not $paDeny.Contains($paK)) { $paBroad = $true } }
+    return [pscustomobject]@{ Owner = [string]$paAcl.Owner; Broad = $paBroad; Ok = $true }
   } catch {
     return [pscustomobject]@{ Owner = ''; Broad = $false; Ok = $false }
   }
 }
-function psLink($i) { return ($i.LinkType -eq 'SymbolicLink' -or $i.LinkType -eq 'Junction') }
-function psTime($i) { return $i.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') }
-function vRead([string]$p, [int64]$max) {
-  $i = Get-Item -LiteralPath $p -Force
-  if ($i.PSIsContainer) { return [pscustomobject]@{ Error = 'directory' } }
-  $fs = [System.IO.File]::Open($i.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+function psLink($plI) { return ($plI.LinkType -ceq 'SymbolicLink' -or $plI.LinkType -ceq 'Junction') }
+function psTime($ptI) { return $ptI.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+function vLong([string]$lpP) {
+  if (-not $vWin -or $lpP.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $lpP }
+  if ($lpP.StartsWith('\\', [StringComparison]::Ordinal)) { return '\\?\UNC\' + $lpP.Substring(2) }
+  return '\\?\' + $lpP
+}
+function vShort([string]$spP) {
+  if ($spP.StartsWith('\\?\UNC\', [StringComparison]::Ordinal)) { return '\\' + $spP.Substring(8) }
+  if ($spP.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $spP.Substring(4) }
+  return $spP
+}
+function vRead([string]$vrPath, [int64]$vrMax) {
+  $vrItem = Get-Item -LiteralPath $vrPath -Force
+  if ($vrItem.PSIsContainer) { return [pscustomobject]@{ Error = 'directory' } }
+  $vrFull = $vrItem.FullName
+  $vrT0 = [System.IO.File]::GetLastWriteTimeUtc($vrFull).Ticks
+  $vrFs = [System.IO.File]::Open($vrFull, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
-    $size = $fs.Length
-    $n = [int][Math]::Min($size, $max)
-    $buf = New-Object byte[] $n
-    $off = 0
-    while ($off -lt $n) { $r = $fs.Read($buf, $off, $n - $off); if ($r -le 0) { break }; $off += $r }
-  } finally { $fs.Close() }
-  return [pscustomobject]@{ Error = ''; Size = [int64]$size; Buf = $buf; N = $off }
+    $vrLen0 = $vrFs.Length
+    $vrCount = [int][Math]::Min($vrLen0, $vrMax)
+    $vrBuf = New-Object byte[] $vrCount
+    $vrOff = 0
+    while ($vrOff -lt $vrCount) { $vrGot = $vrFs.Read($vrBuf, $vrOff, $vrCount - $vrOff); if ($vrGot -le 0) { break }; $vrOff += $vrGot }
+    $vrLen1 = $vrFs.Length
+  } finally { $vrFs.Close() }
+  $vrT1 = [System.IO.File]::GetLastWriteTimeUtc($vrFull).Ticks
+  if ($vrLen1 -ne $vrLen0 -or $vrT1 -ne $vrT0) { return [pscustomobject]@{ Error = 'changed' } }
+  return [pscustomobject]@{ Error = ''; Size = [int64]$vrLen0; Buf = $vrBuf; N = $vrOff }
 }
-function vIsBegin([string]$s) { return ($s.Contains('----BEGIN') -or $s.Contains('---- BEGIN')) }
-function vIsEnd([string]$s) { return ($s.Contains('----END') -or $s.Contains('---- END')) }
-function vParse([string]$s) {
-  $n = $s.Length
-  if ($n -lt 17) { return $null }
-  $five = $s.StartsWith('-----BEGIN ', [StringComparison]::Ordinal) -and $s.EndsWith('-----', [StringComparison]::Ordinal)
-  $four = $s.StartsWith('---- BEGIN ', [StringComparison]::Ordinal) -and $s.EndsWith(' ----', [StringComparison]::Ordinal)
-  if (-not ($five -or $four)) { return $null }
-  $l = $s.Substring(11, $n - 16)
-  if ($l.Length -gt 64 -or -not [regex]::IsMatch($l, '^[A-Z0-9 -]+\z')) { return $null }
-  return $l
+function vParse([string]$vpS) {
+  $vpN = $vpS.Length
+  if ($vpN -lt 17) { return $null }
+  $vpFive = $vpS.StartsWith('-----BEGIN ', [StringComparison]::Ordinal) -and $vpS.EndsWith('-----', [StringComparison]::Ordinal)
+  $vpFour = $vpS.StartsWith('---- BEGIN ', [StringComparison]::Ordinal) -and $vpS.EndsWith(' ----', [StringComparison]::Ordinal)
+  if (-not ($vpFive -or $vpFour)) { return $null }
+  $vpL = $vpS.Substring(11, $vpN - 16)
+  if ($vpL.Length -gt 64 -or -not $vLabelRx.IsMatch($vpL)) { return $null }
+  return $vpL
 }
-function vStrip([string]$s) { if ($s.EndsWith([string][char]13, [StringComparison]::Ordinal)) { return $s.Substring(0, $s.Length - 1) }; return $s }
-$vKTNames = ` + psQuoteList(sshKeyTypeNames()) + `
-$vKT = @{}
-foreach ($e in ` + psSSHTable() + `) { $vKT[$e[0]] = $e }
-function vSshKey([string]$s) {
-  $tok = @($s -split '[ \t]+' | Where-Object { $_ -ne '' })
-  for ($i = 0; $i -lt $tok.Count - 1; $i++) {
-    $t = $tok[$i]
-    if (-not ($vKTNames -ccontains $t)) { continue }
-    $e = $vKT[$t]; $b = $tok[$i + 1]
-    if ([regex]::IsMatch($b, '^[A-Za-z0-9+/]+=*\z') -and $b.Length -ge $e[1] -and $b.Length -le $e[2] -and $b.StartsWith($e[3], [StringComparison]::Ordinal)) { return ($t + ' ' + $b) }
-    return ''
+function vSshKey([string]$skS) {
+  if (-not ($skS.Contains('ssh-') -or $skS.Contains('ecdsa-'))) { return '' }
+  $skR = $skS.TrimStart($vBlanks)
+  $skI = $skR.IndexOfAny($vBlanks)
+  if ($skI -lt 0) { $skT = $skR } else { $skT = $skR.Substring(0, $skI) }
+  if (-not $vKT.ContainsKey($skT)) {
+    $skN = $skR.Length; $skQ = $false; $skJ = 0
+    while ($skJ -lt $skN) {
+      $skC = $skR[$skJ]
+      if ($skQ) {
+        if ($skC -ceq [char]92 -and $skJ + 1 -lt $skN) { $skJ += 2; continue }
+        if ($skC -ceq [char]34) { $skQ = $false }
+      } else {
+        if ($skC -ceq [char]32 -or $skC -ceq [char]9) { break }
+        if ($skC -ceq [char]34) { $skQ = $true }
+      }
+      $skJ++
+    }
+    if ($skQ) { return '' }
+    $skR = $skR.Substring($skJ).TrimStart($vBlanks)
+    $skI = $skR.IndexOfAny($vBlanks)
+    if ($skI -lt 0) { $skT = $skR } else { $skT = $skR.Substring(0, $skI) }
+    if (-not $vKT.ContainsKey($skT)) { return '' }
   }
+  $skR = $skR.Substring($skT.Length).TrimStart($vBlanks)
+  $skI = $skR.IndexOfAny($vBlanks)
+  if ($skI -lt 0) { $skB = $skR } else { $skB = $skR.Substring(0, $skI) }
+  $skE = $vKT[$skT]
+  if ($vBlobRx.IsMatch($skB) -and $skB.Length -ge $skE[1] -and $skB.Length -le $skE[2] -and $skB.StartsWith([string]$skE[3], [StringComparison]::Ordinal)) { return ($skT + ' ' + $skB) }
   return ''
 }
-$vBOM = [string][char]0xEF + [char]0xBB + [char]0xBF
-function vPemLines([string]$t) {
-  if ($t.StartsWith($vBOM, [StringComparison]::Ordinal)) { $t = $t.Substring(3) }
-  $parts = $t.Split([char]10)
-  $out = New-Object System.Collections.Generic.List[string]
-  for ($i = 0; $i -lt $parts.Length; $i++) {
-    if ($i -eq $parts.Length - 1 -and $parts[$i].Length -eq 0) { break }
-    $out.Add((vStrip $parts[$i]))
-  }
-  return ,$out.ToArray()
+function vLines([string]$lnT) {
+  if ($lnT.StartsWith($vBOM, [StringComparison]::Ordinal)) { $lnT = $lnT.Substring(3) }
+  $lnParts = $lnT.Split([char]10)
+  $lnCount = $lnParts.Length
+  if ($lnCount -gt 0 -and $lnParts[$lnCount - 1].Length -eq 0) { $lnCount-- }
+  return [pscustomobject]@{ Parts = $lnParts; Count = $lnCount }
 }
-function vPublic([byte[]]$b, [int]$n) {
-  if ([Array]::IndexOf($b, [byte]0, 0, $n) -ge 0) { return $null }
-  $out = New-Object System.Collections.Generic.List[string]
-  $block = New-Object System.Collections.Generic.List[string]
-  $inb = $false; $bok = $false; $endl = ''
-  foreach ($s in (vPemLines ($vL1.GetString($b, 0, $n)))) {
-    if (vIsBegin $s) {
-      $inb = $false
-      $l = vParse $s
-      if ($null -eq $l -or -not ($vAllow -ccontains $l)) { return $null }
-      $inb = $true; $bok = $true; $block.Clear(); $block.Add($s)
-      if ($s.StartsWith('-----', [StringComparison]::Ordinal)) { $endl = '-----END ' + $l + '-----' } else { $endl = '---- END ' + $l + ' ----' }
+function vPublic([byte[]]$pcB, [int]$pcN) {
+  if ([Array]::IndexOf($pcB, [byte]0, 0, $pcN) -ge 0) { return $null }
+  $pcL = vLines ($vL1.GetString($pcB, 0, $pcN))
+  $pcOut = New-Object System.Text.StringBuilder
+  $pcBlock = New-Object 'System.Collections.Generic.List[string]'
+  $pcAny = $false; $pcIn = $false; $pcOk = $false; $pcEnd = ''
+  for ($pcI = 0; $pcI -lt $pcL.Count; $pcI++) {
+    $pcS = $pcL.Parts[$pcI]
+    if ($pcS.EndsWith($vCR, [StringComparison]::Ordinal)) { $pcS = $pcS.Substring(0, $pcS.Length - 1) }
+    if ($pcS.Contains('----BEGIN') -or $pcS.Contains('---- BEGIN')) {
+      $pcIn = $false
+      $pcLab = vParse $pcS
+      if ($null -eq $pcLab -or -not $vAllowSet.Contains($pcLab)) { return $null }
+      $pcIn = $true; $pcOk = $true; $pcBlock.Clear(); $pcBlock.Add($pcS)
+      if ($pcS.StartsWith('-----', [StringComparison]::Ordinal)) { $pcEnd = '-----END ' + $pcLab + '-----' } else { $pcEnd = '---- END ' + $pcLab + ' ----' }
       continue
     }
-    if ($inb) {
-      if ($s -ceq $endl) { $block.Add($s); if ($bok) { $out.AddRange($block) }; $inb = $false; continue }
-      if (vIsEnd $s) { $inb = $false; continue }
-      if ($s.Length -lt 1 -or $s.Length -gt ` + strconv.Itoa(maxPEMBodyLine) + ` -or -not [regex]::IsMatch($s, '^[A-Za-z0-9+/=]+\z')) { $bok = $false }
-      $block.Add($s)
+    if ($pcIn) {
+      if ([string]::Equals($pcS, $pcEnd, [StringComparison]::Ordinal)) {
+        $pcBlock.Add($pcS)
+        if ($pcOk) { foreach ($pcX in $pcBlock) { [void]$pcOut.Append($pcX).Append($vNL) }; $pcAny = $true }
+        $pcIn = $false
+        continue
+      }
+      if ($pcS.Contains('----END') -or $pcS.Contains('---- END')) { $pcIn = $false; continue }
+      if ($pcBlock.Count -eq 1 -and $vDenyRx.IsMatch($pcS) -and -not $vDenyXRx.IsMatch($pcS)) { return $null }
+      if ($pcS.Length -lt 1 -or $pcS.Length -gt ` + strconv.Itoa(maxPEMBodyLine) + ` -or -not $vBodyRx.IsMatch($pcS)) { $pcOk = $false }
+      $pcBlock.Add($pcS)
       continue
     }
-    $k = vSshKey $s
-    if ($k -ne '') { $out.Add($k) }
+    if ($pcS.Contains('ssh-') -or $pcS.Contains('ecdsa-')) {
+      $pcK = vSshKey $pcS
+      if ($pcK.Length -gt 0) { [void]$pcOut.Append($pcK).Append($vNL); $pcAny = $true }
+    }
   }
-  if ($out.Count -eq 0) { return $null }
-  return (($out.ToArray() -join [string][char]10) + [char]10)
+  if (-not $pcAny) { return $null }
+  return $pcOut.ToString()
 }
-function vFirstWord([string]$t) {
-  if ($t.StartsWith('<', [StringComparison]::Ordinal)) { $t = $t.Substring(1) }
-  if ($t.StartsWith('-D', [StringComparison]::Ordinal)) { $t = $t.Substring(2) }
-  $i = $t.IndexOfAny([char[]]@(' ', [char]9, '=', ':', ';', '{', '}'))
-  if ($i -ge 0) { $t = $t.Substring(0, $i) }
-  if ($t.EndsWith('>', [StringComparison]::Ordinal)) { $t = $t.Substring(0, $t.Length - 1) }
-  return [regex]::Replace($t, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
+function vMagicAt([byte[]]$mgB, [int]$mgOff, [int]$mgN) {
+  $mgH = ''
+  for ($mgK = $mgOff; $mgK -lt [Math]::Min($mgN, $mgOff + 8); $mgK++) { $mgH += $mgB[$mgK].ToString('x2') }
+  return ($mgH.StartsWith('feedfeed', [StringComparison]::Ordinal) -or $mgH.StartsWith('cececece', [StringComparison]::Ordinal) -or $mgH.StartsWith('0502', [StringComparison]::Ordinal) -or $mgH.StartsWith('0501', [StringComparison]::Ordinal) -or $mgH.StartsWith('53514c6974652066', [StringComparison]::Ordinal))
 }
-function vBslash([string]$s) { return $s.TrimEnd(' ', [char]9).EndsWith('\', [StringComparison]::Ordinal) }
-function vFilter([byte[]]$b, [int]$n, [string[]]$keep) {
-  $K = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-  $S = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-  foreach ($w in $keep) {
-    $w = [regex]::Replace([string]$w, '[A-Z]', { param($m) $m.Value.ToLowerInvariant() })
-    $semi = $w.EndsWith(';', [StringComparison]::Ordinal)
-    if ($semi) { $w = $w.Substring(0, $w.Length - 1) }
-    if ($w -ne '') { [void]$K.Add($w); if ($semi) { [void]$S.Add($w) } }
+function vHex([byte[]]$hxB, [int]$hxN) { $hxH = ''; for ($hxK = 0; $hxK -lt [Math]::Min($hxN, 8); $hxK++) { $hxH += $hxB[$hxK].ToString('x2') }; return $hxH }
+function vFilter([byte[]]$fB, [int]$fN, [string[]]$fKeep) {
+  $fWords = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  $fSt = $false; $fBs = $false; $fInd = $false; $fCrOpt = $false; $fBadOpt = $false
+  foreach ($fW in $fKeep) {
+    $fW = [string]$fW
+    if ($fW.Length -eq 0) { continue }
+    if ($fW.StartsWith('@', [StringComparison]::Ordinal)) {
+      $fOpt = $fW.ToLowerInvariant()
+      if ($fOpt -ceq '` + KeepOptStatements + `') { $fSt = $true }
+      elseif ($fOpt -ceq '` + KeepOptBackslash + `') { $fBs = $true }
+      elseif ($fOpt -ceq '` + KeepOptIndent + `') { $fInd = $true }
+      elseif ($fOpt -ceq '` + KeepOptCR + `') { $fCrOpt = $true }
+      else { $fBadOpt = $true }
+      continue
+    }
+    [void]$fWords.Add($fW)
   }
-  if ($K.Count -eq 0) { return @{ Status = 'not_public' } }
-  if ([Array]::IndexOf($b, [byte]0, 0, $n) -ge 0 -or [Array]::IndexOf($b, [byte]1, 0, $n) -ge 0 -or (vKeystore $b $n)) { return @{ Status = 'not_public' } }
-  $t = $vL1.GetString($b, 0, $n)
-  if ($t.StartsWith($vBOM, [StringComparison]::Ordinal)) { $t = $t.Substring(3) }
-  $lines = [regex]::Split($t, '\r\n|\n|\r')
-  $cnt = $lines.Length
-  if ($cnt -gt 0 -and $lines[$cnt - 1].Length -eq 0) { $cnt-- }
-  if ($cnt -gt ` + strconv.Itoa(maxConfigLines) + `) { return @{ Status = 'too_large' } }
-  $sb = New-Object System.Text.StringBuilder
-  $vN = 0; $vDrop = $false
-  $cont = $false; $csemi = $false
-  for ($i = 0; $i -lt $cnt; $i++) {
-    $s = $lines[$i]
-    $keepIt = $false
-    if ($cont) {
-      $keepIt = $true
-      if ($csemi) { $cont = -not $s.Contains(';') } else { $cont = vBslash $s }
-    } else {
-      $t2 = $s.TrimStart(' ', [char]9)
-      if ($t2 -eq '') { $keepIt = $true }
-      elseif ($t2.StartsWith('#', [StringComparison]::Ordinal) -or $t2.StartsWith('!', [StringComparison]::Ordinal) -or $t2.StartsWith(';', [StringComparison]::Ordinal) -or $t2.StartsWith('//', [StringComparison]::Ordinal)) { $keepIt = $false }
+  if ($fWords.Count -eq 0 -or $fBadOpt) { return [pscustomobject]@{ Status = 'not_public' } }
+  if ([Array]::IndexOf($fB, [byte]0, 0, $fN) -ge 0 -or [Array]::IndexOf($fB, [byte]1, 0, $fN) -ge 0) { return [pscustomobject]@{ Status = 'not_public' } }
+  if ($fN -ge 2 -and (($fB[0] -eq 0xFF -and $fB[1] -eq 0xFE) -or ($fB[0] -eq 0xFE -and $fB[1] -eq 0xFF))) { return [pscustomobject]@{ Status = 'not_public' } }
+  if ((vMagicAt $fB 0 $fN) -or ($fN -ge 3 -and $fB[0] -eq 0xEF -and $fB[1] -eq 0xBB -and $fB[2] -eq 0xBF -and (vMagicAt $fB 3 $fN))) { return [pscustomobject]@{ Status = 'not_public' } }
+  $fL = vLines ($vL1.GetString($fB, 0, $fN))
+  $fLines = New-Object 'System.Collections.Generic.List[string]'
+  for ($fI = 0; $fI -lt $fL.Count; $fI++) {
+    $fG = $fL.Parts[$fI]
+    if ($fG.EndsWith($vCR, [StringComparison]::Ordinal)) { $fG = $fG.Substring(0, $fG.Length - 1) }
+    $fC = $fG.IndexOf([char]13)
+    if ($fC -lt 0 -or $fSt) { $fLines.Add($fG) }
+    elseif ($fCrOpt) { $fLines.AddRange([string[]]$fG.Split([char]13)) }
+    else { $fLines.Add($fG.Substring(0, $fC)) }
+    if ($fLines.Count -gt ` + strconv.Itoa(maxConfigLines) + `) { return [pscustomobject]@{ Status = 'too_large' } }
+  }
+  $fSB = New-Object System.Text.StringBuilder
+  $fRed = 0; $fDrop = $false
+  $fLC = $fLines.Count
+  if ($fSt) {
+    $sText = [string]::Join($vNL, $fLines.ToArray()) + $vNL
+    $sBuf = New-Object System.Text.StringBuilder
+    $sStarted = $false; $sSep = $false; $sOver = $false; $sNl = 0; $sDepth = 0; $sDropAt = 0; $sCount = 0
+    $sM = $vTokRx.Match($sText)
+    while ($sM.Success) {
+      $sCount++
+      if (($sCount -band 4095) -eq 0 -and $vSw.Elapsed.TotalSeconds -ge $vBudget) { return [pscustomobject]@{ Status = 'too_large' } }
+      $sTok = $sM.Value
+      $sC = $sTok[0]
+      $sTerm = ''
+      if ($sC -ceq [char]32 -or $sC -ceq [char]9 -or $sC -ceq [char]12 -or $sC -ceq [char]11 -or $sC -ceq [char]13 -or $sC -ceq [char]35) { $sSep = $true }
+      elseif ($sC -ceq [char]10) { $sSep = $true; if ($sStarted -and -not $sOver) { $sNl++; if ($sNl -ge ` + strconv.Itoa(maxStatementLines) + `) { $sOver = $true; [void]$sBuf.Clear() } } }
+      elseif ($sC -ceq [char]59 -or $sC -ceq [char]123 -or $sC -ceq [char]125) { $sTerm = $sTok }
       else {
-        $tr = $t2.TrimEnd(' ', [char]9)
-        if (($tr.StartsWith('[', [StringComparison]::Ordinal) -and $tr.EndsWith(']', [StringComparison]::Ordinal)) -or $tr -ceq '{' -or $tr -ceq '}' -or $tr -ceq '};' -or $t2.StartsWith('</', [StringComparison]::Ordinal)) { $keepIt = $true }
-        else {
-          $w = vFirstWord $t2
-          if ($w -ne '' -and $K.Contains($w)) {
-            $keepIt = $true
-            if (vBslash $s) { $cont = $true; $csemi = $false } elseif ($S.Contains($w) -and -not $s.Contains(';')) { $cont = $true; $csemi = $true }
+        $sEnds = 0
+        if ($sC -ceq [char]34 -or $sC -ceq [char]39) { $sEnds = $sTok.Length - $sTok.Replace($vNL, '').Length; $sTok = $sTok.Replace($vNL, ' ').Replace($vCR, ' ') }
+        if (-not $sOver) {
+          if ($sStarted -and $sSep) { [void]$sBuf.Append(' ') }
+          [void]$sBuf.Append($sTok); $sStarted = $true; $sSep = $false; $sNl += $sEnds
+          if ($sBuf.Length -gt ` + strconv.Itoa(maxStatementBytes) + ` -or $sNl -ge ` + strconv.Itoa(maxStatementLines) + `) { $sOver = $true; [void]$sBuf.Clear() }
+        }
+      }
+      if ($sTerm.Length -gt 0) {
+        $sKept = $false
+        if (-not $sOver -and $sStarted -and $sDropAt -eq 0) {
+          $fWd = $sBuf.ToString()
+          ` + psFirstWord + `
+          $sKept = ($fWd.Length -gt 0 -and $fWords.Contains($fWd))
+        }
+        $sStmt = $sBuf.ToString()
+        [void]$sBuf.Clear(); $sStarted = $false; $sSep = $false; $sOver = $false; $sNl = 0
+        if ($sTerm -ceq ';') {
+          if ($sKept) { $fE = $sStmt + ';'; ` + psEmit + ` }
+        } elseif ($sTerm -ceq '{') {
+          $sDepth++
+          if ($sKept -and $sDepth -le ` + strconv.Itoa(maxBlockDepth) + `) { $fE = $sStmt + ' {'; ` + psEmit + ` }
+          elseif ($sDropAt -eq 0) { $sDropAt = $sDepth }
+        } else {
+          if ($sDepth -eq 0) { $fE = '}'; ` + psEmit + ` }
+          else {
+            if ($sDropAt -eq 0) { $fE = '}'; ` + psEmit + ` }
+            if ($sDropAt -eq $sDepth) { $sDropAt = 0 }
+            $sDepth--
           }
         }
       }
+      $sM = $sM.NextMatch()
     }
-    if (-not $keepIt) { continue }
-    if ($vDrop) { if (vIsEnd $s) { $vDrop = $false }; continue }
-    if (vIsBegin $s) { $vN++; if (-not (vIsEnd $s)) { $vDrop = $true }; continue }
-    $vN += ([regex]::Matches($s, $vRun)).Count
-    [void]$sb.Append([regex]::Replace($s, $vRun, '` + RedactedMarker + `'))
-    [void]$sb.Append([char]10)
+    return [pscustomobject]@{ Status = 'ok'; Text = $fSB.ToString(); N = $fRed }
   }
-  return @{ Status = 'ok'; Text = $sb.ToString(); N = $vN }
-}
-function vInspect([string]$t) {
-  $f = [ordered]@{ bad = 0; nonpub = 0; unterm = 0; priv = 0; orun = 0; sshbad = 0; sshl = 0; nl = 0 }
-  $labels = New-Object System.Collections.Generic.List[string]
-  $inpub = $false
-  foreach ($s in (vPemLines $t)) {
-    if (vIsBegin $s) {
-      if ($inpub) { $f.unterm = 1 }
-      $inpub = $false
-      $l = vParse $s
-      $pub = ($null -ne $l) -and ($vAllow -ccontains $l)
-      if (-not $pub -and [regex]::IsMatch($s, 'PRIVATE|SECRET|KEY', 'IgnoreCase, CultureInvariant')) { $f.priv = 1 }
-      if ($null -eq $l) { $f.bad = 1; continue }
-      $f.nl++
-      if ($labels.Count -lt 64) { $labels.Add($l) }
-      if ($pub) { $inpub = $true } else { $f.nonpub = 1 }
+  $fDropB = $false; $fDropT = ''; $fDepth = 0; $fPrevK = $false; $fBsc = $false; $fContN = 0; $fHaveL = $false; $fLKept = $false
+  for ($fI = 0; $fI -lt $fLC; $fI++) {
+    if (($fI -band 1023) -eq 0 -and $vSw.Elapsed.TotalSeconds -ge $vBudget) { return [pscustomobject]@{ Status = 'too_large' } }
+    $fS = $fLines[$fI]
+    $fT = $fS.TrimStart($vBlanks)
+    if ($fDropB -or $fDropT.Length -gt 0) {
+      if ($fT.Length -eq 0) { continue }
+      $fC0 = $fT[0]
+      if ($fC0 -ceq [char]35 -or $fC0 -ceq [char]33 -or $fC0 -ceq [char]59 -or $fT.StartsWith('//', [StringComparison]::Ordinal)) { continue }
+      $fTr = $fT.TrimEnd($vBlanks)
+      if ($fDropB) {
+        if ($fTr[0] -ceq [char]125) { $fDepth-- }
+        if ($fTr[$fTr.Length - 1] -ceq [char]123) { $fDepth++ }
+      } else {
+        $fOm = $vOpenRx.Match($fTr)
+        if ($fOm.Success -and $fTr.EndsWith('>', [StringComparison]::Ordinal) -and $fOm.Groups[1].Length -le 64 -and [string]::Equals($fOm.Groups[1].Value, $fDropT, [StringComparison]::OrdinalIgnoreCase)) { $fDepth++ }
+        else {
+          $fCm = $vCloseRx.Match($fTr)
+          if ($fCm.Success -and [string]::Equals($fCm.Groups[1].Value, $fDropT, [StringComparison]::OrdinalIgnoreCase)) { $fDepth-- }
+        }
+      }
+      if ($fDepth -le 0) { $fDropB = $false; $fDropT = '' }
       continue
     }
-    if ($inpub) { if (vIsEnd $s) { $inpub = $false }; continue }
-    if ([regex]::IsMatch($s, $vRun)) { $f.orun = 1 }
-    if ($s.StartsWith('#', [StringComparison]::Ordinal) -or [regex]::IsMatch($s, '^[ \t]*\z')) { continue }
-    if ((vSshKey $s) -ne '') { $f.sshl++ } else { $f.sshbad = 1 }
+    if ($fBsc) {
+      $fContN++
+      ` + psOddBackslashes + `
+      $fBsc = $fOdd
+      if ($fContN -le ` + strconv.Itoa(maxContinuation) + ` -and -not $fT.StartsWith('#', [StringComparison]::Ordinal)) { $fE = $fS; ` + psEmit + ` }
+      continue
+    }
+    if ($fInd -and $fHaveL -and $fT.Length -gt 0 -and ($fS[0] -ceq [char]32 -or $fS[0] -ceq [char]9)) {
+      if ($fT[0] -ceq [char]35) { continue }
+      $fContN++
+      if ($fLKept -and $fContN -le ` + strconv.Itoa(maxContinuation) + `) { $fE = $fS; ` + psEmit + ` }
+      continue
+    }
+    if ($fT.Length -eq 0) { $fE = $fS; ` + psEmit + `; continue }
+    $fC0 = $fT[0]
+    if ($fC0 -ceq [char]35 -or $fC0 -ceq [char]33 -or $fC0 -ceq [char]59 -or $fT.StartsWith('//', [StringComparison]::Ordinal)) { continue }
+    $fHaveL = $true; $fLKept = $false; $fContN = 0
+    $fTr = $fT.TrimEnd($vBlanks)
+    if ($vCloseRx.IsMatch($fTr) -or $vHdrRx.IsMatch($fTr) -or $fTr -ceq '}' -or $fTr -ceq '};' -or ($fTr -ceq '{' -and $fPrevK)) { $fE = $fS; ` + psEmit + `; $fPrevK = $false; continue }
+    $fWd = $fT
+    ` + psFirstWord + `
+    if ($fWd.Length -gt 0 -and $fWords.Contains($fWd)) {
+      $fE = $fS; ` + psEmit + `
+      $fPrevK = $true; $fLKept = $true; $fBsc = $false
+      if ($fBs) { ` + psOddBackslashes + `; $fBsc = $fOdd }
+      continue
+    }
+    $fPrevK = $false
+    if ($fTr[$fTr.Length - 1] -ceq [char]123) { $fDropB = $true; $fDepth = 1 }
+    else {
+      $fOm = $vOpenRx.Match($fTr)
+      if ($fOm.Success -and $fTr.EndsWith('>', [StringComparison]::Ordinal) -and $fOm.Groups[1].Length -le 64) { $fDropT = $fOm.Groups[1].Value; $fDepth = 1 }
+    }
   }
-  if ($inpub) { $f.unterm = 1 }
-  return [pscustomobject]@{ Flags = $f; Labels = $labels.ToArray() }
+  return [pscustomobject]@{ Status = 'ok'; Text = $fSB.ToString(); N = $fRed }
 }
-function vKeystore([byte[]]$b, [int]$n) {
-  if ($n -lt 2) { return $false }
-  $h = ''
-  for ($k = 0; $k -lt [Math]::Min($n, 8); $k++) { $h += $b[$k].ToString('x2') }
-  return ($h.StartsWith('feedfeed') -or $h.StartsWith('cececece') -or $h.StartsWith('0502') -or $h.StartsWith('0501') -or $h.StartsWith('53514c6974652066'))
+function vInspect([string]$isText) {
+  $isF = [ordered]@{ bad = 0; nonpub = 0; unterm = 0; priv = 0; orun = 0; sshbad = 0; sshl = 0; nl = 0 }
+  $isLabels = New-Object 'System.Collections.Generic.List[string]'
+  $isPub = $false
+  $isL = vLines $isText
+  for ($isI = 0; $isI -lt $isL.Count; $isI++) {
+    $isS = $isL.Parts[$isI]
+    if ($isS.EndsWith($vCR, [StringComparison]::Ordinal)) { $isS = $isS.Substring(0, $isS.Length - 1) }
+    if ($isS.Contains('----BEGIN') -or $isS.Contains('---- BEGIN')) {
+      if ($isPub) { $isF.unterm = 1 }
+      $isPub = $false
+      $isLab = vParse $isS
+      $isOkPub = ($null -ne $isLab) -and $vAllowSet.Contains($isLab)
+      if (-not $isOkPub -and $vPrivRx.IsMatch($isS)) { $isF.priv = 1 }
+      if ($null -eq $isLab) { $isF.bad = 1; continue }
+      $isF.nl++
+      if ($isLabels.Count -lt ` + strconv.Itoa(maxPEMLabels) + `) { $isLabels.Add($isLab) }
+      if ($isOkPub) { $isPub = $true } else { $isF.nonpub = 1 }
+      continue
+    }
+    if ($isPub) { if ($isS.Contains('----END') -or $isS.Contains('---- END')) { $isPub = $false }; continue }
+    if ($isS.Length -ge ` + strconv.Itoa(RedactRunLength) + ` -and $vRunRx.IsMatch($isS)) { $isF.orun = 1 }
+    if ($isS.StartsWith('#', [StringComparison]::Ordinal) -or $vBlankRx.IsMatch($isS)) { continue }
+    $isK = ''
+    if ($isS.Contains('ssh-') -or $isS.Contains('ecdsa-')) { $isK = vSshKey $isS }
+    if ($isK.Length -gt 0) { $isF.sshl++ } else { $isF.sshbad = 1 }
+  }
+  if ($isPub) { $isF.unterm = 1 }
+  return [pscustomobject]@{ Flags = $isF; Labels = $isLabels.ToArray() }
 }
-function vHex([byte[]]$b, [int]$n) { $h = ''; for ($k = 0; $k -lt [Math]::Min($n, 8); $k++) { $h += $b[$k].ToString('x2') }; return $h }
 `
 
+// psBudgetLine sets the host-side time budget of a script.
+func psBudgetLine(seconds int) string {
+	return "$vBudget = " + strconv.Itoa(seconds) + "\n"
+}
+
+// remoteWindowsTextBudget is how long psReadText may filter before it gives
+// up with "too_large": below the runner's 90-second command timeout, so a
+// huge file is refused with an answer, never lost to a timeout.
+const remoteWindowsTextBudget = 45
+
 // psStat describes one path: Get-Item, then psAcl.
-var psStat = psPrelude + `try { $i = Get-Item -LiteralPath $a.Path -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-$acl = psAcl $i.FullName
-$link = psLink $i
-$target = ''
-if ($link) { $target = [string](@($i.Target)[0]) }
-$size = 0
-if (-not $i.PSIsContainer) { $size = [int64]$i.Length }
+var psStat = psPrelude + `try { $stItem = Get-Item -LiteralPath $a.Path -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+$stAcl = psAcl $stItem.FullName
+$stLink = psLink $stItem
+$stTarget = ''
+if ($stLink) { $stTarget = [string](@($stItem.Target)[0]) }
+$stSize = 0
+if (-not $stItem.PSIsContainer) { $stSize = [int64]$stItem.Length }
 psOut ([pscustomobject]@{
-  Path = $i.FullName; Size = $size; Modified = (psTime $i)
-  IsDir = [bool]($i.PSIsContainer -and -not $link); IsLink = [bool]$link; Target = $target
-  Owner = $acl.Owner; AclOk = $acl.Ok; Broad = $acl.Broad
+  Path = $stItem.FullName; Size = $stSize; Modified = (psTime $stItem)
+  IsDir = [bool]($stItem.PSIsContainer -and -not $stLink); IsLink = [bool]$stLink; Target = $stTarget
+  Owner = $stAcl.Owner; AclOk = $stAcl.Ok; Broad = $stAcl.Broad
 })`
 
 // psIdentify returns ONLY markers from one bounded read: size, the first
 // eight bytes in hex, whether the window holds a NUL, up to 64 valid labels
 // and the rule flags.
-var psIdentify = psPrelude + `try { $r = vRead $a.Path ([int64]$a.Max) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
-$nul = ([Array]::IndexOf($r.Buf, [byte]0, 0, $r.N) -ge 0)
-$x = vInspect ($vL1.GetString($r.Buf, 0, $r.N))
-$u16 = $false
-$h = vHex $r.Buf $r.N
-if ($h.StartsWith('fffe') -or $h.StartsWith('feff')) {
-  $clean = New-Object System.Collections.Generic.List[byte]
-  for ($k = 0; $k -lt $r.N; $k++) { $c = $r.Buf[$k]; if ($c -ne 0 -and $c -ne 254 -and $c -ne 255) { $clean.Add($c) } }
-  foreach ($ln in ($vL1.GetString($clean.ToArray())).Split([char]10)) {
-    if ([regex]::IsMatch($ln, 'BEGIN', 'IgnoreCase, CultureInvariant') -and [regex]::IsMatch($ln, 'PRIVATE', 'IgnoreCase, CultureInvariant')) { $u16 = $true }
-  }
+var psIdentify = psPrelude + `try { $idR = vRead $a.Path ([int64]$a.Max) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+if ($idR.Error) { psOut ([pscustomobject]@{ Error = $idR.Error }); exit 0 }
+$idNul = ([Array]::IndexOf($idR.Buf, [byte]0, 0, $idR.N) -ge 0)
+$idText = $vL1.GetString($idR.Buf, 0, $idR.N)
+$idX = vInspect $idText
+$idU16 = $false
+$idHex = vHex $idR.Buf $idR.N
+if ($idHex.StartsWith('fffe', [StringComparison]::Ordinal) -or $idHex.StartsWith('feff', [StringComparison]::Ordinal)) {
+  $idU16 = $vU16PrivRx.IsMatch($vU16Rx.Replace($idText, ''))
 }
-psOut ([pscustomobject]@{ Size = $r.Size; Magic = $h; Nul = $nul; Utf16 = $u16; Labels = $x.Labels; Flags = $x.Flags })`
+psOut ([pscustomobject]@{ Size = $idR.Size; Magic = $idHex; Nul = $idNul; Utf16 = $idU16; Labels = $idX.Labels; Flags = $idX.Flags })`
 
 // psRead reads the buffer once, decides on it with the host-side rule (as the
-// awk "decide" mode does) and only then prints base64 of THAT buffer.
-var psRead = psPrelude + `try { $r = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
-if ($r.Size -gt [int64]$a.Max -or $r.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
-$pub = vPublic $r.Buf $r.N
-if ($null -eq $pub) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
-[Console]::Out.Write('D:' + [Convert]::ToBase64String($vL1.GetBytes($pub)))`
+// awk "decide" mode does) and only then prints base64 of THAT buffer's public
+// content.
+var psRead = psPrelude + `try { $rdR = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+if ($rdR.Error) { psOut ([pscustomobject]@{ Error = $rdR.Error }); exit 0 }
+if ($rdR.Size -gt [int64]$a.Max -or $rdR.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
+$rdPub = vPublic $rdR.Buf $rdR.N
+if ($null -eq $rdPub) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
+[Console]::Out.Write('D:' + [Convert]::ToBase64String($vL1.GetBytes($rdPub)))`
 
-// psReadText reads the buffer once, refuses it when it is not text, redacts
-// it with the rules of RedactText and prints the result with the count.
-var psReadText = psPrelude + `try { $r = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-if ($r.Error) { psOut ([pscustomobject]@{ Error = $r.Error }); exit 0 }
-if ($r.Size -gt [int64]$a.Max -or $r.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
-$f = vFilter $r.Buf $r.N @($a.Keep)
-if ($f.Status -ne 'ok') { psOut ([pscustomobject]@{ Error = $f.Status }); exit 0 }
-[Console]::Out.Write('T:' + $f.N + ':' + [Convert]::ToBase64String($vL1.GetBytes($f.Text)))`
+// psReadText reads the buffer once, filters it with the rules of
+// FilterConfigText within the time budget and prints the result with the
+// count.
+var psReadText = psBudgetLine(remoteWindowsTextBudget) + psPrelude + `try { $rtR = vRead $a.Path (([int64]$a.Max) + 1) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+if ($rtR.Error) { psOut ([pscustomobject]@{ Error = $rtR.Error }); exit 0 }
+if ($rtR.Size -gt [int64]$a.Max -or $rtR.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
+$rtF = vFilter $rtR.Buf $rtR.N ([string[]]@($a.Keep))
+if ($rtF.Status -cne 'ok') { psOut ([pscustomobject]@{ Error = $rtF.Status }); exit 0 }
+[Console]::Out.Write('T:' + $rtF.N + ':' + [Convert]::ToBase64String($vL1.GetBytes($rtF.Text)))`
 
-// psList walks a tree itself rather than with Get-ChildItem -Recurse, so that
-// a directory link or junction is reported and never entered on every
-// PowerShell version, an unreadable directory is counted rather than
-// silently skipped, files over the size bound are counted, and the walk stops
-// at the bounds ON THE HOST. ACLs are not read here (a Get-Acl per file is too
-// slow for a sweep); the sweep Stats the files it keeps.
-var psList = psPrelude + `$root = [string]$a.Root
-$maxDepth = [int]$a.Depth; $max = [int]$a.Max; $maxSize = [int64]$a.MaxSize; $cap = [int64]$a.ByteCap; $cross = [bool]$a.Cross
-$excl = @(); if ($a.Exclude) { $excl = @($a.Exclude) }
-$names = @(); if ($a.Names) { $names = @($a.Names) }
-function isExcl([string]$p) {
-  foreach ($e in $excl) { if ($p -ieq $e -or $p.StartsWith($e.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+// psList walks a tree itself, with .NET's DirectoryInfo.GetFileSystemInfos on
+// the \\?\ form of every directory, so that a directory deeper than 260
+// characters is entered (Get-ChildItem on Windows PowerShell 5.1 stops at
+// MAX_PATH), a directory link or junction is reported and never entered, an
+// unreadable directory is counted rather than silently skipped, files over
+// the size bound are counted, and the walk stops at the bounds ON THE HOST.
+// A reparse point is asked what it is with Get-Item (rare); one it cannot
+// name is treated as a link, never followed. ACLs are not read here (a
+// Get-Acl per file is too slow for a sweep); the sweep Stats the files it
+// keeps.
+var psList = psPrelude + `$lsRoot = [string]$a.Root
+$lsMaxDepth = [int]$a.Depth; $lsMax = [int]$a.Max; $lsMaxSize = [int64]$a.MaxSize; $lsCap = [int64]$a.ByteCap; $lsCross = [bool]$a.Cross
+$lsExcl = @(); if ($a.Exclude) { $lsExcl = @($a.Exclude) }
+$lsNames = @(); if ($a.Names) { $lsNames = @($a.Names) }
+function lsIsExcl([string]$exP) {
+  foreach ($exE in $lsExcl) { if ([string]::Equals($exP, [string]$exE, [StringComparison]::OrdinalIgnoreCase) -or $exP.StartsWith(([string]$exE).TrimEnd([char]92) + [char]92, [StringComparison]::OrdinalIgnoreCase)) { return $true } }
   return $false
 }
-function nameOk([string]$n) {
-  if ($names.Count -eq 0) { return $true }
-  foreach ($g in $names) { if ($n -like $g) { return $true } }
+function lsNameOk([string]$noN) {
+  if ($lsNames.Count -eq 0) { return $true }
+  foreach ($noG in $lsNames) { if ($noN -ilike $noG) { return $true } }
   return $false
 }
-function mkFile($c, [bool]$link) {
-  $target = ''
-  if ($link) { $target = [string](@($c.Target)[0]) }
-  $size = 0
-  if (-not $c.PSIsContainer) { $size = [int64]$c.Length }
-  return [pscustomobject]@{ Path = $c.FullName; Size = $size; Modified = (psTime $c); IsLink = $link; Target = $target }
+function lsLinkInfo([string]$liP) {
+  try {
+    $liI = Get-Item -LiteralPath (vLong $liP) -Force
+    $liL = psLink $liI
+    $liT = ''
+    if ($liL) { $liT = [string](@($liI.Target)[0]) }
+    return [pscustomobject]@{ Link = $liL; Target = $liT }
+  } catch { return [pscustomobject]@{ Link = $true; Target = '' } }
 }
-$files = New-Object System.Collections.Generic.List[object]
-$denied = New-Object System.Collections.Generic.List[string]
-$deniedCount = 0; $unreadable = 0; $oversize = 0; $trunc = $false; $bytes = 0
-$sw = [System.Diagnostics.Stopwatch]::StartNew(); $budget = [double]$a.Budget
-try { $ri = Get-Item -LiteralPath $root -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-$rootVol = [System.IO.Path]::GetPathRoot($ri.FullName)
-if (-not $ri.PSIsContainer -or (psLink $ri)) {
-  if (nameOk $ri.Name) {
-    if ((psLink $ri) -or $ri.Length -le $maxSize) { $files.Add((mkFile $ri (psLink $ri))) } else { $oversize++ }
+$lsFiles = New-Object 'System.Collections.Generic.List[object]'
+$lsDenied = New-Object 'System.Collections.Generic.List[string]'
+$lsDeniedCount = 0; $lsUnreadable = 0; $lsOversize = 0; $lsTrunc = $false; $lsBytes = 0
+$lsBudget = [double]$a.Budget
+try { $lsRi = Get-Item -LiteralPath $lsRoot -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+$lsRootFull = vShort $lsRi.FullName
+$lsRootVol = [System.IO.Path]::GetPathRoot($lsRootFull)
+if (-not $lsRi.PSIsContainer -or (psLink $lsRi)) {
+  if (lsNameOk $lsRi.Name) {
+    $lsRl = psLink $lsRi
+    if ($lsRl -or $lsRi.Length -le $lsMaxSize) {
+      $lsRt = ''; if ($lsRl) { $lsRt = [string](@($lsRi.Target)[0]) }
+      $lsSz = 0; if (-not $lsRi.PSIsContainer) { $lsSz = [int64]$lsRi.Length }
+      $lsFiles.Add([pscustomobject]@{ Path = $lsRootFull; Size = $lsSz; Modified = (psTime $lsRi); IsLink = [bool]$lsRl; Target = $lsRt })
+    } else { $lsOversize++ }
   }
 } else {
-  $stack = New-Object System.Collections.Generic.Stack[object]
-  $stack.Push(@($ri.FullName, 0))
-  while ($stack.Count -gt 0 -and -not $trunc) {
-    if ($sw.Elapsed.TotalSeconds -ge $budget) { $trunc = $true; break }
-    $item = $stack.Pop(); $dir = [string]$item[0]; $depth = [int]$item[1]
-    try { $children = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop) } catch {
-      if ((psErr $_.Exception) -eq 'denied') {
-        $deniedCount++
-        if ($denied.Count -lt 100) { $denied.Add($dir) }
-      } else { $unreadable++ }
+  $lsStack = New-Object 'System.Collections.Generic.Stack[object]'
+  $lsStack.Push(@($lsRootFull, 0))
+  while ($lsStack.Count -gt 0 -and -not $lsTrunc) {
+    if ($vSw.Elapsed.TotalSeconds -ge $lsBudget) { $lsTrunc = $true; break }
+    $lsItem = $lsStack.Pop(); $lsDir = [string]$lsItem[0]; $lsDepth = [int]$lsItem[1]
+    try { $lsKids = ([System.IO.DirectoryInfo]::new((vLong $lsDir))).GetFileSystemInfos() } catch {
+      if ((psErr $_.Exception) -ceq 'denied') {
+        $lsDeniedCount++
+        if ($lsDenied.Count -lt 100) { $lsDenied.Add($lsDir) }
+      } else { $lsUnreadable++ }
       continue
     }
-    foreach ($c in $children) {
+    foreach ($lsC in $lsKids) {
       try {
-        if (isExcl $c.FullName) { continue }
-        $link = psLink $c
-        if ($c.PSIsContainer -and -not $link) {
-          if ($depth -lt $maxDepth -and ($cross -or [System.IO.Path]::GetPathRoot($c.FullName) -ieq $rootVol)) { $stack.Push(@($c.FullName, ($depth + 1))) }
+        $lsPath = vShort $lsC.FullName
+        if (lsIsExcl $lsPath) { continue }
+        $lsAttr = $lsC.Attributes
+        $lsIsDir = (($lsAttr -band [System.IO.FileAttributes]::Directory) -ne 0)
+        $lsLink = $false; $lsTarget = ''
+        if (($lsAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $lsInfo = lsLinkInfo $lsPath; $lsLink = $lsInfo.Link; $lsTarget = $lsInfo.Target }
+        if ($lsIsDir -and -not $lsLink) {
+          if ($lsDepth -lt $lsMaxDepth -and ($lsCross -or [string]::Equals([System.IO.Path]::GetPathRoot($lsPath), $lsRootVol, [StringComparison]::OrdinalIgnoreCase))) { $lsStack.Push(@($lsPath, ($lsDepth + 1))) }
           continue
         }
-        if (-not (nameOk $c.Name)) { continue }
-        if (-not $link -and $c.Length -gt $maxSize) { $oversize++; continue }
-        if ($files.Count -ge $max -or $bytes -ge $cap -or $sw.Elapsed.TotalSeconds -ge $budget) { $trunc = $true; break }
-        $o = mkFile $c $link
-        $files.Add($o)
-        $bytes += $o.Path.Length + $o.Target.Length + 120
-      } catch { $unreadable++ }
+        if (-not (lsNameOk $lsC.Name)) { continue }
+        $lsSize = 0
+        if (-not $lsIsDir) { $lsSize = [int64]$lsC.Length }
+        if (-not $lsLink -and $lsSize -gt $lsMaxSize) { $lsOversize++; continue }
+        if ($lsFiles.Count -ge $lsMax -or $lsBytes -ge $lsCap -or $vSw.Elapsed.TotalSeconds -ge $lsBudget) { $lsTrunc = $true; break }
+        $lsFiles.Add([pscustomobject]@{ Path = $lsPath; Size = $lsSize; Modified = $lsC.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ'); IsLink = [bool]$lsLink; Target = $lsTarget })
+        $lsBytes += $lsPath.Length + $lsTarget.Length + 120
+      } catch { $lsUnreadable++ }
     }
   }
 }
-psOut ([pscustomobject]@{ Files = $files.ToArray(); Denied = $denied.ToArray(); DeniedCount = $deniedCount; Unreadable = $unreadable; OverSize = $oversize; Truncated = $trunc })`
+psOut ([pscustomobject]@{ Files = $lsFiles.ToArray(); Denied = $lsDenied.ToArray(); DeniedCount = $lsDeniedCount; Unreadable = $lsUnreadable; OverSize = $lsOversize; Truncated = $lsTrunc })`
 
 // base64Alphabet is what may be substituted into a script. It is checked,
 // not assumed, so a future change to the encoding cannot open the literal.
@@ -608,6 +831,8 @@ func psError(path, word string) error {
 		return fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	case "not_public":
 		return fmt.Errorf("%s: %w", path, ErrNotPublic)
+	case "changed":
+		return fmt.Errorf("%s: %w", path, errChanged)
 	}
 	return fmt.Errorf("hostcrypto: %s: could not be read", path)
 }

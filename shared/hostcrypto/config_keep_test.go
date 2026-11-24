@@ -215,21 +215,24 @@ var keepExpectedDiff = []struct {
 	match   func(in []byte) bool
 	why     string
 }{
-	{"postfix", keepIndentedLine, "a Postfix continuation is an indented line; to the rule it is a line of its own, and \"!\" starts a comment"},
-	{"krb5", keepHas(" EXAMPLE.COM = {\n  permitted_enctypes = des"), "a REALM = { subsection opener inside [libdefaults] has no listable first word"},
+	// Unsupported, by design: a shell line's words are whatever the script
+	// says, so only jvm.options (one option per line) is read through
+	// ReadText.
 	{"java-options", keepOptionAfterFirstWord, "an option after a first word that is not an option (JAVA_OPTS=\"..., a quote): the line is not kept"},
-	{"nginx", keepHas("} } server {"), "a \"}\" with text after it on its line is not structure to the rule"},
-	{"", keepLoneCR, "the rule ends a line at a lone CR, the parser (but Java's) does not: the filtered text has lines the product does not see"},
+	// A lone CR cuts its line (FilterConfigText rule 2), so what follows it
+	// never crosses. These two parsers read such a line WHOLE and reject it
+	// for what follows the CR, so the whole file reports nothing while the
+	// cut line reports the directive before the CR. Closing it needs the
+	// parser to cut there too; every other line-mode parser already reads
+	// the line as the filter does.
+	{"apache", keepLoneCR, "a lone CR: the filter cuts the line, the Apache parser rejects the whole line"},
+	{"crypto-policies", keepLoneCR, "a lone CR: the filter cuts the line, the crypto-policies parser rejects the whole line"},
 }
 
-func keepHas(marker string) func([]byte) bool {
-	return func(in []byte) bool { return bytes.Contains(in, []byte(marker)) }
-}
-
-// keepIndentedLine is a line that starts with a blank and holds something.
-func keepIndentedLine(in []byte) bool {
-	for _, l := range configLines(in) {
-		if (strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t")) && strings.TrimSpace(l) != "" {
+// keepLoneCR is a "\r" not followed by "\n".
+func keepLoneCR(in []byte) bool {
+	for i, c := range in {
+		if c == '\r' && (i+1 == len(in) || in[i+1] != '\n') {
 			return true
 		}
 	}
@@ -242,16 +245,6 @@ func keepOptionAfterFirstWord(in []byte) bool {
 	for _, l := range configLines(in) {
 		t := strings.TrimLeft(l, " \t")
 		if strings.Contains(t, "-D") && !strings.HasPrefix(t, "-D") {
-			return true
-		}
-	}
-	return false
-}
-
-// keepLoneCR is a "\r" not followed by "\n".
-func keepLoneCR(in []byte) bool {
-	for i, c := range in {
-		if c == '\r' && (i+1 == len(in) || in[i+1] != '\n') {
 			return true
 		}
 	}
@@ -871,5 +864,47 @@ func TestKeepFixtureTestsAreAllListed(t *testing.T) {
 	}
 	if found != len(keepFixtureTests) {
 		t.Errorf("found %d fixture tests, keepFixtureTests lists %d: it lists one that parses no fixture", found, len(keepFixtureTests))
+	}
+}
+
+// TestKeepOptionsPerProduct: each product declares exactly the options of
+// its syntax (see the comment at the top of config_keep.go).
+func TestKeepOptionsPerProduct(t *testing.T) {
+	want := map[string]string{
+		"nginx": "@statements", "java": "@backslash @cr", "java-options": "@backslash @cr", "apache": "@backslash",
+		"openssl": "@backslash", "postfix": "@indent", "sshd": "", "ssh": "", "haproxy": "", "krb5": "", "gnutls": "", "crypto-policies": "",
+		"crypto-policies/opensslcnf.config": "@backslash", "crypto-policies/openssl_fips.config": "@backslash",
+		"crypto-policies/openssl.config": "", "crypto-policies/openssh.config": "@backslash", "crypto-policies/libssh.config": "@backslash",
+		"crypto-policies/opensshserver.config": "@backslash", "crypto-policies/gnutls.config": "", "crypto-policies/java.config": "@backslash @cr",
+		"crypto-policies/javasystem.config": "@backslash @cr", "crypto-policies/nss.config": "", "crypto-policies/krb5.config": "",
+	}
+	if len(want) != len(configKeepWords) {
+		t.Errorf("%d keys listed here, %d in the table", len(want), len(configKeepWords))
+	}
+	for key, w := range want {
+		var opts []string
+		for _, e := range configKeepWords[key] {
+			if strings.HasPrefix(e, "@") {
+				opts = append(opts, e)
+			}
+		}
+		sort.Strings(opts)
+		if got := strings.Join(opts, " "); got != w {
+			t.Errorf("%s: options %q, want %q", key, got, w)
+		}
+		if !newKeepSet(configKeepWords[key]).usable() {
+			t.Errorf("%s: the list is not usable", key)
+		}
+	}
+	// The opener-only words are gone: a dropped block drops itself now.
+	for _, w := range []string{"location", "events", "upstream"} {
+		if keepContains("nginx", w) {
+			t.Errorf("nginx lists %q", w)
+		}
+	}
+	for _, w := range []string{"directory", "location", "files"} {
+		if keepContains("apache", w) {
+			t.Errorf("apache lists %q", w)
+		}
 	}
 }

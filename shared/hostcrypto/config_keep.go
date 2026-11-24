@@ -9,13 +9,23 @@ import (
 
 // Keep words: what [Target.ReadText] lets cross from a configuration file.
 //
-// The rule (FilterConfigText) keeps a line when its FIRST WORD is listed,
-// when it is structure ("[section]", "{", "}", "};", "</...>"), or when it
-// continues a kept line. So a product's list is exactly the first words of
-// the lines its parser reads: every directive it admits, and every block
-// opener or scoping word it needs to put those directives where they belong.
-// A directive is never listed for being harmless; a word the parser does not
-// need is a line that crosses for nothing.
+// The rule (FilterConfigText) keeps a line (or, for nginx, a statement) when
+// its FIRST WORD is listed, when it is structure ("[section]", "}", "};",
+// "</...>", a "{" after a kept line), or when it continues a kept line under
+// one of the product's options. So a product's list is exactly the first
+// words of the lines its parser reads: every directive it admits, and every
+// block opener or scoping word it needs to put those directives where they
+// belong. A directive is never listed for being harmless; a word the parser
+// does not need is a line that crosses for nothing. A block the parser does
+// not read needs no word either: a dropped line ending in "{" (or a dropped
+// "<Tag ...>") drops the whole block with it.
+//
+// Each product also declares its OPTIONS, entries beginning with "@", from
+// its real syntax (configKeepOptions): nginx @statements; Java properties and
+// jvm.options @cr and @backslash; Apache, OpenSSL and the OpenSSH back-ends'
+// CRYPTO_POLICY lines @backslash; Postfix @indent. sshd/ssh, HAProxy, krb5,
+// GnuTLS, NSS, crypto-policies' config and the bare cipher string have no
+// continuation syntax and declare none.
 //
 // The lists are built from the parsers' own allowlist tables wherever a
 // parser has one. Where a parser decides by a switch or a comparison, the
@@ -24,11 +34,6 @@ import (
 // the switch disagree. The parity test there runs every configuration
 // fixture of the package through the filter and requires the parser's result
 // to be unchanged.
-//
-// Words of semicolon-terminated syntaxes (nginx) carry a trailing ";": the
-// directive runs to the next ";", across lines. A block opener never does
-// ("server {" has no ";", so a ";" word would swallow the block's first
-// directive as its continuation).
 //
 // Kept lines whose value the parser must reduce. A kept line crosses whole
 // (only runs of 40 or more base64 characters are redacted), so the following
@@ -57,32 +62,23 @@ import (
 //     ssl-default-{bind,server}-options lines, whose options the parser skips
 //     include ca-sign-pass and sni expressions; java.security
 //     security.provider.N (an inline SunPKCS11 configuration);
-//   - any line holding several directives: a one-line nginx block
-//     ("server { listen 443 ssl; ssl_password_file /p; }" crosses for its
-//     first word), several -D options on one jvm.options line.
+//   - several -D options on one jvm.options line.
 //
 // What the rule cannot express, so the parser never sees it through
 // ReadText (the parity test lists each case it meets):
 //
-//   - a value continued on a line of its own that does not end the previous
-//     one with "\": Postfix's indented continuation lines are dropped (and
-//     one starting with "!" is a comment to the rule);
-//   - a block opened by a word no list can name: a krb5 "REALM = {"
-//     subsection inside [libdefaults] (its relations then read as global), an
-//     nginx or Apache block of a third-party module (its closing brace or tag
-//     then closes the enclosing block early);
 //   - a JVM command line or a JAVA_OPTS="..." shell line (several options
 //     after one first word that is not an option): only jvm.options, one
-//     option per line, is read;
+//     option per line, is read. This is unsupported, not a gap to close: a
+//     shell line's other words are whatever the script says;
 //   - a crypto-policies config naming a custom policy: only the shipped
 //     policy names are listed;
 //   - a security.provider.N or fips.provider.N above 99, or written with a
-//     leading zero;
-//   - an nginx "}" followed by a comment on the same line (it is not
-//     structure to the rule, so the block it closes stays open).
+//     leading zero.
 
 // ConfigKeepWords returns the first words of the lines a product's parser
-// reads ([ConfigParserFor]'s names), or, for a generated crypto-policies
+// reads ([ConfigParserFor]'s names), followed by the product's options
+// ([KeepOptStatements] and the rest), or, for a generated crypto-policies
 // back-end, of the lines [ParseCryptoPolicyBackend] reads for it: the key is
 // "crypto-policies/" and the back-end's file name, such as
 // "crypto-policies/opensslcnf.config" (see [ConfigBackendKeepWords]). A name
@@ -194,34 +190,16 @@ var (
 	// then the word "include", in any case.
 	keepOpenSSLInclude = []string{".include"}
 
-	// nginx: every "}" is structure and always crosses, so every block opener
-	// the parser can meet must cross too, or its "}" closes the enclosing
-	// block early (a server's directives after a multi-line location would
-	// then read as the http level's). These are the openers of the core and
-	// the common modules; the parser reads none of their bodies.
-	keepNginxBraceOpeners = []string{"events", "location", "if", "upstream", "map", "geo",
-		"split_clients", "types", "limit_except", "charset_map", "match", "mgmt", "otel_exporter"}
-
-	// Apache: every "</...>" is structure and always crosses, and the parser
-	// SKIPS the body of every section other than <VirtualHost>, <IfModule>
-	// and <IfDefine>. A skipped section whose opener did not cross would have
-	// its body read in the enclosing scope (an SSLVerifyClient inside
-	// <Location> read as the server's). These are the containers of httpd
-	// and its bundled modules.
-	keepApacheSkippedSections = []string{"directory", "directorymatch", "files", "filesmatch",
-		"location", "locationmatch", "if", "elseif", "else", "ifversion", "ifdirective", "iffile",
-		"ifsection", "proxy", "proxymatch", "limit", "limitexcept", "requireall", "requireany",
-		"requirenone", "macro", "authnprovideralias", "authzprovideralias", "mdomainset", "mdomain"}
-
 	// /etc/crypto-policies/config holds one line, the policy name with its
 	// modules ("DEFAULT:SHA1"); the rule's first word stops at ":", so it is
 	// the base policy. These are the policies crypto-policies ships.
 	keepCryptoPolicyNames = []string{"DEFAULT", "LEGACY", "FUTURE", "FIPS", "EMPTY", "NEXT", "BSI"}
 
 	// back-ends/openssl.config is one bare cipher string, which
-	// update-crypto-policies starts with "@SECLEVEL=n"; the first word stops
-	// at "=".
-	keepBareCipherString = []string{"@SECLEVEL"}
+	// update-crypto-policies starts with "@SECLEVEL=n"; the rule's first
+	// word drops the "@" (a keep entry beginning with "@" is an option) and
+	// stops at "=".
+	keepBareCipherString = []string{"SECLEVEL"}
 )
 
 // keepJavaNumbered is how many of each numbered provider family are listed:
@@ -246,17 +224,14 @@ func keepKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// keepWords lower-cases, de-duplicates and sorts its groups, adding ";" to
-// every word when semi is set.
-func keepWords(semi bool, groups ...[]string) []string {
+// keepWords lower-cases, de-duplicates and sorts its groups, then appends
+// the options (sorted) after the words.
+func keepWords(opts []string, groups ...[]string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, g := range groups {
 		for _, w := range g {
 			w = asciiLower(w)
-			if semi {
-				w += ";"
-			}
 			if !seen[w] {
 				seen[w] = true
 				out = append(out, w)
@@ -264,6 +239,28 @@ func keepWords(semi bool, groups ...[]string) []string {
 		}
 	}
 	sort.Strings(out)
+	o := append([]string(nil), opts...)
+	sort.Strings(o)
+	return append(out, o...)
+}
+
+// The options of each syntax (see the comment at the top of the file).
+var (
+	keepOptsNone      []string
+	keepOptsNginx     = []string{KeepOptStatements}
+	keepOptsJava      = []string{KeepOptCR, KeepOptBackslash}
+	keepOptsBackslash = []string{KeepOptBackslash}
+	keepOptsPostfix   = []string{KeepOptIndent}
+)
+
+// keepWordsOnly is a list without its options.
+func keepWordsOnly(l []string) []string {
+	var out []string
+	for _, w := range l {
+		if !strings.HasPrefix(w, "@") {
+			out = append(out, w)
+		}
+	}
 	return out
 }
 
@@ -275,29 +272,27 @@ var configKeepWords = func() map[string][]string {
 		osslRefs = append(osslRefs, r.key)
 	}
 	osslSSL := [][]string{keepOpenSSLSSLKeys, cfgOSSLSettingKeys, osslRefs}
-	openssl := keepWords(false, append(osslSSL, keepOpenSSLChain, keepOpenSSLInclude,
+	openssl := keepWords(keepOptsBackslash, append(osslSSL, keepOpenSSLChain, keepOpenSSLInclude,
 		keepKeys(cfgOSSLProviders), keepKeys(cfgOSSLEngines))...)
-	opensslFragment := keepWords(false, append(osslSSL, keepOpenSSLFragment, keepOpenSSLInclude)...)
+	opensslFragment := keepWords(keepOptsBackslash, append(osslSSL, keepOpenSSLFragment, keepOpenSSLInclude)...)
 
-	java := keepWords(false, cfgJavaSettingProps, keepJavaProps, keepJavaStructure,
+	java := keepWords(keepOptsJava, cfgJavaSettingProps, keepJavaProps, keepJavaStructure,
 		keepNumbered(cfgJavaProviderPrefix), keepNumbered(cfgJavaFIPSProviderPrefix))
-	javaOptions := keepWords(false, keepJavaOptions)
+	javaOptions := keepWords(keepOptsJava, keepJavaOptions)
 
 	sshCommon := [][]string{keepSSHKeywords, keepKeys(cfgSSHSettings)}
-	ssh := keepWords(false, append(sshCommon, keepSSHBlocks)...)
-	sshd := keepWords(false, append(sshCommon, keepSSHServerBlocks)...)
+	ssh := keepWords(keepOptsNone, append(sshCommon, keepSSHBlocks)...)
+	sshd := keepWords(keepOptsNone, append(sshCommon, keepSSHServerBlocks)...)
 
-	nginx := append(keepWords(true, keepNginxDirectives, keepKeys(cfgNgxProxy)),
-		keepWords(false, keepNginxBlocks, keepNginxBraceOpeners)...)
-	sort.Strings(nginx)
+	nginx := keepWords(keepOptsNginx, keepNginxDirectives, keepKeys(cfgNgxProxy), keepNginxBlocks)
 
-	apache := keepWords(false, keepApacheDirectives, keepKeys(cfgApacheSettings), keepKeys(cfgApacheRefs),
-		keepApacheSections, keepApacheSkippedSections)
+	apache := keepWords(keepOptsBackslash, keepApacheDirectives, keepKeys(cfgApacheSettings), keepKeys(cfgApacheRefs),
+		keepApacheSections)
 
-	haproxy := keepWords(false, keepKeys(cfgHASectionKinds), keepHAProxyGlobal, keepHAProxyServers, keepHAProxyBind)
+	haproxy := keepWords(keepOptsNone, keepKeys(cfgHASectionKinds), keepHAProxyGlobal, keepHAProxyServers, keepHAProxyBind)
 
-	krb5 := keepWords(false, keepKrb5Relations, keepKrb5Includes)
-	gnutls := keepWords(false, keepGnuTLSSystem, keepKeys(cfgGnuTLSDeny), keepKeys(cfgGnuTLSAllow), keepKeys(cfgGnuTLSOther))
+	krb5 := keepWords(keepOptsNone, keepKrb5Relations, keepKrb5Includes)
+	gnutls := keepWords(keepOptsNone, keepGnuTLSSystem, keepKeys(cfgGnuTLSDeny), keepKeys(cfgGnuTLSAllow), keepKeys(cfgGnuTLSOther))
 
 	var postfixRefs []string
 	for _, r := range cfgPostfixRefSuffixes {
@@ -312,7 +307,7 @@ var configKeepWords = func() map[string][]string {
 			}
 		}
 	}
-	postfix := keepWords(false, cfgPostfixGlobals, postfixSide)
+	postfix := keepWords(keepOptsPostfix, cfgPostfixGlobals, postfixSide)
 
 	m := map[string][]string{
 		"openssl":         openssl,
@@ -323,23 +318,27 @@ var configKeepWords = func() map[string][]string {
 		"nginx":           nginx,
 		"apache":          apache,
 		"haproxy":         haproxy,
-		"crypto-policies": keepWords(false, keepCryptoPolicyNames),
+		"crypto-policies": keepWords(keepOptsNone, keepCryptoPolicyNames),
 		"krb5":            krb5,
 		"gnutls":          gnutls,
 		"postfix":         postfix,
 	}
 	// The back-ends, by the parser ParseCryptoPolicyBackend chooses for each.
+	// The OpenSSH back-ends go through cfgCPOpenSSHOptions, which reads with
+	// backslash continuation.
+	cpSSH := keepWords(keepOptsBackslash, keepWordsOnly(ssh), keepCPOpenSSHOptions)
+	cpSSHD := keepWords(keepOptsBackslash, keepWordsOnly(sshd), keepCPOpenSSHOptions)
 	for name, words := range map[string][]string{
 		"opensslcnf":    opensslFragment,
 		"openssl_fips":  opensslFragment,
-		"openssl":       keepWords(false, keepBareCipherString),
-		"openssh":       keepWords(false, ssh, keepCPOpenSSHOptions),
-		"libssh":        keepWords(false, ssh, keepCPOpenSSHOptions),
-		"opensshserver": keepWords(false, sshd, keepCPOpenSSHOptions),
+		"openssl":       keepWords(keepOptsNone, keepBareCipherString),
+		"openssh":       cpSSH,
+		"libssh":        cpSSH,
+		"opensshserver": cpSSHD,
 		"gnutls":        gnutls,
 		"java":          java,
 		"javasystem":    java,
-		"nss":           keepWords(false, keepNSSPolicy),
+		"nss":           keepWords(keepOptsNone, keepNSSPolicy),
 		"krb5":          krb5,
 	} {
 		m[cfgBackendKeepKey(name)] = words
