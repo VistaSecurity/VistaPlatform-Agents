@@ -1,7 +1,7 @@
 package main
 
 // Standalone mode (docs/design/standalone-mode.md): `device-agent collect` and
-// `device-agent host-inventory` collect once, write what they observed through
+// `device-agent host-inventory` and `device-agent kubernetes-inventory` collect once, write what they observed through
 // shared/agentoutput, and exit. They read no managed configuration, never
 // enroll and never open a connection to a control plane; the only network
 // traffic is the interrogation of the device the operator named.
@@ -27,6 +27,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentoutput"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
 
@@ -35,6 +36,8 @@ import (
 const standaloneUsageHint = `Standalone commands (no Vista Platform, nothing uploaded; see docs/standalone.md):
   collect          interrogate one device you name
   host-inventory   inventory this machine
+  kubernetes-inventory
+                   inventory the Kubernetes cluster this runs in (in a pod)
 Run "device-agent <command> --help" for a command's flags.
 
 `
@@ -65,6 +68,9 @@ type standaloneEnv struct {
 	registry *di.Registry
 	// collectHost is the host-inventory collection; nil is the real one.
 	collectHost func(ctx context.Context) (*hostinventory.Report, *di.InterrogateResult, error)
+	// kubeClient is the client for kubernetes-inventory; nil is the cluster
+	// this process runs in.
+	kubeClient func() (*kubeinventory.Client, error)
 }
 
 func (e standaloneEnv) withDefaults() standaloneEnv {
@@ -85,6 +91,9 @@ func (e standaloneEnv) withDefaults() standaloneEnv {
 			return devices.CollectLocalHostInventory(ctx, "")
 		}
 	}
+	if e.kubeClient == nil {
+		e.kubeClient = kubeinventory.InCluster
+	}
 	return e
 }
 
@@ -99,6 +108,8 @@ func runStandalone(args []string, env standaloneEnv) (code int, ok bool) {
 		return runCollect(args[1:], env.withDefaults()), true
 	case "host-inventory":
 		return runHostInventory(args[1:], env.withDefaults()), true
+	case "kubernetes-inventory":
+		return runKubernetesInventory(args[1:], env.withDefaults()), true
 	}
 	return 0, false
 }
@@ -611,5 +622,101 @@ func runHostInventory(args []string, env standaloneEnv) int {
 		w.Warn("some sections did not complete%s", failed)
 	}
 	sum, err := w.Close(partial, scope)
+	return agentoutput.ExitCode(sum, err, false)
+}
+
+// ---------------------------------------------------------------------------
+// kubernetes-inventory
+
+// repeatedFlag collects a flag given more than once.
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string     { return strings.Join(*r, ",") }
+func (r *repeatedFlag) Set(v string) error { *r = append(*r, v); return nil }
+
+func runKubernetesInventory(args []string, env standaloneEnv) int {
+	const command = "kubernetes-inventory"
+	var (
+		o           outputFlags
+		readSecrets bool
+		noKubelets  bool
+		noPEM       bool
+		labelKeys   repeatedFlag
+		timeout     time.Duration
+	)
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	o.register(fs)
+	fs.BoolVar(&readSecrets, "read-tls-secrets", false, "Also read the certificates of Secrets of type kubernetes.io/tls (the service account needs permission to list Secrets; the private key is never decoded). Also on when "+devices.EnvReadTLSSecrets+"=true")
+	fs.BoolVar(&noKubelets, "no-kubelet-probe", false, "Do not handshake with each node's kubelet port")
+	fs.BoolVar(&noPEM, "no-certificate-pem", false, "Write each certificate's parsed fields without its PEM")
+	fs.Var(&labelKeys, "label-key", "Report this label key in addition to the built-in list (repeatable)")
+	fs.DurationVar(&timeout, "timeout", kubeinventory.DefaultTimeout, "Whole-collection time limit")
+	usage := func(w io.Writer) {
+		_, _ = fmt.Fprintf(w, "Usage: %s %s [flags]\n\n", standaloneAgent, command)
+		_, _ = fmt.Fprintln(w, "Reads the Kubernetes API of the cluster this runs in, once, and writes what the cluster")
+		_, _ = fmt.Fprintln(w, "declares about its cryptography. It must run in a pod: it uses the pod's service account and")
+		_, _ = fmt.Fprintln(w, "takes no kubeconfig, token or API server address. It only reads (get and list), connects to")
+		_, _ = fmt.Fprintln(w, "the API server and to each node's kubelet port and to nothing else, and contacts no Vista")
+		_, _ = fmt.Fprintln(w, "Platform. See docs/design/kubernetes-inventory.md for what is read.")
+		_, _ = fmt.Fprintln(w, "")
+		_, _ = fmt.Fprintln(w, "Flags:")
+		printFlagDefaults(fs, w)
+		_, _ = fmt.Fprintln(w, "\nExit status: 0 complete, 1 the collection failed, 2 some classes could not be read.")
+	}
+	if code, done := parseStandaloneFlags(fs, args, usage, env); done {
+		return code
+	}
+	if fs.NArg() > 0 {
+		return usageError(env, command, "unexpected argument %q", fs.Arg(0))
+	}
+	if timeout <= 0 {
+		return usageError(env, command, "--timeout must be positive")
+	}
+	opts, err := o.options(env.stdout, env.stderr)
+	if err != nil {
+		return usageError(env, command, "%v", err)
+	}
+	// Before the output file is opened: outside a cluster there is nothing to
+	// write.
+	client, err := env.kubeClient()
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "%s %s: %v\n", standaloneAgent, command, err)
+		return 1
+	}
+	w, err := agentoutput.Open(opts, agentoutput.Run{Command: command, Flags: setFlags(fs)})
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "%s %s: %v\n", standaloneAgent, command, err)
+		return 1
+	}
+	const scope = "this cluster"
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	inv, err := kubeinventory.Collect(ctx, client, kubeinventory.Options{
+		SkipKubeletProbe: noKubelets, OmitCertificatePEM: noPEM, ExtraLabelKeys: labelKeys,
+		ReadTLSSecrets: readSecrets || strings.EqualFold(strings.TrimSpace(env.getenv(devices.EnvReadTLSSecrets)), "true"),
+	})
+	if err != nil {
+		_ = w.Error("", "kubernetes_inventory", redact.Text("kubernetes inventory failed: "+err.Error()))
+		w.Fail()
+		_, _ = w.Close(true, scope)
+		return 1
+	}
+	if err := w.Write(agentoutput.KindKubernetesInventory, inv); err != nil {
+		w.Fail()
+		_, _ = w.Close(true, scope)
+		_, _ = fmt.Fprintf(env.stderr, "%s %s: %v\n", standaloneAgent, command, err)
+		return 1
+	}
+	var failed []string
+	for _, class := range kubeinventory.Classes {
+		if s := inv.Sections[class]; s.Status == kubeinventory.StatusFailed {
+			failed = append(failed, class+" ("+s.Reason+")")
+		}
+	}
+	if len(failed) > 0 {
+		w.Warn("some classes could not be read: %s", strings.Join(failed, ", "))
+	}
+	sum, err := w.Close(len(failed) > 0, scope)
 	return agentoutput.ExitCode(sum, err, false)
 }

@@ -1,9 +1,10 @@
 # Kubernetes inventory
 
-Status: design. The protocol schema is in this repository
-([`schemas/managed/v1/defs/kubernetes-inventory.json`](../../schemas/managed/v1/defs/kubernetes-inventory.json));
-the collector, the container images, the manifest and the user guide follow in
-their own changes.
+Status: the protocol schema
+([`schemas/managed/v1/defs/kubernetes-inventory.json`](../../schemas/managed/v1/defs/kubernetes-inventory.json))
+and the collector (`shared/kubeinventory`, the `kubernetes_inventory` job and
+`device-agent kubernetes-inventory`) are in this repository. The container
+images, the manifest and the user guide follow in their own changes.
 
 ## What it is
 
@@ -60,7 +61,10 @@ writes the record to a file with no platform involved.
    can place.
 6. **The agent connects only to the API server and to kubelets.** It makes TLS
    handshakes with the API server (the connection it already has) and with
-   each node's kubelet port, and with nothing else. Ingress hosts, Gateway
+   each node's kubelet port, and with nothing else. The kubelet handshake is
+   verified against the cluster CA like any other and sends nothing; a kubelet
+   whose certificate does not verify is still recorded, from the certificates
+   the failed handshake reports. Ingress hosts, Gateway
    listeners, Services and pods are scanned by the sensor.
 
 ## How it runs
@@ -84,7 +88,7 @@ are all optional:
 | `extra_label_keys` | none | Label keys to report beyond the built-in allowlist (at most 32) |
 | `max_items_per_class` | 100,000 | Stop reading a class after this many rows; the class then answers `failed`, `item_limit` |
 | `max_part_bytes` | 8 MiB | Size at which the result is split into parts |
-| `timeout_seconds` | 600 | Whole-collection time limit |
+| `timeout_seconds` | 600 | Whole-job time limit |
 
 Parameters that would name another cluster or supply a credential
 (`kubeconfig`, `token`, `api_server`, …) make the job invalid. No parameter
@@ -98,8 +102,8 @@ interval. The agent keeps no schedule of its own for this.
 | API group | Resources | Verbs | For |
 |---|---|---|---|
 | (non-resource) | `/version` | get | Kubernetes version |
-| core | `namespaces`, `nodes`, `pods`, `services` | get, list | Cluster id (the `kube-system` namespace UID), nodes, workload attribution, Services |
-| core | `configmaps`, only those named `kube-root-ca.crt`, `istio-ca-root-cert`, `linkerd-identity-trust-roots`, `cilium-config` | get | Cluster CA bundle, mesh trust anchors, Cilium encryption settings |
+| core | `namespaces`, `nodes`, `pods`, `services` | list | Cluster id (the `kube-system` namespace UID), nodes, workload attribution, Services |
+| core | `configmaps`, only those named `istio-ca-root-cert`, `linkerd-identity-trust-roots`, `cilium-config` | get | Mesh trust anchors, Cilium encryption settings |
 | `apps` | `deployments`, `statefulsets`, `daemonsets`, `replicasets` | list | Workloads; ReplicaSets only to find a pod's Deployment |
 | `batch` | `cronjobs`, `jobs` | list | Workloads; Jobs only to find a pod's CronJob |
 | `discovery.k8s.io` | `endpointslices` | list | Which pods back a Service, and the port numbers actually used |
@@ -114,12 +118,18 @@ interval. The agent keeps no schedule of its own for this.
 | `apiregistration.k8s.io` | `apiservices` | list | Aggregated API CA bundles |
 | core, **only with the opt-in role** | `secrets` | list | Certificates in TLS Secrets |
 
+The cluster CA bundle is the one the kubelet mounts into the agent's own pod
+with its service account; no ConfigMap is read for it. `list` is the only verb
+used on anything that is not one of the three named ConfigMaps or `/version`.
+The table in the code that the collector cannot step outside is
+`shared/kubeinventory/calls.go`.
+
 A group the cluster does not serve (no cert-manager, no Gateway API, no mesh)
 answers `404`; the class reads `unsupported`, `not_installed`. A `403` reads
 `failed`, `not_permitted`. The collector does not use API discovery to decide.
 
-From `cilium-config` four settings are read (WireGuard on, IPsec on, node
-encryption on, and the mesh authentication switch) and nothing else of it.
+From `cilium-config` three settings are read (WireGuard on, IPsec on, node
+encryption on) and nothing else of it.
 From a namespace's annotations only the Linkerd injection and default inbound
 policy are read. From a pod template only container names, images, declared
 ports, the service account name, host networking, and the names of Secrets
@@ -223,7 +233,8 @@ through `secret_name` on an Ingress TLS entry or a Certificate,
 - **Cluster:** `cluster.id`, required in every part.
 - **Namespace:** required on every namespaced row.
 - **Workload:** a pod's `workload` is required and names a row of `workloads`
-  in the pod's namespace. The agent resolves it through owner references (a
+  in the pod's namespace (when a job asks for `pods` without `workloads`, the
+  reference is still there and the rows are not). The agent resolves it through owner references (a
   pod's ReplicaSet to its Deployment, a pod's Job to its CronJob). A pod
   nothing owns is its own workload of kind `Pod`; a static pod belongs to a
   workload of kind `Node`; a pod owned by a controller the agent does not list
@@ -309,17 +320,23 @@ which never decodes a key in the first place.
 
 ## Standalone
 
-`device-agent kubernetes-inventory` runs the same collector in a pod, or
-anywhere a service-account token and API server address are mounted the same
-way, and writes the same record through the standalone output format. It
-takes no kubeconfig.
+`device-agent kubernetes-inventory` runs the same collector in a pod and
+writes the same record, as one `kubernetes_inventory` record of the standalone
+output format ([`../standalone.md`](../standalone.md)). It takes no
+kubeconfig.
 
-## Tests planned
+## Tests
 
 - Schema: every fixture against its schema; the structural guards above.
-- Collector: recorded API responses per distribution served by an in-process
-  API server; a projection test per resource; each class's three answers; the
-  `tls.key` test; attribution of every pod and Service; splitting into parts.
+- Collector (`shared/kubeinventory`): a synthetic cluster served by an
+  in-process API server (`kubetest`), holding everything the collector must
+  leave behind; every collection validated against the schema; attribution of
+  every pod and Service; each class's three answers; the `tls.key` test; that
+  no projection can hold an open value; that every request is a declared call
+  and every declared call is made; splitting into parts. The fixtures are
+  written by hand, not recorded from real clusters.
+- Job (`internal/deviceagent/devices`): the dispatch, the refusals (credentials,
+  another cluster, not negotiated, not in a cluster), parts.
 - Manifest: the role compared with the list of calls the collector makes, in
   both directions (a call the role does not grant fails, a grant nothing calls
   fails), and no wildcard.

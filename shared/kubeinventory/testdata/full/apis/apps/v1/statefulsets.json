@@ -1,0 +1,97 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "db",
+    "uid": "e1606d77-4dcb-486f-8441-533e3c2d2280",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop"
+   },
+   "spec": {
+    "replicas": 1,
+    "serviceName": "db",
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "db"
+      },
+      "annotations": {
+       "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+       "example.test/note": "annotation-secret-value"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "db",
+        "image": "registry.example.test/shop/db:16",
+        "env": [
+         {
+          "name": "DB_PASSWORD",
+          "value": "env-secret-value"
+         },
+         {
+          "name": "TOKEN",
+          "valueFrom": {
+           "secretKeyRef": {
+            "name": "db-password",
+            "key": "password"
+           }
+          }
+         }
+        ],
+        "command": [
+         "/bin/app",
+         "--api-key=command-secret-value"
+        ],
+        "args": [
+         "--password=args-secret-value"
+        ],
+        "volumeMounts": [
+         {
+          "name": "tls",
+          "mountPath": "/tls"
+         }
+        ],
+        "resources": {
+         "limits": {
+          "cpu": "1"
+         }
+        },
+        "ports": [
+         {
+          "name": "pg",
+          "containerPort": 5432,
+          "protocol": "TCP"
+         }
+        ]
+       }
+      ],
+      "restartPolicy": "Always",
+      "dnsPolicy": "ClusterFirst",
+      "serviceAccountName": "db"
+     }
+    }
+   },
+   "status": {
+    "readyReplicas": 1
+   }
+  }
+ ]
+}

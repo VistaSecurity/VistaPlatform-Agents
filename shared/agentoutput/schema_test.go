@@ -14,13 +14,14 @@ func TestRecordsSatisfyPublishedSchema(t *testing.T) {
 	_ = w.Write(KindScanHost, map[string]any{"address": "10.0.0.1"})
 	_ = w.Write(KindDeviceInterrogation, map[string]any{"assets": []any{}})
 	_ = w.Write(KindHostInventory, map[string]any{"report": map[string]any{}})
+	_ = w.Write(KindKubernetesInventory, map[string]any{"cluster": map[string]any{}})
 	_ = w.Error("10.0.0.9", "scan", "refused")
 	w.Warn("a warning")
 	if _, err := w.Close(false, "5 addresses"); err != nil {
 		t.Fatal(err)
 	}
 	kinds := outputschema.ValidateJSONL(t, stdout.Bytes())
-	if strings.Join(kinds, ",") != "run,passive_observation,scan_host,device_interrogation,host_inventory,error,summary" {
+	if strings.Join(kinds, ",") != "run,passive_observation,scan_host,device_interrogation,host_inventory,kubernetes_inventory,error,summary" {
 		t.Errorf("kinds = %v", kinds)
 	}
 }
