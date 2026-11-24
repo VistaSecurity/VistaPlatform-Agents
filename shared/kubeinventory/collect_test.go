@@ -690,6 +690,36 @@ func TestCollectBareCluster(t *testing.T) {
 	section(t, inv, ClassTLSSecrets, StatusUnsupported, ReasonNotEnabled)
 }
 
+// A current kubeadm cluster is recognised by the annotation kubeadm puts on
+// the API server's static pod: nothing on the nodes says so any more.
+func TestDistributionFromTheAPIServerPod(t *testing.T) {
+	cl := kubetest.New(t)
+	cl.SetList("/api/v1/namespaces", map[string]any{"metadata": map[string]string{"name": "kube-system", "uid": "11111111-2222-4333-8444-555555555555"}})
+	for _, p := range []string{"/api/v1/nodes", "/api/v1/services", "/apis/apps/v1/deployments", "/apis/apps/v1/statefulsets", "/apis/apps/v1/daemonsets",
+		"/apis/apps/v1/replicasets", "/apis/batch/v1/cronjobs", "/apis/batch/v1/jobs", "/apis/discovery.k8s.io/v1/endpointslices"} {
+		cl.SetList(p)
+	}
+	pod := func(ns string) map[string]any {
+		return map[string]any{
+			"metadata": map[string]any{"name": "kube-apiserver-node-a", "namespace": ns, "annotations": map[string]string{
+				"kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint": "192.0.2.10:6443", "other": "annotation-secret-value"}},
+			"spec": map[string]any{"containers": []any{map[string]string{"name": "kube-apiserver", "image": "registry.example.test/kube-apiserver:v1.34.0"}}},
+		}
+	}
+	cl.SetList("/api/v1/pods", pod("default"))
+	if inv := collect(t, testClient(t, cl), Options{SkipKubeletProbe: true}); inv.Cluster.Distribution != "unknown" {
+		t.Errorf("a pod outside kube-system decided the distribution: %q", inv.Cluster.Distribution)
+	}
+	cl.SetList("/api/v1/pods", pod("kube-system"))
+	inv := collect(t, testClient(t, cl), Options{SkipKubeletProbe: true})
+	if inv.Cluster.Distribution != "kubeadm" {
+		t.Errorf("distribution %q", inv.Cluster.Distribution)
+	}
+	if doc, _ := json.Marshal(inv); bytes.Contains(doc, []byte("192.0.2.10:6443")) || bytes.Contains(doc, []byte("secret-value")) {
+		t.Error("a pod annotation is in the record")
+	}
+}
+
 func TestDistribution(t *testing.T) {
 	node := func(labels map[string]string) []nodeObject {
 		var n nodeObject

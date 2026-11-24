@@ -442,3 +442,37 @@ test('pushRelease pushes every image the package step recorded, under the releas
   const none = makeRelease();
   await assert.rejects(pushRelease({ assets: none.assets, state: none.state }), /packaged without --image-repository/);
 });
+
+// --- the manifest renderer ---------------------------------------------------
+
+import { MANIFEST, imagesOfRelease, render } from './render-kubernetes-manifest.mjs';
+
+test('the manifest is rendered with the images a release pushed, by digest', () => {
+  const text = readFileSync(MANIFEST, 'utf8');
+  const images = imagesOfRelease(meta());
+  const out = render(text, images, 'https://vista.example.test');
+  for (const i of meta().images) {
+    assert.ok(out.includes(`image: ${i.registry.reference}\n`), `${i.name} is not pinned by digest`);
+    assert.match(i.registry.reference, /@sha256:[0-9a-f]{64}$/);
+  }
+  assert.ok(!out.includes('REPLACE-WITH-VERSION'));
+  assert.ok(out.includes('platform-url: "https://vista.example.test"'));
+  assert.ok(out.includes('REPLACE-WITH-THE-DEVICE-AGENT-REGISTRATION-KEY'), 'the registration keys are not the renderer\'s to fill');
+  // Everything else is the file as committed.
+  assert.equal(out.split('\n').length, text.split('\n').length);
+});
+
+test('the renderer refuses a release without pushed images, a tag named latest, and anything that is not a reference', () => {
+  const text = readFileSync(MANIFEST, 'utf8');
+  const nightly = meta();
+  for (const i of nightly.images) delete i.registry;
+  assert.throws(() => imagesOfRelease(nightly), /did not push vista-sensor to a registry/);
+  const ok = { 'vista-device-agent': 'registry.example.test/vista/vista-device-agent:6.2.0', 'vista-sensor': 'registry.example.test/vista/vista-sensor:6.2.0' };
+  assert.ok(render(text, ok).includes('image: registry.example.test/vista/vista-sensor:6.2.0'));
+  assert.throws(() => render(text, { ...ok, 'vista-sensor': 'registry.example.test/vista/vista-sensor:latest' }), /never names :latest/);
+  assert.throws(() => render(text, { ...ok, 'vista-sensor': 'vista-sensor; rm -rf /' }), /not an image reference/);
+  assert.throws(() => render(text, { 'vista-device-agent': ok['vista-device-agent'] }), /not an image reference for vista-sensor/);
+  assert.throws(() => render(text, ok, 'http://vista.example.test'), /https/);
+  assert.throws(() => render(text, ok, 'https://user:pw@vista.example.test'), /without credentials/);
+  assert.throws(() => render(render(text, ok), ok), /names the vista-device-agent image 0 times/);
+});

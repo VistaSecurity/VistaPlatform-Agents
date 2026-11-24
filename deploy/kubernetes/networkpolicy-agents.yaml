@@ -1,0 +1,21 @@
+# OPTIONAL. Network policies for the agents' own namespace, for clusters that
+# enforce NetworkPolicy.
+#
+#   kubectl apply -f networkpolicy-agents.yaml
+#
+# Neither agent listens on anything: every connection is one the agent opens
+# (to the platform, to the Kubernetes API, to kubelets, to what the sensor
+# scans). So all traffic INTO the agents' pods is denied. Traffic OUT is left
+# alone: the sensor's work is to reach every Service and pod in the cluster,
+# and the addresses of your platform and of the cluster's API server are yours
+# to name if you want to restrict egress further.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vista-agents-deny-ingress
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]

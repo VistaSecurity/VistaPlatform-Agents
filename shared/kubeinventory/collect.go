@@ -451,6 +451,11 @@ func (k *collector) collectWorkloads(ctx context.Context) {
 	pods, podErr := list[podObject](ctx, k.c, resPods, "", nil, k.max)
 	for _, p := range pods {
 		k.addPod(p, owners)
+		// Neither the version string nor the nodes say "kubeadm"; the API
+		// server's static pod does.
+		if k.inv.Cluster.Distribution == "unknown" && p.Metadata.Namespace == kubeSystem && p.Metadata.Annotations.KubeadmAPIEndpoint != "" {
+			k.inv.Cluster.Distribution = "kubeadm"
+		}
 	}
 
 	states := make([]*workloadState, 0, len(k.workloads))

@@ -5,8 +5,9 @@ Status: the protocol schema
 and the collector (`shared/kubeinventory`, the `kubernetes_inventory` job and
 `device-agent kubernetes-inventory`) are in this repository, with the
 container images of both agents ([`../verify-release.md`](../verify-release.md),
-"Container images"). The manifest and the user guide follow in their own
-changes.
+"Container images") and the manifest that deploys them
+([`deploy/kubernetes/`](../../deploy/kubernetes/)). The user guide follows in
+its own change.
 
 ## What it is
 
@@ -339,7 +340,17 @@ kubeconfig.
   written by hand, not recorded from real clusters.
 - Job (`internal/deviceagent/devices`): the dispatch, the refusals (credentials,
   another cluster, not negotiated, not in a cluster), parts.
-- Manifest: the role compared with the list of calls the collector makes, in
-  both directions (a call the role does not grant fails, a grant nothing calls
-  fails), and no wildcard.
-- A kind cluster in CI, where the hosted runners allow it.
+- Manifest (`shared/kubeinventory/manifest_test.go`): the role in
+  `deploy/kubernetes/vista-agents.yaml` compared with the calls the collector
+  makes, in both directions (a call the role does not grant fails, a grant
+  nothing calls fails), no wildcard, no subresource, no verb but `get` and
+  `list`; the opt-in role grants `list secrets` and nothing else; the sensor
+  is bound to nothing; both pods run as an unprivileged user on a read-only
+  root with no capability.
+- A real cluster (`scripts/test-kubernetes.sh`, the `kubernetes` job of the
+  pull-request gate): the images built from the checkout, in a kind cluster,
+  under the restricted Pod Security Standard; what the API server says each
+  service account may and may not do; a collection made in a pod by the
+  device agent's service account, validated against the schema, with and
+  without the TLS Secrets opt-in; removal. It does not cover enrollment with
+  a platform, a scan job, or any distribution but kind's kubeadm.
