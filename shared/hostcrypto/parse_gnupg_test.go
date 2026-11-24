@@ -264,9 +264,17 @@ func TestParseOpenPGPPublicKeyring_HostileInput(t *testing.T) {
 }
 
 func FuzzParseOpenPGP(f *testing.F) {
-	fx := ksMakePGPRing(f)
-	f.Add(fx.ring)
-	f.Add(ksBuildKeybox(fx.ring))
+	// Small seeds keep the fuzzer's minimisation quick: a short fake RSA
+	// modulus, a legacy Ed25519 key, a user ID and a v6 key.
+	edOID := []byte("\x2b\x06\x01\x04\x01\xda\x47\x0f\x01")
+	var ring []byte
+	ring = append(ring, ksPGPOld(ksPGPTagPublicKey, ksPGPv4(1, append(ksMPIOf(bytes.Repeat([]byte{0xc3}, 16)), ksMPIOf([]byte{3})...)))...)
+	ring = append(ring, ksPGPNew(13, []byte("x"))...)
+	ring = append(ring, ksPGPNew(ksPGPTagPublicSubkey, ksPGPv4(22, append(append([]byte{9}, edOID...), ksMPIOf(append([]byte{0x40}, make([]byte, 32)...))...)))...)
+	ring = append(ring, ksPGPNew(ksPGPTagPublicKey, append(append([]byte{6}, ksPGPTime...), 27, 0, 0, 0, 4, 1, 2, 3, 4))...)
+	f.Add(ring)
+	f.Add(ksBuildKeybox(ring))
+	f.Add([]byte("Key: (private-key (rsa (n #00#)))"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		if got := ParseOpenPGPPublicKeyring(b, 20); len(got) > 20 {
 			t.Fatal("cap exceeded")
