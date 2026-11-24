@@ -9,7 +9,7 @@
   "properties": {
     "schema": { "const": "vista.agent-output/v1" },
     "kind": {
-      "enum": ["run", "passive_observation", "scan_host", "device_interrogation", "host_inventory", "error", "summary"]
+      "enum": ["run", "passive_observation", "scan_host", "device_interrogation", "host_inventory", "kubernetes_inventory", "error", "summary"]
     },
     "agent": { "enum": ["crypto-sensor", "device-agent"] },
     "agent_version": { "type": "string", "minLength": 1 },
@@ -31,7 +31,7 @@
       "then": { "properties": { "data": { "$ref": "#/$defs/summary" } } }
     },
     {
-      "if": { "properties": { "kind": { "enum": ["passive_observation", "scan_host", "device_interrogation", "host_inventory"] } } },
+      "if": { "properties": { "kind": { "enum": ["passive_observation", "scan_host", "device_interrogation", "host_inventory", "kubernetes_inventory"] } } },
       "then": { "properties": { "data": { "type": "object" } } }
     }
   ],

@@ -1,0 +1,75 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "v1beta1.metrics.k8s.io",
+    "uid": "2ea049bb-ed0f-4ad4-89de-dda247a118a2",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ]
+   },
+   "spec": {
+    "group": "metrics.k8s.io",
+    "version": "v1beta1",
+    "insecureSkipTLSVerify": true,
+    "service": {
+     "namespace": "kube-system",
+     "name": "metrics-server",
+     "port": 443
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Available",
+      "status": "True"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "v1.apps",
+    "uid": "def514b5-7986-44be-883e-59e7434666f0",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ]
+   },
+   "spec": {
+    "group": "apps",
+    "version": "v1"
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Available",
+      "status": "True"
+     }
+    ]
+   }
+  }
+ ]
+}

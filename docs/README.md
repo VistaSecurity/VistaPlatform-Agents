@@ -5,8 +5,8 @@
 No platform, no account, nothing uploaded: name what to look at and the agent
 writes what it observed to a file.
 
-- [`standalone.md`](standalone.md): how to run `capture`, `scan`, `collect`
-  and `host-inventory`, the flags, and what to do when something goes wrong.
+- [`standalone.md`](standalone.md): how to run `capture`, `scan`, `collect`,
+  `host-inventory` and `kubernetes-inventory`, the flags, and what to do when something goes wrong.
 - [`standalone-output.md`](standalone-output.md): the output format record by
   record, the CSV columns, what is stable, and `jq` recipes.
 

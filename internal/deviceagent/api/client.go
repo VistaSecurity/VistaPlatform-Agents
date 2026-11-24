@@ -367,7 +367,7 @@ func (c *OutboundClient) GetNextJob() (*models.Job, error) {
 	// hands a newer job type only to an agent that declares it, so an agent
 	// that predates one is never given a job it would strand.
 	extra := http.Header{}
-	extra.Set(di.AgentCapabilitiesHeader, strings.Join(di.AgentCapabilities(), ","))
+	extra.Set(di.AgentCapabilitiesHeader, strings.Join(AgentCapabilities(), ","))
 
 	status, header, body, err := c.call(http.MethodGet, url, nil, maxJobBytes, extra)
 	if err != nil {

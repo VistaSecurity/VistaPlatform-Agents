@@ -1,0 +1,99 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "web-7c9d8f6b5",
+    "uid": "df93d73e-eded-4106-8700-a3f625e4e47d",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "web",
+      "uid": "c9bef405-febe-47bc-8225-30fa308c1117",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {},
+   "status": {}
+  },
+  {
+   "metadata": {
+    "name": "api-5d5d5d5d5",
+    "uid": "ae8b5a5a-ce6f-48d0-8a21-0219f9e04bb9",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "mesh",
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "name": "api",
+      "uid": "be78b7d4-fedf-412c-8e4e-b2944265b0ae",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {},
+   "status": {}
+  },
+  {
+   "metadata": {
+    "name": "canary-6f6f6f6f6",
+    "uid": "a39bd509-5f70-4354-88f7-cf898efb3d61",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "ownerReferences": [
+     {
+      "apiVersion": "argoproj.io/v1alpha1",
+      "kind": "Rollout",
+      "name": "canary",
+      "uid": "bf3638c6-02a9-4cfb-84f4-bee1ab71cc5c",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {},
+   "status": {}
+  }
+ ]
+}

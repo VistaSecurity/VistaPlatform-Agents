@@ -18,6 +18,7 @@ import (
 	"time"
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
@@ -35,7 +36,18 @@ const hostInventoryNegotiationWait = 2 * time.Minute
 
 // AgentCapabilities is what this build of the device agent can do; the names
 // are the ones the platform has always read from X-Agent-Capabilities.
-func AgentCapabilities() []string { return di.AgentCapabilities() }
+//
+// kubernetes_inventory_v1 is offered only by an agent that runs in a cluster
+// (a mounted service account), because only such an agent can run the job: a
+// platform that sees the capability may queue it, and one that does not never
+// hands this agent a job it would have to refuse.
+func AgentCapabilities() []string {
+	caps := di.AgentCapabilities()
+	if kubeinventory.InClusterAvailable() {
+		caps = append(caps, kubeinventory.Capability)
+	}
+	return caps
+}
 
 // Gate is the client's view of the platform's protocol.
 func (c *OutboundClient) Gate() *managedprotocol.Gate { return c.gate }
