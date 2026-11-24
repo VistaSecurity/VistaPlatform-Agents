@@ -229,6 +229,38 @@ jobs:
             echo "::error::$bin was built with tags '$got'; release/agents.json says '$tags'"; exit 1
           fi
 
+  # The agents in a real cluster: scripts/test-kubernetes.sh builds the two
+  # images from this checkout, creates a kind cluster on the runner, applies
+  # deploy/kubernetes/ under the restricted Pod Security Standard, asks the
+  # API server what each service account may do, runs a collection in a pod as
+  # the device agent's service account (with and without the TLS Secrets
+  # opt-in) and checks it, and removes everything. kind and kubectl are the
+  # ones the hosted runner image carries; kind pulls its node image from Docker
+  # Hub, which is the one thing here that this repository does not pin.
+  kubernetes:
+    name: kubernetes (kind)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Tool versions
+        run: |
+          kind version
+          kubectl version --client
+          docker version --format 'docker {{.Server.Version}}'
+      - name: Run the agents in a kind cluster
+        run: scripts/test-kubernetes.sh
+
   lint:
     name: lint (gofmt, golangci-lint)
     runs-on: ubuntu-24.04
@@ -290,7 +322,7 @@ jobs:
   pr-gate:
     name: pr-gate
     if: always()
-    needs: [workflow-guard, build-test, cross-build, container-build, lint, govulncheck]
+    needs: [workflow-guard, build-test, cross-build, container-build, kubernetes, lint, govulncheck]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -178,9 +178,16 @@ type podSpec struct {
 }
 
 type podObject struct {
-	Metadata meta    `json:"metadata"`
-	Spec     podSpec `json:"spec"`
-	Status   struct {
+	Metadata struct {
+		meta
+		Annotations struct {
+			// kubeadm writes this on the API server's static pod; it is how
+			// a kubeadm cluster is told from any other.
+			KubeadmAPIEndpoint string `json:"kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint"`
+		} `json:"annotations"`
+	} `json:"metadata"`
+	Spec   podSpec `json:"spec"`
+	Status struct {
 		Phase  string `json:"phase"`
 		PodIP  string `json:"podIP"`
 		PodIPs []struct {
