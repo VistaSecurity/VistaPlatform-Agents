@@ -305,6 +305,7 @@ const (
 	KeystoreGnuPG    = "gnupg"    // a GnuPG home
 	KeystoreKeytab   = "keytab"   // a Kerberos keytab
 	KeystoreKeychain = "keychain" // a macOS keychain file
+	KeystoreUBER     = "uber"     // Bouncy Castle UBER
 )
 
 // How a keystore was opened.
@@ -337,11 +338,13 @@ type Keystore struct {
 // KeystoreEntry is one entry of a keystore.
 type KeystoreEntry struct {
 	Alias string `json:"alias,omitempty"`
-	// Kind is "private_key", "certificate", "secret_key", or for a keytab
-	// "kerberos_key".
+	// Kind is "private_key", "certificate", "secret_key"; for a keytab
+	// "kerberos_key"; for an OpenPGP keyring "pgp_public_key" or
+	// "pgp_public_subkey".
 	Kind      string `json:"kind"`
 	Algorithm string `json:"algorithm,omitempty"`
 	SizeBits  int    `json:"size_bits,omitempty"`
+	Curve     string `json:"curve,omitempty"`
 	// CertificateFingerprint is the SHA-256 of the entry's (leaf) certificate.
 	// The certificate itself is in [Report.Certificates] with this keystore
 	// as its Location.Container.
@@ -422,6 +425,11 @@ type CryptoConfig struct {
 	MACs                []string `json:"macs,omitempty"`
 	SignatureAlgorithms []string `json:"signature_algorithms,omitempty"`
 	HostKeyAlgorithms   []string `json:"host_key_algorithms,omitempty"`
+	// DisabledProtocols are protocol versions the file switches off when it
+	// does not state the allowed set (HAProxy "no-tlsv10" alone). The allowed
+	// set then depends on the product's and library's defaults, which the
+	// file does not say and this record does not guess.
+	DisabledProtocols []string `json:"disabled_protocols,omitempty"`
 	// DisabledAlgorithms is a deny list (java.security
 	// jdk.tls.disabledAlgorithms, a crypto-policies back end).
 	DisabledAlgorithms []string `json:"disabled_algorithms,omitempty"`
