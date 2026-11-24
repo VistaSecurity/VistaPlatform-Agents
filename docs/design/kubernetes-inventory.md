@@ -6,8 +6,8 @@ and the collector (`shared/kubeinventory`, the `kubernetes_inventory` job and
 `device-agent kubernetes-inventory`) are in this repository, with the
 container images of both agents ([`../verify-release.md`](../verify-release.md),
 "Container images") and the manifest that deploys them
-([`deploy/kubernetes/`](../../deploy/kubernetes/)). The user guide follows in
-its own change.
+([`deploy/kubernetes/`](../../deploy/kubernetes/)). Installing and running
+them: [`../device-agent/KUBERNETES.md`](../device-agent/KUBERNETES.md).
 
 ## What it is
 
