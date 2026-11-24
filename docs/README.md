@@ -35,5 +35,7 @@ writes what it observed to a file.
 
 - [`design/standalone-mode.md`](design/standalone-mode.md): the standalone
   mode design and the rules it keeps.
+- [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md): the
+  Kubernetes inventory job, what it reads and the record it returns.
 - [`development/standalone.md`](development/standalone.md): where the
   standalone code is, how a run goes, and the tests that hold each rule.
