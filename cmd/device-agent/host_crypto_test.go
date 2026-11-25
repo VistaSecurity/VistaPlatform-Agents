@@ -543,7 +543,7 @@ func TestStandaloneHostCrypto_FlagsAndUsage(t *testing.T) {
 		}
 	}
 	help := runCmd(t, standaloneEnv{}, "host-crypto", "--help")
-	for _, want := range []string{"--remote", "-home-directories", "-default-keystore-passwords", "-exclude", "-root", "-identity-file", "never their contents", "Exit status"} {
+	for _, want := range []string{"--remote", "-home-directories", "-default-keystore-passwords", "-exclude", "-root", "-identity-file", "-allow-inherited-permissions", "never their contents", "Exit status"} {
 		if help.code != 0 || !strings.Contains(help.stdout, want) {
 			t.Errorf("help lacks %q", want)
 		}

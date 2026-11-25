@@ -65,6 +65,7 @@ type hostCryptoFlags struct {
 	exclude                  stringList
 	roots                    stringList
 	maxDuration              time.Duration
+	allowInherited           bool
 }
 
 func runHostCrypto(args []string, env standaloneEnv) int {
@@ -81,6 +82,8 @@ func runHostCrypto(args []string, env standaloneEnv) int {
 	fs.Var(&f.exclude, "exclude", "Absolute path never entered (repeatable)")
 	fs.Var(&f.roots, "root", "Absolute path to sweep for key material by content (by name and size with --remote; repeatable). No sweep without one")
 	fs.DurationVar(&f.maxDuration, "max-duration", 15*time.Minute, "Bound on the whole collection (1m to 1h)")
+	fs.BoolVar(&f.allowInherited, "allow-inherited-permissions", false, "On Windows, accept an output file that keeps its folder's permissions when the volume cannot hold "+
+		"an owner-only ACL (FAT, some shares). Without it such a run stops before writing")
 	f.output.register(fs)
 
 	usage := func(w io.Writer) {
@@ -110,6 +113,10 @@ func runHostCrypto(args []string, env standaloneEnv) int {
 	if err != nil {
 		return usageError(env, "host-crypto", "%v", err)
 	}
+	// The output says where every key on the host is and who can read it:
+	// owner-only on every platform (on Windows: the running user, SYSTEM and
+	// Administrators, nothing inherited), set when the file is created.
+	opts.OwnerOnly, opts.AllowInherited = true, f.allowInherited
 	collectOpts := hostcrypto.Options{
 		HomeDirectories:          f.homeDirectories,
 		DefaultKeystorePasswords: f.defaultKeystorePasswords,

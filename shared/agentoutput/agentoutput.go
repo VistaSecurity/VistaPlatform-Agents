@@ -182,6 +182,18 @@ type Options struct {
 	Stderr io.Writer
 	// Now defaults to time.Now; tests pin it.
 	Now func() time.Time
+
+	// OwnerOnly creates the output file readable by its owner only on
+	// EVERY platform: 0600 on Linux and macOS (as always), and on Windows an
+	// ACL granting only the running user, SYSTEM and Administrators, with
+	// inheritance from the folder removed, set when the file is created and
+	// before anything is written. A command whose output says where a host's
+	// secrets are (host-crypto) sets it; the others may adopt it.
+	OwnerOnly bool
+	// AllowInherited lets an OwnerOnly file keep the folder's permissions
+	// when the volume cannot hold the ACL (FAT, some network shares); without
+	// it Open refuses with [ErrCannotRestrict].
+	AllowInherited bool
 }
 
 // Writer writes one run's records. It is safe for concurrent use: a scan
@@ -254,8 +266,17 @@ func Open(opts Options, run Run) (*Writer, error) {
 		if dir == "" {
 			dir = "."
 		}
-		f, err := os.CreateTemp(dir, "."+base+".partial-*")
+		var f *os.File
+		var err error
+		if opts.OwnerOnly {
+			f, err = createOwnerOnly(dir, "."+base+".partial-", opts.AllowInherited)
+		} else {
+			f, err = os.CreateTemp(dir, "."+base+".partial-*")
+		}
 		if err != nil {
+			if errors.Is(err, ErrCannotRestrict) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("cannot create the output file in %s: %w", dir, err)
 		}
 		// CreateTemp already makes the file 0600 on Unix; Chmod states it, and
