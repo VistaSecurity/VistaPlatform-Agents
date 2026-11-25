@@ -174,5 +174,10 @@
         "detail": "stopped after 2000 records"
       }
     ]
+  },
+  "metadata": {
+    "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssh_host_key_type": "ssh-ed25519",
+    "ssh_host_key_verification": "first_use"
   }
 }

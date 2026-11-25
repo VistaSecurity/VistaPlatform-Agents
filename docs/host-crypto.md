@@ -132,9 +132,15 @@ what it had, marked as not finished).
 ## Another host, over SSH
 
 A remote collection connects with the credentials stored for that host
-(username and password, or a private key), checks the host's key against the
-one pinned for it (or against `known_hosts`, or records it on first contact so
-you can pin it) and never falls back to anything weaker. WinRM is not
+(username and password, or a private key). When a key is pinned for the host,
+a different key aborts the connection before any credential is sent. Without
+a pin the key is checked against the agent's `known_hosts`, or, on first
+contact, accepted; either way the result names the key it connected through
+and how it was trusted (`ssh_host_key_fingerprint`,
+`ssh_host_key_verification`), so the platform can show it and pin it for the
+next collection. Until it is pinned, a first collection trusts the key it is
+shown and sends the credential to that host: pin the key when you can. The
+agent never falls back to anything weaker. WinRM is not
 supported; a Windows host is reached through its OpenSSH server, with
 PowerShell 5.1 or later.
 

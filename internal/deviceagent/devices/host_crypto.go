@@ -417,6 +417,7 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 	defer release()
 
 	target := "this host"
+	var hostKey map[string]interface{}
 	var rep *hostcrypto.Report
 	var collectErr error
 	switch params.Mode {
@@ -446,6 +447,7 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 		}
 		// The session is authenticated; the credentials are done with.
 		security.ClearCredentials(decrypted)
+		hostKey = hostCryptoHostKey(runner)
 		rep, collectErr = CollectRemoteHostCrypto(ctx, runner, params.Options)
 		if closer, ok := runner.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -474,7 +476,47 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 		}
 		e.auditLogger.LogInterrogation(job.ID.String(), target, JobTypeHostCrypto, outcome, details, collectErr)
 	}
-	return e.submitter.SubmitResult(HostCryptoJobResult(job, rep, collectErr, stopped))
+	res := HostCryptoJobResult(job, rep, collectErr, stopped)
+	if len(hostKey) > 0 {
+		res.Metadata = hostKey
+	}
+	return e.submitter.SubmitResult(res)
+}
+
+// hostKeyReporter is a transport that knows the SSH host key it connected
+// through (a test's fake transport implements it).
+type hostKeyReporter interface {
+	HostKeyInfo() (fingerprint, keyType, verification string)
+}
+
+// hostCryptoHostKey is the host key a remote collection connected through and
+// how it was trusted ("pinned", "known_hosts", "first_use", "skipped"), under
+// the metadata names the device-interrogation results already use
+// (ssh_host_key_fingerprint, ssh_host_key_verification) plus its type. With
+// them the platform can record the key a first-use connection saw and pin
+// it for the next job; without them every unpinned job would stay
+// trust-on-first-use with nobody told which key was trusted.
+func hostCryptoHostKey(r hostinventory.Runner) map[string]interface{} {
+	var fp, typ, how string
+	switch t := r.(type) {
+	case *hostinventory.SSHRunner:
+		fp, typ, how = t.HostKeyFingerprint, t.HostKeyType, t.HostKeyVerified
+	case hostKeyReporter:
+		fp, typ, how = t.HostKeyInfo()
+	default:
+		return nil
+	}
+	if fp == "" {
+		return nil
+	}
+	m := map[string]interface{}{"ssh_host_key_fingerprint": fp}
+	if typ != "" {
+		m["ssh_host_key_type"] = typ
+	}
+	if how != "" {
+		m["ssh_host_key_verification"] = how
+	}
+	return m
 }
 
 // HostCryptoJobResult is the result a host_crypto job sends.

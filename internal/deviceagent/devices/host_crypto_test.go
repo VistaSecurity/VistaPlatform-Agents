@@ -294,6 +294,11 @@ func (r *hcjRunner) ReadFile(ctx context.Context, path string) ([]byte, error) {
 
 func (r *hcjRunner) Close() error { r.close++; return nil }
 
+// HostKeyInfo is what an SSH runner learned in the handshake.
+func (r *hcjRunner) HostKeyInfo() (string, string, string) {
+	return "SHA256:" + strings.Repeat("Q", 43), "ssh-ed25519", "first_use"
+}
+
 // A remote job: sealed credentials opened with the agent secret and handed
 // to the dial with the job's address and pinned host key, the platform asked
 // of the host, the remote target used (no agent id, mode remote, no private
@@ -355,6 +360,12 @@ func TestExecute_HostCryptoRemoteJob(t *testing.T) {
 	}
 	if runner.close != 1 {
 		t.Fatalf("transport closed %d times", runner.close)
+	}
+	// The host key the job connected through rides in the result, so the
+	// platform can pin what a first-use connection trusted.
+	if res.Metadata["ssh_host_key_fingerprint"] != "SHA256:"+strings.Repeat("Q", 43) ||
+		res.Metadata["ssh_host_key_verification"] != "first_use" || res.Metadata["ssh_host_key_type"] != "ssh-ed25519" {
+		t.Fatalf("host key not in the result: %v", res.Metadata)
 	}
 	b, _ := json.Marshal(res)
 	if where := hcjFindSecret(b, secret); where != "" {

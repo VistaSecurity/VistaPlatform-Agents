@@ -184,7 +184,19 @@
       "type": [
         "object",
         "null"
-      ]
+      ],
+      "properties": {
+        "ssh_host_key_fingerprint": {
+          "type": "string",
+          "pattern": "^SHA256:[A-Za-z0-9+/]{43}=?$",
+          "description": "A remote job reached over SSH (host_crypto): the host key the connection was made through, for the platform to record and pin."
+        },
+        "ssh_host_key_type": { "type": "string", "description": "Its algorithm: ssh-ed25519, ecdsa-sha2-nistp256, ssh-rsa." },
+        "ssh_host_key_verification": {
+          "enum": ["pinned", "known_hosts", "first_use", "skipped"],
+          "description": "How the key was trusted: against the job's ssh_host_key_fingerprint, the agent's known_hosts, accepted on first use (record and pin it), or not checked (insecure_skip_verify)."
+        }
+      }
     },
     "facts": {
       "type": "array",

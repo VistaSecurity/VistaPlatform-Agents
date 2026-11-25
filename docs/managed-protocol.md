@@ -103,7 +103,15 @@ that negotiates it ([`host-crypto.md`](host-crypto.md)):
   ([`defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)),
   also on a failure that has a partial report. A job's overall timeout, when
   it names no `timeout_seconds`, is its `max_duration_seconds` (15 minutes by
-  default) plus two minutes.
+  default) plus two minutes. A remote job's result carries the SSH host key
+  it connected through in `metadata`: `ssh_host_key_fingerprint`,
+  `ssh_host_key_type` and `ssh_host_key_verification` (`pinned`,
+  `known_hosts`, `first_use` or `skipped`), the names device interrogation
+  already uses, so the platform can pin a key first seen on first use. A job
+  runs whether or not the scheduled collection (`host_crypto_enabled`) is on,
+  but its `home_directories` and `default_keystore_passwords` never exceed the
+  agent's confirmed settings: the agent lowers them and says so in the
+  report's errors (step `scope`).
 - **Local submissions.** With the setting `host_crypto_enabled` on, the agent
   collects its own host on a schedule and posts
   `POST /api/v1/device-interrogation-service/agents/{id}/host-crypto`
