@@ -63,6 +63,9 @@ type JobExecutor struct {
 	// buildRemoteRunner. A field only so a test can hand the REAL job path a
 	// runner without an SSH server, and see what it was asked to dial.
 	dialRemote func(transport hostinventory.Transport, params, creds map[string]interface{}) (hostinventory.Runner, error)
+	// hostCryptoExcludes is the agent's host_crypto_exclude_paths setting as
+	// it is now (SetHostCryptoExcludes); nil: none.
+	hostCryptoExcludes func() []string
 }
 
 // NewJobExecutor creates a new job executor.

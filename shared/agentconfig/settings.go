@@ -33,7 +33,7 @@ const (
 
 	// Host crypto inventory (docs/host-crypto.md), beside the host inventory
 	// pair and spelled the same way: the switch, its cadence, the two
-	// opt-ins and the paths the scheduled collection never enters.
+	// opt-ins and the paths no collection by the agent enters.
 	KeyHostCryptoEnabled                  Key = "host_crypto_enabled"
 	KeyHostCryptoInterval                 Key = "host_crypto_interval_seconds"
 	KeyHostCryptoHomeDirectories          Key = "host_crypto_home_directories"
@@ -218,9 +218,9 @@ var Registry = func() map[Key]Field {
 			Key: KeyHostCryptoExcludePaths, Runtimes: []Runtime{RuntimeAgent},
 			Kind: KindPathList, Apply: ApplyImmediate, Default: Text(""),
 			OlderDevicesRunDefault: true,
-			Label:                  "Paths scheduled host crypto inventory never enters",
-			Description: "Absolute paths, one per line, that the agent's scheduled host crypto collection never reads or walks into " +
-				"(a collection requested from the console carries its own list). " +
+			Label:                  "Paths host crypto inventory never enters",
+			Description: "Absolute paths, one per line, that no host crypto collection by this agent reads or walks into: " +
+				"the scheduled one and every requested one, local or remote (on a remote host they are paths on that host). " +
 				"Pseudo-filesystems, network mounts and container layer stores are always skipped.",
 		},
 		{

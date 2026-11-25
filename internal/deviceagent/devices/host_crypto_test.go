@@ -453,3 +453,80 @@ func TestHostCryptoJobResult(t *testing.T) {
 		t.Fatalf("a report carrying key material was sent: %+v", res)
 	}
 }
+
+// The operator's host_crypto_exclude_paths bind every job, local and remote:
+// with the setting naming the sweep root, the key there is not found and the
+// scope lists the path beside the job's own; without it, the key is found.
+func TestExecute_HostCryptoSettingExcludesBindEveryJob(t *testing.T) {
+	dir, _ := hcjKeyDir(t)
+	// A remote sweep goes by name: give it one it identifies.
+	b, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server.key"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found := func(r *hostcrypto.Report) bool {
+		for _, k := range r.PrivateKeys {
+			if strings.HasPrefix(k.Location.Path, dir) {
+				return true
+			}
+		}
+		return false
+	}
+	run := func(t *testing.T, mode string, setting []string) *hostcrypto.Report {
+		t.Helper()
+		rec := &recordingClient{}
+		exec := &JobExecutor{submitter: rec, config: secretConfig(),
+			dialRemote: func(hostinventory.Transport, map[string]interface{}, map[string]interface{}) (hostinventory.Runner, error) {
+				return &hcjRunner{inner: hostinventory.NewLocalRunner()}, nil
+			}}
+		if setting != nil {
+			exec.SetHostCryptoExcludes(func() []string { return setting })
+		}
+		job := hcjJob(t, map[string]any{"mode": mode, "ip_address": "192.0.2.41",
+			"options": map[string]any{"sweep_roots": []string{dir}, "exclude_paths": []string{"/job/own"}, "max_duration_seconds": 120}})
+		if mode == "remote" {
+			job.Credentials = map[string]interface{}{"username": "u", "password": "p-123456"}
+			sealJob(job)
+		}
+		if err := exec.Execute(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+		res := rec.last()
+		if res == nil || !res.Success {
+			t.Fatalf("result %+v", res)
+		}
+		return hcjReport(t, res)
+	}
+	modes := []string{"local"}
+	if runtime.GOOS != "windows" {
+		modes = append(modes, "remote")
+	}
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			without := run(t, mode, nil)
+			if !found(without) || strings.Join(without.Scope.ExcludedPaths, ",") != "/job/own" {
+				t.Fatalf("without the setting: found %v, excluded %v", found(without), without.Scope.ExcludedPaths)
+			}
+			with := run(t, mode, []string{dir, "/job/own"})
+			if found(with) {
+				t.Fatal("the setting's excluded path was entered")
+			}
+			ex := strings.Join(with.Scope.ExcludedPaths, ",")
+			if !strings.Contains(ex, dir) || strings.Count(ex, "/job/own") != 1 {
+				t.Fatalf("excluded %v: want the job's and the setting's, each once", with.Scope.ExcludedPaths)
+			}
+		})
+	}
+}
+
+func TestMergeHostCryptoExcludes(t *testing.T) {
+	if got := MergeHostCryptoExcludes([]string{"/a", "/b"}, []string{"/b", "/c"}); strings.Join(got, ",") != "/a,/b,/c" {
+		t.Fatalf("%v", got)
+	}
+	if got := MergeHostCryptoExcludes(nil, nil); len(got) != 0 {
+		t.Fatalf("%v", got)
+	}
+}

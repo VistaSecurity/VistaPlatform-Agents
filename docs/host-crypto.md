@@ -66,6 +66,11 @@ bytes, raw, hex or base64, may appear in what it returns.
    job): files under them are identified by their content, so a key saved as
    `backup.txt` is found.
 
+A section that is partial because the account was not allowed to read
+something says so in its error, with what it needs: "(needs root)", "(needs
+root and Full Disk Access)" or "(needs SYSTEM or an elevated administrator)".
+The same error from several places is listed once, with a count.
+
 Every part of a report says whether it was read completely (`ok`), in part
 (`partial`), not at all (`failed`), cannot be on this system (`unsupported`)
 or was not asked for (`skipped`). An empty list means "none found" only when
@@ -106,8 +111,10 @@ confirm) or with a flag.
 ## Paths it never enters
 
 `host_crypto_exclude_paths` (one absolute path per line, at most 64) lists
-paths the scheduled collection never reads or walks into; a collection you ask
-for carries its own list (`exclude_paths`, or `--exclude`). Whatever you set,
+paths no collection by that agent reads or walks into: the scheduled one, and
+every collection you ask for, local or remote (on a remote host they are paths
+on that host), added to the request's own list (`exclude_paths`). A standalone
+run takes `--exclude`. Whatever you set,
 pseudo-filesystems (`/proc`, `/sys`), network mounts and container image
 stores are never entered.
 

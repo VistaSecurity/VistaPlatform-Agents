@@ -494,6 +494,8 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	// A host crypto job can run for up to an hour; the agent's lifetime
 	// cancels it (and its partial report is sent) rather than outliving Stop.
 	jobExecutor.SetShutdown(agent.context())
+	// The operator's excluded paths bind every collection, a job's included.
+	jobExecutor.SetHostCryptoExcludes(func() []string { return agent.hostCrypto.options().ExcludePaths })
 	// What the file says this agent is running, told to the platform on every
 	// beat. Without it the platform has nothing to go on for a device it has
 	// never been configured for, resolves the built-in defaults, and the first

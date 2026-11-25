@@ -337,6 +337,32 @@ func CollectRemoteHostCrypto(ctx context.Context, runner hostinventory.Runner, o
 // thirty seconds.
 func (e *JobExecutor) SetShutdown(ctx context.Context) { e.shutdown = ctx }
 
+// SetHostCryptoExcludes hands the executor the operator's
+// host_crypto_exclude_paths setting. Its paths are added to every job's own
+// exclude_paths, local and remote alike (on a remote host they are paths on
+// that host): an operator's "never enter" binds every collection this agent
+// makes, not only the scheduled one.
+func (e *JobExecutor) SetHostCryptoExcludes(f func() []string) { e.hostCryptoExcludes = f }
+
+// MergeHostCryptoExcludes returns the job's exclusions with the setting's
+// added, each once, in the job's order and then the setting's.
+func MergeHostCryptoExcludes(job, setting []string) []string {
+	if len(setting) == 0 {
+		return job
+	}
+	seen := make(map[string]bool, len(job)+len(setting))
+	out := make([]string, 0, len(job)+len(setting))
+	for _, list := range [][]string{job, setting} {
+		for _, p := range list {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 // executeHostCrypto runs a host_crypto job.
 func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job) error {
 	if e.negotiated != nil && !e.negotiated(hostcrypto.CapabilityHostCrypto) {
@@ -345,6 +371,9 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 	params, err := ParseHostCryptoJob(job.Parameters)
 	if err != nil {
 		return e.submitFailure(job, err.Error())
+	}
+	if e.hostCryptoExcludes != nil {
+		params.Options.ExcludePaths = MergeHostCryptoExcludes(params.Options.ExcludePaths, e.hostCryptoExcludes())
 	}
 
 	ctx, cancel := context.WithCancel(parent)

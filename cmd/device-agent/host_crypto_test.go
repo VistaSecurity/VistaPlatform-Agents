@@ -31,6 +31,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/api"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/devices"
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/outputschema"
 	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocolschema"
 	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/protocoltest"
@@ -277,10 +278,11 @@ func TestHostCryptoLoop_SkipsWhileAJobCollects(t *testing.T) {
 // hcjPlatform is a protocol-1 stub that answers every heartbeat with values
 // and records the host-crypto posts, held to host-crypto.submission.
 type hcjPlatform struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	values agentconfig.Values
-	posts  [][]byte
+	srv     *httptest.Server
+	mu      sync.Mutex
+	values  agentconfig.Values
+	posts   [][]byte
+	results [][]byte
 }
 
 func newHCJPlatform(t *testing.T, values agentconfig.Values) *hcjPlatform {
@@ -297,6 +299,12 @@ func newHCJPlatform(t *testing.T, values agentconfig.Values) *hcjPlatform {
 			body, _ := io.ReadAll(r.Body)
 			p.mu.Lock()
 			p.posts = append(p.posts, body)
+			p.mu.Unlock()
+			_, _ = w.Write([]byte(`{"message":"accepted"}`))
+		case strings.HasSuffix(r.URL.Path, "/results"):
+			body, _ := io.ReadAll(r.Body)
+			p.mu.Lock()
+			p.results = append(p.results, body)
 			p.mu.Unlock()
 			_, _ = w.Write([]byte(`{"message":"accepted"}`))
 		default:
@@ -653,5 +661,38 @@ func TestStandaloneHostCrypto_SecrecyEndToEnd(t *testing.T) {
 	}
 	if hcjFindSecret([]byte(res.stdout+hex.EncodeToString(priv)), priv) == "" {
 		t.Fatal("the secrecy check is inert")
+	}
+}
+
+// The agent wires its excluded-paths setting into the job executor: a job
+// run by the real agent excludes the setting's paths as well as its own.
+// Deleting SetHostCryptoExcludes from newDeviceAgent fails this.
+func TestHostCryptoWiring_SettingExcludesReachJobs(t *testing.T) {
+	p := newHCJPlatform(t, nil)
+	cfg := &config.Config{PlatformURL: p.srv.URL, AgentID: uuid.New().String(), DataPath: t.TempDir(),
+		PollInterval: 30 * time.Minute, HeartbeatInterval: 30 * time.Minute,
+		HostCryptoExcludePaths: []string{"/srv/operator-never"}}
+	agent := newDeviceAgent(cfg, "", nil)
+	t.Cleanup(agent.Stop)
+	protocoltest.Open(agent.apiClient.Gate())
+	params := map[string]interface{}{"mode": "local", "options": map[string]interface{}{
+		"exclude_paths": []interface{}{"/job/own"}, "max_duration_seconds": float64(60)}}
+	job := &models.Job{ID: uuid.New(), Type: devices.JobTypeHostCrypto, Parameters: params}
+	if err := agent.jobExecutor.Execute(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.results) != 1 {
+		t.Fatalf("%d results", len(p.results))
+	}
+	var res struct {
+		HostCrypto hostcrypto.Report `json:"host_crypto"`
+	}
+	if err := json.Unmarshal(p.results[0], &res); err != nil {
+		t.Fatal(err)
+	}
+	if ex := strings.Join(res.HostCrypto.Scope.ExcludedPaths, ","); ex != "/job/own,/srv/operator-never" {
+		t.Fatalf("excluded %q, want the job's and the setting's", ex)
 	}
 }
