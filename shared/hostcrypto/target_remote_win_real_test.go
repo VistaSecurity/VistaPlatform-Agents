@@ -77,7 +77,7 @@ func fxSample(t *testing.T, names []string, n int, always ...string) []string {
 func fxPSRunner(t *testing.T) hostinventory.Runner {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return hostinventory.NewLocalRunner()
+		return fxLocalRunner()
 	}
 	if p := os.Getenv("HOSTCRYPTO_PWSH"); p != "" {
 		return fxPwsh{path: p}
@@ -97,7 +97,7 @@ func (r fxPwsh) RunInput(ctx context.Context, argv []string, stdin []byte) ([]by
 	if len(argv) > 0 && argv[0] == "powershell" {
 		argv = append([]string{r.path}, argv[1:]...)
 	}
-	out, errb, exit, err := hostinventory.NewLocalRunner().RunInput(ctx, argv, stdin)
+	out, errb, exit, err := fxLocalRunner().RunInput(ctx, argv, stdin)
 	// pwsh on a Unix terminal writes cursor-mode escapes around its output.
 	return fxANSI.ReplaceAll(out, nil), errb, exit, err
 }
@@ -105,7 +105,7 @@ func (r fxPwsh) RunInput(ctx context.Context, argv []string, stdin []byte) ([]by
 var fxANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
 func (r fxPwsh) ReadFile(ctx context.Context, p string) ([]byte, error) {
-	return hostinventory.NewLocalRunner().ReadFile(ctx, p)
+	return fxLocalRunner().ReadFile(ctx, p)
 }
 
 // fxPSBatch runs script (with the prelude and its arguments) once and

@@ -504,7 +504,7 @@ func TestRemoteUnixRealTools(t *testing.T) {
 	}
 	fxSettle()
 
-	rr := &tgtRecordingRunner{inner: hostinventory.NewLocalRunner()}
+	rr := &tgtRecordingRunner{inner: fxLocalRunner()}
 	rt := NewRemoteUnixTarget(rr, runtime.GOOS)
 	lt := NewLocalTarget()
 	ctx := context.Background()

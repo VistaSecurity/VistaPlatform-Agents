@@ -474,7 +474,7 @@ func TestLocalRunnerRunInput(t *testing.T) {
 	if _, err := exec.LookPath("cat"); err != nil {
 		t.Skip("no cat")
 	}
-	var ir hostinventory.InputRunner = hostinventory.NewLocalRunner()
+	var ir hostinventory.InputRunner = fxLocalRunner()
 	out, _, exit, err := ir.RunInput(context.Background(), []string{"cat"}, []byte("line one\nline two\n"))
 	if err != nil || exit != 0 || string(out) != "line one\nline two\n" {
 		t.Fatalf("RunInput: %q %d %v", out, exit, err)

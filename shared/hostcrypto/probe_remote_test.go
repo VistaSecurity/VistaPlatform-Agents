@@ -25,8 +25,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-
-	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,7 +283,7 @@ func TestJobKeystoreProbeStoresNothingPrivate(t *testing.T) {
 // jobRecRunner is the remote transport, run here, recording every byte the
 // "host" returned.
 type jobRecRunner struct {
-	inner *hostinventory.LocalRunner
+	inner fxRunner
 	mu    sync.Mutex
 	out   []byte
 	calls int
@@ -396,7 +394,7 @@ func TestJobKeyProbeRealTools(t *testing.T) {
 	for p := range files {
 		paths = append(paths, p)
 	}
-	rr := &jobRecRunner{inner: hostinventory.NewLocalRunner()}
+	rr := &jobRecRunner{inner: fxLocalRunner()}
 	c := jobProbeCollection(NewRemoteUnixTarget(rr, runtime.GOOS))
 	c.jobPrefetchKeyProbes(context.Background(), paths)
 	if rr.calls != 1 {
@@ -468,7 +466,7 @@ func TestJobKeystoreProbeRealOpenSSL(t *testing.T) {
 	}
 	open, locked := mk("open.p12", ""), mk("changeit.p12", "changeit")
 	run := func(path string, tries bool) (KeystoreContents, []byte) {
-		rr := &jobRecRunner{inner: hostinventory.NewLocalRunner()}
+		rr := &jobRecRunner{inner: fxLocalRunner()}
 		kc, ok := jobProbeRemoteKeystore(context.Background(), NewRemoteUnixTarget(rr, runtime.GOOS), path, KeystorePKCS12, tries)
 		if !ok {
 			t.Fatalf("%s: the probe did not run (%q)", path, rr.out)
@@ -512,7 +510,7 @@ func TestJobRemoteCollectionUsesTheProbes(t *testing.T) {
 	jobWrite(t, dir, "server.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
 	enc, _ := ssh.MarshalPrivateKeyWithPassphrase(ks[2].signer, "", []byte("job-pass"))
 	jobWrite(t, dir, "id_ed25519", pem.EncodeToMemory(enc), 0o600)
-	rep, err := Collect(context.Background(), NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS),
+	rep, err := Collect(context.Background(), NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS),
 		Options{Platform: runtime.GOOS, SweepRoots: []string{dir}, MaxDuration: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)

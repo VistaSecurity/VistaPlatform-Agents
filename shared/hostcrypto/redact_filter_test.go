@@ -29,13 +29,13 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 	"golang.org/x/crypto/cryptobyte"
 	cbasn1 "golang.org/x/crypto/cryptobyte/asn1"
 	"golang.org/x/crypto/ssh"
@@ -1001,11 +1001,14 @@ func TestFilterAwkParity(t *testing.T) {
 			t.Parallel()
 			rt := NewRemoteUnixTarget(runner, runtime.GOOS)
 			var fails atomic.Int64
-			// Every file, eight at a time (each is a host command).
+			// Every file, one worker per core (each is a host command).
 			fxEach(fxSorted(corpus), func(name string) {
 				b := corpus[name]
 				// The big files once, with one option set each, under the slow awks.
-				for _, kn := range fxSorted(keeps) {
+				for ki, kn := range fxSorted(keeps) {
+					if !fxParityPair(name, ki) {
+						continue
+					}
 					if fails.Load() > 20 {
 						return // too many differences: reported once below
 					}
@@ -1026,6 +1029,58 @@ func TestFilterAwkParity(t *testing.T) {
 				t.Fatal("too many differences")
 			}
 		})
+	}
+}
+
+// fxParityRotation is how the default run spreads the generated texts over
+// the keep sets: each generated text runs under every fxParityRotation-th
+// keep set (a different quarter for consecutive texts), so every keep set
+// still sees a quarter of them (100 of 400). The hand-made corpora run under
+// every keep set, and HOSTCRYPTO_FULL=1 runs every generated text under
+// every keep set too.
+const fxParityRotation = 4
+
+// fxParityPair reports whether corpus file name runs under the ki-th keep
+// set.
+func fxParityPair(name string, ki int) bool {
+	num, ok := strings.CutPrefix(name, "gen/")
+	if !ok || fxFull() {
+		return true
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return true
+	}
+	return (ki-n)%fxParityRotation == 0
+}
+
+func TestFxParityPair(t *testing.T) {
+	if fxFull() {
+		t.Skip("HOSTCRYPTO_FULL runs every pair")
+	}
+	const keeps = 24
+	per := make([]int, keeps)
+	for n := 0; n < 400; n++ {
+		k := 0
+		for ki := 0; ki < keeps; ki++ {
+			if fxParityPair(fmt.Sprintf("gen/%03d", n), ki) {
+				per[ki]++
+				k++
+			}
+		}
+		if k != keeps/fxParityRotation {
+			t.Fatalf("generated text %d runs under %d keep sets", n, k)
+		}
+	}
+	for ki, c := range per {
+		if c != 400/fxParityRotation {
+			t.Errorf("keep set %d sees %d generated texts", ki, c)
+		}
+	}
+	for ki := 0; ki < keeps; ki++ {
+		if !fxParityPair("review2/x.conf", ki) || !fxParityPair("paths/space", ki) {
+			t.Fatal("a hand-made corpus file skipped a keep set")
+		}
 	}
 }
 
@@ -1230,7 +1285,7 @@ func TestRemoteUnixNoHostParser(t *testing.T) {
 	tgtWrite(t, dir, "c.pem", certPEM, 0o644)
 	tgtWrite(t, dir, "k.pub", ssh.MarshalAuthorizedKey(pub), 0o644)
 	fxSettle()
-	rt := NewRemoteUnixTarget(tgtPathRunner{inner: hostinventory.NewLocalRunner(), path: bin}, runtime.GOOS)
+	rt := NewRemoteUnixTarget(tgtPathRunner{inner: fxLocalRunner(), path: bin}, runtime.GOOS)
 	out, err := rt.ReadFile(context.Background(), filepath.Join(dir, "c.pem"))
 	if !errors.Is(err, ErrNoHostParser) || len(out) != 0 {
 		t.Errorf("certificate without openssl: %v, %d bytes", err, len(out))
@@ -1239,7 +1294,7 @@ func TestRemoteUnixNoHostParser(t *testing.T) {
 		t.Errorf("key lines without openssl: %v", err)
 	}
 	// With openssl the certificate crosses.
-	if out, err := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS).ReadFile(context.Background(), filepath.Join(dir, "c.pem")); err != nil || !bytes.Equal(out, certPEM) {
+	if out, err := NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS).ReadFile(context.Background(), filepath.Join(dir, "c.pem")); err != nil || !bytes.Equal(out, certPEM) {
 		t.Errorf("certificate with openssl: %v", err)
 	}
 }
@@ -1292,7 +1347,7 @@ func TestRemoteUnixTornReads(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/coarse=%v", c.name, coarse), func(t *testing.T) {
 				t.Parallel()
 				ok, changed, other, torn, reads := fxTornRun(t, c.x, c.y, cycles, func(p string) ([]byte, error) {
-					rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+					rt := NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS)
 					rt.coarse = coarse
 					return c.read(rt, p)
 				}, c.accept)
@@ -1380,7 +1435,7 @@ func TestRemoteUnixFutureTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	fxSettle()
-	rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+	rt := NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS)
 	if _, _, err := rt.ReadText(context.Background(), filepath.Join(dir, "f.conf"), []string{"ssl_ciphers"}); !errors.Is(err, errChanged) {
 		t.Errorf("a file an hour ahead: %v", err)
 	}
