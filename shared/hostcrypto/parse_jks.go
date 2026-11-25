@@ -93,7 +93,9 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 		if len(b) < 12+ksJKSDigestLen {
 			out.DefaultsNotTried = "file too short to hold an integrity digest"
 		} else {
-			ok := ksJKSDefaultPassword(b)
+			// The empty password first, as its own step: it is no default.
+			empty, ok := ksJKSPasswords(b)
+			ok = ok && !empty
 			out.Keystore.DefaultPassword = &ok
 			if ok {
 				out.Keystore.Opened = OpenedDefaultPassword
@@ -219,20 +221,25 @@ func ksJavaUTF(r *ksReader) string {
 	return strings.ToValidUTF8(strings.ReplaceAll(string(s), "\xc0\x80", "\x00"), "�")
 }
 
-// ksJKSDefaultPassword reports whether one of the default passwords produces
-// the file's integrity digest. It needs nothing but the last 20 bytes and what
-// precedes them, so it answers even when the listing could not finish.
-func ksJKSDefaultPassword(b []byte) bool {
+// ksJKSPasswords reports whether the empty password, and else one of the
+// default passwords, produces the file's integrity digest. It needs nothing
+// but the last 20 bytes and what precedes them, so it answers even when the
+// listing could not finish. A store whose password is empty needs none; it
+// is listed without one either way.
+func ksJKSPasswords(b []byte) (empty, deflt bool) {
 	if len(b) < 12+ksJKSDigestLen {
-		return false
+		return false, false
 	}
 	body, want := b[:len(b)-ksJKSDigestLen], b[len(b)-ksJKSDigestLen:]
+	if subtle.ConstantTimeCompare(ksJKSDigest("", body), want) == 1 {
+		return true, false
+	}
 	for _, pw := range DefaultKeystorePasswords {
 		if subtle.ConstantTimeCompare(ksJKSDigest(pw, body), want) == 1 {
-			return true
+			return false, true
 		}
 	}
-	return false
+	return false, false
 }
 
 // ksJKSDigest is the JDK's keystore integrity digest for one password.

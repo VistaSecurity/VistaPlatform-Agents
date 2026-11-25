@@ -489,6 +489,16 @@ func TestJobKeystoreProbeRealOpenSSL(t *testing.T) {
 	if ks := kc.Keystore; ks.Opened != OpenedDefaultPassword || ks.DefaultPassword == nil || !*ks.DefaultPassword || *ks.EntryCount != 2 {
 		t.Fatalf("changeit with the opt-in: %+v", ks)
 	}
+	// With the opt-in, a store with no password is still one that needs
+	// none, never "opened by a default"; a real password opens nothing.
+	kc, _ = run(open, true)
+	if ks := kc.Keystore; ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || *ks.EntryCount != 2 {
+		t.Fatalf("empty password with the opt-in: %+v", ks)
+	}
+	kc, _ = run(mk("real.p12", "Real-Pass-7"), true)
+	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword {
+		t.Fatalf("a real password with the opt-in: %+v", ks)
+	}
 	// The friendly name OpenSSL prints with the certificate is the
 	// certificate's, not the key bag's printed before it.
 	for _, e := range kc.Keystore.Entries {

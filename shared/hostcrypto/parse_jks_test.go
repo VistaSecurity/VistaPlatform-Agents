@@ -150,7 +150,9 @@ func TestParseJKS_DefaultPassword(t *testing.T) {
 		{"changeit", true},
 		{"changeme", true},
 		{"password", true},
-		{"", true},
+		// An empty password is no default: the store needs none (owner,
+		// 2026-11-25).
+		{"", false},
 		{"s3cret-not-default", false},
 	} {
 		for _, magic := range []uint32{ksMagicJKS, ksMagicJCEKS} {

@@ -389,13 +389,14 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 		return out, err
 	}
 
-	found := false
+	found, empty := false, false
 	if tryDefaults {
-		ok, reason := st.trial(maxEntries)
+		res, reason := st.trial(maxEntries)
 		out.DefaultsNotTried = reason
 		if reason == "" {
-			out.Keystore.DefaultPassword = &ok
-			found = ok
+			// An empty password is no default: the store needs none.
+			found, empty = res == ksP12OpenedByDefault, res == ksP12OpenedByEmpty
+			out.Keystore.DefaultPassword = &found
 		}
 	}
 
@@ -415,7 +416,7 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	switch {
 	case found:
 		out.Keystore.Opened = OpenedDefaultPassword
-	case len(entries) > 0 || len(certs) > 0:
+	case empty, len(entries) > 0 || len(certs) > 0:
 		out.Keystore.Opened = OpenedWithoutPassword
 	}
 	return out, nil
@@ -775,12 +776,23 @@ func ksP12Build(bags []ksP12Bag, maxEntries int) (entries []KeystoreEntry, certs
 type ksP12Password struct {
 	bmp  []byte
 	utf8 []byte
+	// empty marks the empty password, which opens a store that needs none
+	// rather than proving a well-known default.
+	empty bool
 }
 
-// ksP12Candidates lists the defaults. The empty password is tried both as a
-// terminated empty BMPString and as no bytes at all, because writers differ.
+// What the trial found.
+const (
+	ksP12NotOpened = iota
+	ksP12OpenedByEmpty
+	ksP12OpenedByDefault
+)
+
+// ksP12Candidates lists the empty password first, as its own step, then the
+// defaults. The empty password is tried both as a terminated empty BMPString
+// and as no bytes at all, because writers differ.
 func ksP12Candidates() []ksP12Password {
-	var out []ksP12Password
+	out := []ksP12Password{{bmp: []byte{0, 0}, utf8: []byte{}, empty: true}, {bmp: nil, utf8: nil, empty: true}}
 	for _, pw := range DefaultKeystorePasswords {
 		var bmp []byte
 		for _, c := range utf16.Encode([]rune(pw)) {
@@ -788,9 +800,6 @@ func ksP12Candidates() []ksP12Password {
 		}
 		bmp = append(bmp, 0, 0)
 		out = append(out, ksP12Password{bmp: bmp, utf8: []byte(pw)})
-		if pw == "" {
-			out = append(out, ksP12Password{bmp: nil, utf8: nil})
-		}
 	}
 	return out
 }
@@ -801,12 +810,13 @@ type ksP12Check struct {
 	test func(pw ksP12Password) bool
 }
 
-// trial tries the defaults. It returns whether one opened the file, or a
-// reason it was not tried. On success the encrypted parts that the password
-// opens are walked into st.bags.
-func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
+// trial tries the empty password, then the defaults. It returns which
+// opened the file (ksP12OpenedByEmpty, ksP12OpenedByDefault) or
+// ksP12NotOpened, or a reason it was not tried. On success the encrypted
+// parts that the password opens are walked into st.bags.
+func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 	if st.signed {
-		return false, ksNotTriedSigned
+		return ksP12NotOpened, ksNotTriedSigned
 	}
 	hasMAC := len(st.pfx.MacData.Mac.Algorithm.Algorithm) > 0
 	anyEncrypted := false
@@ -814,7 +824,7 @@ func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
 		anyEncrypted = anyEncrypted || p.encrypted
 	}
 	if !hasMAC && !anyEncrypted && !st.shrouded {
-		return false, ksNotTriedUnprotected
+		return ksP12NotOpened, ksNotTriedUnprotected
 	}
 
 	// Each encrypted part that can be opened, and what opening it costs.
@@ -860,7 +870,7 @@ func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
 		}}
 	}
 	if check.test == nil {
-		return false, ksNotTriedNoCheck
+		return ksP12NotOpened, ksNotTriedNoCheck
 	}
 
 	cands := ksP12Candidates()
@@ -871,7 +881,7 @@ func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
 		}
 	}
 	if total > ksMaxTrialWork {
-		return false, ksNotTriedCost
+		return ksP12NotOpened, ksNotTriedCost
 	}
 
 	for _, pw := range cands {
@@ -890,9 +900,12 @@ func (st *ksP12Structure) trial(maxEntries int) (ok bool, notTried string) {
 			}
 			st.parts[o.idx].opened = true
 		}
-		return true, ""
+		if pw.empty {
+			return ksP12OpenedByEmpty, ""
+		}
+		return ksP12OpenedByDefault, ""
 	}
-	return false, ""
+	return ksP12NotOpened, ""
 }
 
 // ksHashFor maps a digest OID (as a PKCS#12 MacData names it) or an HMAC OID

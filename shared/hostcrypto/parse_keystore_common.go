@@ -31,12 +31,19 @@ type KeystoreContents struct {
 
 // DefaultKeystorePasswords are the well-known defaults tried against JKS,
 // JCEKS and PKCS#12 files when the operator opts in (Scope.DefaultKeystorePasswords):
-// the JDK's "changeit", the common "changeme" and "password", and empty.
+// the JDK's "changeit" and the common "changeme" and "password".
 //
 // Only "one of them worked" is ever recorded ([Keystore.DefaultPassword]),
 // never WHICH one: which default opens a store is itself the store's
 // password, and a report must not carry a password.
-var DefaultKeystorePasswords = []string{"changeit", "changeme", "password", ""}
+//
+// The EMPTY password is not among them. It is tried as a step of its own
+// (with the same opt-in), and a store it opens is reported as needing no
+// password ([OpenedWithoutPassword], DefaultPassword false): a store without
+// a password is a fact the report records, not a well-known password
+// guessed. Saying so carries no secret, since the empty password is the one
+// value a reader can always assume.
+var DefaultKeystorePasswords = []string{"changeit", "changeme", "password"}
 
 // DefaultMaxKeystoreEntries bounds how many entries one keystore listing keeps.
 // A store claiming more is listed that far; its EntryCount still says how many
