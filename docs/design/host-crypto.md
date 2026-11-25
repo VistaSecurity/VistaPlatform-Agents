@@ -82,7 +82,15 @@ decides on the host, from ONE read of the file, before anything is printed:
   CERTIFICATE's trust settings are cut off first). .NET hands back its input
   as `RawData` and Go's parser takes the outer element as the certificate,
   so without the envelope check a key appended inside the SEQUENCE would
-  cross. A block the check or the parser refuses is dropped. No pattern over a block's
+  cross. A block the check or the parser refuses is dropped and counted:
+  the rest of the file still crosses, and the Report notes "N certificates
+  in this file could not be read" (`PublicReader.ReadPublic`). Go checks
+  what arrives block by block: an answer that is anything but canonical
+  `CERTIFICATE` blocks with a strict envelope and parsing key lines is
+  refused whole, while a strict-envelope block that `crypto/x509` refuses
+  (the EC-ACC root in macOS's `/etc/ssl/cert.pem` has a negative serial
+  number, which LibreSSL and .NET accept) is dropped and counted rather
+  than sinking the bundle. No pattern over a block's
   bytes can tell a certificate from a private key written under a
   certificate's label; a parser can. Public keys, requests, revocation
   lists and parameters do not cross (no record needs them from a remote
@@ -110,6 +118,22 @@ that .NET Framework reads, and a writer can set the last-write time back. `Ident
 first eight bytes, PEM labels, rule flags), and a remote `ReadFile` is
 refused before any content command is sent unless the identity is a
 certificate or SSH key file. Go checks everything that arrives.
+
+**Batching.** A remote target also answers `Stat` and `Identify` for many
+paths in one host program (`BatchTarget.StatIdentifyMany`): on Windows one
+PowerShell start instead of two per path (each about 0.75 s), on Unix one
+shell program that runs, per path, the single `stat` command and the single
+identification script unchanged. Each path's answer is exactly the single
+calls' answers, parsed by the same Go code, and no more crosses than
+`Identify` returns. Batches are bounded (64 paths, 16 KiB of paths, a 40 s
+host budget); a path a batch did not answer is asked for singly. Pass 1
+prefetches through it on a remote target: at its start, every plain file the
+location tables name and every directory it would list, so a directory the
+host does not have (most of them, on any one host) costs no listing; then,
+per table entry, the files the listing returned. On xps15 (Windows 11, the
+production SSH runner) pass 1 went from 218 commands and 125-152 s to 26
+commands and about 22 s. A target without the interface, or a local one,
+makes the single calls.
 
 **Limits, stated.** These cross on purpose or are left alone:
 

@@ -190,6 +190,8 @@ func tgtPSKind(script string) string {
 		return "list"
 	case psStat:
 		return "stat"
+	case psBatch:
+		return "batch"
 	}
 	return "unknown"
 }

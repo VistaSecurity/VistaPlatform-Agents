@@ -139,6 +139,10 @@ func locTables(platform, root string, win locWinRoots) (system, home []locEntry)
 // locState is what passes 1 and 2 share. Passes run one after another, so it
 // needs no lock; the registry and report it feeds have their own.
 type locState struct {
+	// pre holds pass 1's batched Stat and Identify answers
+	// (BatchTarget), by path; nil outside pass 1.
+	pre map[string]PathInfo
+
 	root     string
 	platform string
 	style    locStyle
@@ -222,6 +226,51 @@ func newLocState(root, platform string) *locState {
 		tally:        map[string]*locCount{},
 		unidentified: map[string]int{},
 		remoteNotes:  map[string]bool{},
+	}
+}
+
+// locStat is Stat through pass 1's batched answers.
+func (c *collection) locStat(ctx context.Context, p string) (FileInfo, error) {
+	if r, ok := c.locSt().pre[p]; ok {
+		return r.Info, r.StatErr
+	}
+	return c.target.Stat(ctx, p)
+}
+
+// locIdentify is Identify through pass 1's batched answers.
+func (c *collection) locIdentify(ctx context.Context, p string) (Identity, error) {
+	if r, ok := c.locSt().pre[p]; ok {
+		return r.Identity, r.IdentifyErr
+	}
+	return c.target.Identify(ctx, p)
+}
+
+// locPrefetch asks a remote BatchTarget for the Stat and Identify answers
+// of paths pass 1 is about to visit, in one host program per batch rather
+// than two per path. Paths already answered are not asked again. On a local
+// target, or one without the interface, it does nothing and the single
+// calls are made as before.
+func (c *collection) locPrefetch(ctx context.Context, paths []string) {
+	st := c.locSt()
+	bt, ok := c.target.(BatchTarget)
+	if !ok || c.target.Local() || st.pre == nil {
+		return
+	}
+	var want []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if _, done := st.pre[p]; done || seen[p] || c.locExcluded(p) {
+			continue
+		}
+		seen[p] = true
+		want = append(want, p)
+	}
+	if len(want) < 2 {
+		return // one path: the single calls cost no more
+	}
+	got, _ := bt.StatIdentifyMany(ctx, want)
+	for _, r := range got {
+		st.pre[r.Path] = r
 	}
 }
 
@@ -399,6 +448,11 @@ func (c *collection) locList(ctx context.Context, section, root string, depth in
 		c.limit(section, "max_files", fmt.Sprintf("stopped after %d files", c.opts.maxFiles()))
 		return nil
 	}
+	if r, ok := st.pre[root]; ok && errors.Is(r.StatErr, ErrNotExist) {
+		// Pass 1's batch found no such root: the listing would answer
+		// ErrNotExist, which is nothing to record.
+		return nil
+	}
 	files, err := c.target.List(ctx, root, ListOptions{
 		MaxDepth:     depth,
 		MaxFiles:     left,
@@ -433,6 +487,19 @@ func (c *collection) locList(ctx context.Context, section, root string, depth in
 		c.partial(section, fmt.Errorf("%s: %w", root, err))
 	}
 	return files
+}
+
+// locListRoot is the directory locFiles lists for dirPat: dirPat itself, or
+// the last fixed directory above its first wildcard.
+func (st *locState) locListRoot(dirPat string) string {
+	w := st.style
+	root, comps := w.split(dirPat)
+	for i, s := range comps {
+		if locHasMeta(s) {
+			return w.join(root, comps[:i]...)
+		}
+	}
+	return dirPat
 }
 
 // locFiles returns the files under dirPat (whose components may hold
@@ -486,7 +553,7 @@ func (c *collection) locFiles(ctx context.Context, section, dirPat string, depth
 		// Resolved through the Target, the way a remote host would, not the
 		// agent's filesystem.
 		t := joinLinkTarget(l.Path, l.LinkTarget)
-		tfi, err := c.target.Stat(ctx, t)
+		tfi, err := c.locStat(ctx, t)
 		if err == nil {
 			tfi, err = c.locFollow(ctx, t, tfi)
 		}
@@ -509,7 +576,7 @@ func (c *collection) locEntryFiles(ctx context.Context, e locEntry) []FileInfo {
 		return c.locFiles(ctx, e.section(), e.Path, e.Depth, e.Names, 0)
 	}
 	if !locHasMeta(e.Path) {
-		fi, err := c.target.Stat(ctx, e.Path)
+		fi, err := c.locStat(ctx, e.Path)
 		if err != nil {
 			c.locStatErr(e.section(), e.Path, err)
 			return nil
@@ -545,7 +612,7 @@ func (c *collection) locFollow(ctx context.Context, p string, fi FileInfo) (File
 		}
 		c.registry.addLink(fi.Path, fi.LinkTarget)
 		t := joinLinkTarget(fi.Path, fi.LinkTarget)
-		next, err := c.target.Stat(ctx, t)
+		next, err := c.locStat(ctx, t)
 		if err != nil {
 			return FileInfo{}, err
 		}
@@ -572,6 +639,26 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		}
 		return
 	}
+	st.pre = map[string]PathInfo{}
+	defer func() { st.pre = nil }()
+	entries := system
+	if c.opts.HomeDirectories {
+		entries = append(append([]locEntry(nil), system...), home...)
+	}
+	// One batch for every plain file the tables name and every directory
+	// pass 1 would list (most of which a given host does not have).
+	var plain []string
+	for _, e := range entries {
+		switch {
+		case e.Dir:
+			plain = append(plain, st.locListRoot(e.Path))
+		case locHasMeta(e.Path):
+			plain = append(plain, st.locListRoot(st.style.dir(e.Path)))
+		default:
+			plain = append(plain, e.Path)
+		}
+	}
+	c.locPrefetch(ctx, plain)
 	for _, e := range system {
 		if c.timeUp(ctx, e.section()) {
 			break
@@ -598,6 +685,22 @@ var locSections = []string{SectionCertificates, SectionPrivateKeys, SectionKeyst
 func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 	st := c.locSt()
 	files := c.locEntryFiles(ctx, e)
+	if e.Kind != locNSS && e.Kind != locConfig {
+		var paths []string
+		for _, fi := range files {
+			if fi.IsDir {
+				continue
+			}
+			if fi.IsSymlink && fi.LinkTarget != "" {
+				if e.SkipLinks {
+					continue
+				}
+				paths = append(paths, joinLinkTarget(fi.Path, fi.LinkTarget))
+			}
+			paths = append(paths, fi.Path)
+		}
+		c.locPrefetch(ctx, paths)
+	}
 	switch e.Kind {
 	case locNSS:
 		c.locNSSDirs(ctx, e, files)
@@ -767,7 +870,7 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 		fi = *v.Info
 	} else {
 		var err error
-		if fi, err = c.target.Stat(ctx, v.Path); err != nil {
+		if fi, err = c.locStat(ctx, v.Path); err != nil {
 			return c.locErrResult(v, err), FileInfo{}
 		}
 	}
@@ -847,7 +950,7 @@ func locCopy(l Location) Location {
 // locDispatch identifies a file and hands it to its parser.
 func (c *collection) locDispatch(ctx context.Context, v locVisit, fi FileInfo, prod *locProduced) locResult {
 	loc := c.locLocation(fi, v.Path, v.FoundBy, v.UsedBy)
-	id, err := c.target.Identify(ctx, v.Path)
+	id, err := c.locIdentify(ctx, v.Path)
 	if err != nil {
 		return c.locErrResult(v, err)
 	}
@@ -909,7 +1012,21 @@ func (c *collection) locReadable(f *locFile) bool {
 // locRead reads a file the caller has decided may be read. A local private
 // file's bytes are the caller's to clear.
 func (c *collection) locRead(ctx context.Context, f *locFile) ([]byte, bool) {
-	b, err := c.target.ReadFile(ctx, f.v.Path)
+	var b []byte
+	var err error
+	unreadable := 0
+	if pr, ok := c.target.(PublicReader); ok && !c.target.Local() {
+		b, unreadable, err = pr.ReadPublic(ctx, f.v.Path)
+	} else {
+		b, err = c.target.ReadFile(ctx, f.v.Path)
+	}
+	if unreadable > 0 {
+		what := "certificates"
+		if unreadable == 1 {
+			what = "certificate"
+		}
+		c.note(f.v.Section, fmt.Errorf("%s: %d %s in this file could not be read", f.v.Path, unreadable, what))
+	}
 	if err == nil {
 		return b, true
 	}
