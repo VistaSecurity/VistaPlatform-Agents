@@ -166,8 +166,8 @@ func locLinuxTree(t *testing.T, local bool) *tgtFakeTarget {
 		file("/etc/ssh/ssh_known_hosts", []byte("|1|abc=|def= ssh-ed25519 AAAA\n")).
 		file("/usr/lib/jvm/java-17/lib/security/cacerts", m.jks).
 		file("/usr/lib/jvm/java-17/conf/security/java.security", []byte("jdk.tls.disabledAlgorithms=SSLv3, TLSv1, RC4\nkeystore.password=hunter2\n")).
-		file("/etc/elasticsearch/jvm.options", []byte("-Djavax.net.ssl.trustStore=/etc/es/ts.jks\n-Djava.security.properties=/etc/elasticsearch/extra.security\n-Djavax.net.ssl.trustStorePassword=hunter2\n")).
-		file("/etc/es/ts.jks", m.jks).
+		file("/etc/elasticsearch/jvm.options", []byte("-Djavax.net.ssl.trustStore=/etc/elasticsearch/certs/truststore.jks\n-Djava.security.properties=/etc/elasticsearch/extra.security\n-Djavax.net.ssl.trustStorePassword=hunter2\n")).
+		file("/etc/elasticsearch/certs/truststore.jks", m.jks).
 		file("/etc/elasticsearch/extra.security", []byte("jdk.tls.disabledAlgorithms=SSLv3\n")).
 		fileMode("/etc/krb5.keytab", m.keytab, 0o600).
 		file("/home/alice/.ssh/authorized_keys", m.authorized).
@@ -274,7 +274,7 @@ func locErrorsContain(rep *Report, parts ...string) bool {
 var locPrivatePaths = []string{
 	"/etc/ssl/private/server.key", "/etc/ssl/private/legacy.key", "/etc/ssh/ssh_host_ed25519_key",
 	"/home/alice/.ssh/id_ed25519", "/usr/lib/jvm/java-17/lib/security/cacerts",
-	"/etc/es/ts.jks", "/etc/krb5.keytab",
+	"/etc/elasticsearch/certs/truststore.jks", "/etc/krb5.keytab",
 }
 
 // locPrivateReads returns an error naming the first call that asked a remote
@@ -371,7 +371,7 @@ func TestLocLinuxLocalAndRemote(t *testing.T) {
 			if locConfigOf(rep, "/usr/lib/jvm/java-17/conf/security/java.security", "java") == nil {
 				t.Error("no java.security record")
 			}
-			ts := locStoreAt(rep, "/etc/es/ts.jks")
+			ts := locStoreAt(rep, "/etc/elasticsearch/certs/truststore.jks")
 			if ts == nil || ts.Location.FoundBy != FoundByConfig ||
 				!locHasUsage(ts.Location, "/etc/elasticsearch/jvm.options", "-Djavax.net.ssl.trustStore") {
 				t.Errorf("trust store named by jvm.options: %+v", ts)

@@ -411,8 +411,8 @@ func TestLocRealFilesystemLinux(t *testing.T) {
 	write("/etc/ssl/certs/java/cacerts", m.jks, 0o644)
 	link("/usr/lib/jvm/java-17/lib/security/cacerts", "../../../../../etc/ssl/certs/java/cacerts")
 	write("/usr/lib/jvm/java-17/conf/security/java.security", []byte("jdk.tls.disabledAlgorithms=SSLv3, TLSv1\n"), 0o644)
-	write("/etc/elasticsearch/jvm.options", []byte("-Djavax.net.ssl.trustStore=/etc/es/ts.jks\n"), 0o644)
-	write("/etc/es/ts.jks", m.jks, 0o640)
+	write("/etc/elasticsearch/jvm.options", []byte("-Djavax.net.ssl.trustStore=/etc/elasticsearch/certs/truststore.jks\n"), 0o644)
+	write("/etc/elasticsearch/certs/truststore.jks", m.jks, 0o640)
 
 	opts := Options{Platform: "linux", Now: tgtNow, MaxDuration: time.Minute}
 	lt := NewLocalTarget()
@@ -451,7 +451,7 @@ func TestLocRealFilesystemLinux(t *testing.T) {
 	if n != 1 {
 		t.Errorf("cacerts reached through a link became %d keystores", n)
 	}
-	ts := locStoreAt(rep, at("/etc/es/ts.jks"))
+	ts := locStoreAt(rep, at("/etc/elasticsearch/certs/truststore.jks"))
 	if ts == nil || !locHasUsage(ts.Location, at("/etc/elasticsearch/jvm.options"), "-Djavax.net.ssl.trustStore") ||
 		ts.Location.GroupReadable == nil || !*ts.Location.GroupReadable {
 		t.Errorf("trust store: %+v", ts)
