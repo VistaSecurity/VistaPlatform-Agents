@@ -9,6 +9,9 @@ writes what it observed to a file.
   and `host-inventory`, the flags, and what to do when something goes wrong.
 - [`standalone-output.md`](standalone-output.md): the output format record by
   record, the CSV columns, what is stable, and `jq` recipes.
+- [`host-crypto.md`](host-crypto.md): describing a host's certificates, keys,
+  keystores and crypto policy, here or over SSH; what it never collects, the
+  rights it needs and its limits.
 
 ## Running the agents with Vista Platform (managed mode)
 
@@ -23,6 +26,8 @@ writes what it observed to a file.
   [macOS](device-agent/MACOS_SETUP.md) or [Windows](device-agent/WINDOWS.md);
   its certificate:
   [`device-agent/CERTIFICATE_MANAGEMENT.md`](device-agent/CERTIFICATE_MANAGEMENT.md).
+- Host crypto inventory, scheduled or on request:
+  [`host-crypto.md`](host-crypto.md).
 - How an agent and a platform talk: [`managed-protocol.md`](managed-protocol.md).
 
 ## Releases
@@ -35,5 +40,7 @@ writes what it observed to a file.
 
 - [`design/standalone-mode.md`](design/standalone-mode.md): the standalone
   mode design and the rules it keeps.
+- [`design/host-crypto.md`](design/host-crypto.md): the host crypto collector's
+  design and the rules for changing it.
 - [`development/standalone.md`](development/standalone.md): where the
   standalone code is, how a run goes, and the tests that hold each rule.

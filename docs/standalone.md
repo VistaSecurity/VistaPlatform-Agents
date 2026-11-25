@@ -18,6 +18,7 @@ see [vistasecurity.io](https://vistasecurity.io) if you want that.
 | Scan addresses you own | `crypto-sensor scan --target T` |
 | Ask one device about its own cryptography | `device-agent collect --type TYPE --target HOST` |
 | Inventory the machine you are on | `device-agent host-inventory` |
+| Describe the certificates, keys and crypto policy of this machine, or one over SSH | `device-agent host-crypto [--remote USER@HOST]` |
 
 Every field of the output: [`standalone-output.md`](standalone-output.md). The
 design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode.md).
@@ -214,6 +215,38 @@ installed packages and the certificates in its system stores. It contacts
 nothing on the network. Run it as an administrator for the fullest result; as
 an ordinary user some sections may not complete, and the summary says which.
 
+## Describe a host's cryptography
+
+```bash
+device-agent host-crypto --out crypto.jsonl
+device-agent host-crypto --remote admin@db1.example.test --identity-file ~/.ssh/id_ed25519 \
+    --ssh-host-key SHA256:… --out db1.jsonl
+```
+
+Describes the certificates, private keys (what they are and who can read
+them, never their contents), keystores, SSH material, TLS and SSH policy,
+crypto libraries and platform protection of this machine, or with `--remote`
+of one host over SSH. Run it as root (or an elevated Administrator) for the
+fullest result; on macOS give the terminal Full Disk Access too.
+
+- `--remote USER@HOST` and `--port`: the host to collect, over SSH. The
+  credential comes from `--identity-file` (a private key only you can read;
+  its passphrase from `VISTA_DEVICE_KEY_PASSPHRASE`), a `--credentials` file
+  (`username`, `password`, `private_key`, `passphrase`) or
+  `VISTA_DEVICE_PASSWORD`. `--ssh-host-key` pins the host key; without it the
+  key is checked against `known_hosts`, or accepted on first contact, and the
+  summary names the pin to use next time.
+- `--home-directories` and `--default-keystore-passwords`: the two opt-ins.
+- `--exclude PATH` (repeatable): never entered. `--root PATH` (repeatable):
+  swept for key material by content (by name and size with `--remote`); no
+  sweep without one.
+- `--max-duration` bounds the run (default 15 minutes, 1 minute to 1 hour).
+
+A section the account could not read completely is a warning in the summary;
+a section that failed, or a bound that cut one short, makes the result partial
+(exit 2). What it collects, what it never does and its limits:
+[`host-crypto.md`](host-crypto.md).
+
 ## The output
 
 Every command takes the same output flags:
@@ -226,8 +259,8 @@ Every command takes the same output flags:
   - `jsonl` (default): one record per line; on standard output it streams;
   - `json`: one document with `run`, `records` and `summary`;
   - `csv`: one row per host, port and protocol seen, with the TLS and
-    certificate columns. Interfaces, neighbours and host inventory are not in
-    the CSV; use `json` or `jsonl` for those.
+    certificate columns. Interfaces, neighbours, host inventory and host
+    crypto are not in the CSV; use `json` or `jsonl` for those.
 - `--quiet` turns off the summary (and a scan's progress lines) on standard
   error.
 
@@ -239,7 +272,8 @@ Every record has the same envelope:
 ```
 
 The kinds are `run` (first), `passive_observation`, `scan_host`,
-`device_interrogation`, `host_inventory`, `error` and `summary` (last).
+`device_interrogation`, `host_inventory`, `host_crypto`, `error` and `summary`
+(last).
 [`standalone-output.md`](standalone-output.md) describes every field, the CSV
 columns, what stays stable between releases, and has `jq` recipes. For example,
 every TLS endpoint a scan saw, with its versions:

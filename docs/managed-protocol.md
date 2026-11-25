@@ -67,6 +67,9 @@ Every registration, heartbeat and job answer names the platform's protocol in
 the same object, with the capabilities the platform will use with this agent.
 An answer without a body (the device agent's empty job poll, `204`) carries
 them in the header: `Vista-Agent-Protocol: 1; capabilities=device_discovery`.
+Today the sensor offers `identity_dns_v1`, `scan_plan_v1` and
+`verify_certificate_v1`; the device agent offers `device_discovery` and
+`host_crypto_v1`.
 
 The agent keeps the intersection of its capabilities and the platform's.
 Capabilities are additive: an unknown one is ignored by both sides. Work whose
@@ -79,6 +82,38 @@ major version is a new schema directory (`v2/`), and `v1/` is never changed
 incompatibly once released. Matching release numbers of an agent and a
 platform are not evidence that they work together; only the tested pairs
 published with each platform release are.
+
+## Host crypto inventory (`host_crypto_v1`)
+
+A device agent that offers `host_crypto_v1` runs two things for a platform
+that negotiates it ([`host-crypto.md`](host-crypto.md)):
+
+- **`host_crypto` jobs.** Parameters
+  ([`defs/host-crypto-job.json`](../schemas/managed/v1/defs/host-crypto-job.json)):
+  `mode` (`local`, the agent's own host, or `remote`); for `remote` the target
+  and transport exactly as a remote `host_inventory` job (`ip_address` or
+  `hostname`, `ssh_port`, `ssh_host_key_fingerprint`, `transport` `ssh`) and
+  the sealed credentials (`username` with `password` or `private_key` and
+  `passphrase`); and `options`, a closed object (`home_directories`,
+  `default_keystore_passwords`, `exclude_paths`, `sweep_roots`, `max_files`,
+  `max_file_bytes`, `max_records_per_section`, `max_duration_seconds`). An
+  option the agent does not know is refused; a bound above its maximum is
+  lowered to it. The result carries the report as `host_crypto`
+  ([`defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)),
+  also on a failure that has a partial report. A job's overall timeout, when
+  it names no `timeout_seconds`, is its `max_duration_seconds` (15 minutes by
+  default) plus two minutes.
+- **Local submissions.** With the setting `host_crypto_enabled` on, the agent
+  collects its own host on a schedule and posts
+  `POST /api/v1/device-interrogation-service/agents/{id}/host-crypto`
+  ([`host-crypto.submission.schema.json`](../schemas/managed/v1/host-crypto.submission.schema.json)),
+  which, like a local host inventory, has no job. Without the capability
+  negotiated it collects and sends nothing.
+
+There is no message in parts: a report is at most 16 MiB of the 32 MiB a
+result may be. Past that the agent cuts it honestly (certificate PEM first,
+then the longest lists), marks each cut section `partial` and lists a
+`max_result_bytes` limit for it.
 
 ## When an agent and a platform do not share version 1
 

@@ -178,6 +178,14 @@ run can pin it.
 | `report` | The machine's inventory, by section: `host`, `platform`, `hardware`, `interfaces`, `listeners` (listening TCP ports and their processes), `bound_udp_sockets`, `packages`, `cert_stores` (certificates in the system stores), and `sections`, which says which sections completed. |
 | `observations` | The same inventory as the observation records the managed agent would report. |
 
+### `host_crypto` (`device-agent host-crypto`)
+
+| Field | Meaning |
+|---|---|
+| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
+
+An empty list means "none found" only when its section says `ok`.
+
 ### `error`
 
 Something that did not work. The run goes on where it can.
@@ -185,7 +193,7 @@ Something that did not work. The run goes on where it can.
 | Field | Meaning |
 |---|---|
 | `target` | What failed: an address, a device, a file, or empty for the run as a whole. |
-| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`. |
+| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`, `connect`, `host_crypto`. |
 | `reason` | Why, in words. Secrets are scrubbed from it. |
 
 ### `summary`
