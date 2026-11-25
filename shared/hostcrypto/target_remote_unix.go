@@ -152,12 +152,12 @@ function sshkey(s,   r, t, b, n, i, c, q) {
   }
   r = substr(r, length(t) + 1); sub(/^[ \t]+/, "", r)
   b = field1(r)
-  if (b ~ /^[A-Za-z0-9+\/]+=*$/ && length(b) >= KMIN[t] && length(b) <= KMAX[t] && substr(b, 1, length(KP[t])) == KP[t]) return t " " b
+  if (b ~ /^[A-Za-z0-9+\057]+=*$/ && length(b) >= KMIN[t] && length(b) <= KMAX[t] && substr(b, 1, length(KP[t])) == KP[t]) return t " " b
   return ""
 }
 function redact(s,   o) {
   o = ""
-  while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) judge(substr(s, RSTART, RLENGTH)); s = substr(s, RSTART + RLENGTH) }
+  while (match(s, ` + awkRunRegex + `)) { o = o substr(s, 1, RSTART - 1) judge(substr(s, RSTART, RLENGTH)); s = substr(s, RSTART + RLENGTH) }
   return o s
 }
 function plainpart(r, f, e) {
@@ -244,7 +244,7 @@ function certok(lab, f, e,   n) {
   if (lab == "TRUSTED CERTIFICATE") { n = derfirst(n); if (n < 0) return 0 }
   return derok(n)
 }
-function bodyline(s) { return length(s) >= 1 && length(s) <= ` + strconv.Itoa(maxPEMBodyLine) + ` && s ~ /^[A-Za-z0-9+\/=]+$/ }
+function bodyline(s) { return length(s) >= 1 && length(s) <= ` + strconv.Itoa(maxPEMBodyLine) + ` && s ~ /^[A-Za-z0-9+\057=]+$/ }
 function emit(s) {
   if (DROP) { if (isend(s)) DROP = 0; return }
   if (isbegin(s)) { NRED++; if (!isend(s)) DROP = 1; return }
@@ -393,9 +393,6 @@ function magic(r) { return substr(r, 1, 4) == "\376\355\376\355" || substr(r, 1,
 BEGIN {
   Q1 = sprintf("%c", 39)
   SPECIAL = "[ \t\014\013\r;{}#\"" Q1 "\\\\]"
-  RUN = ""
-  for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
-  RUN = RUN "[A-Za-z0-9+/=]*"
   OSSL = "openssl x509 -outform PEM 2>/dev/null || echo vista-ossl-refused >&2"
   B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
   POW2[0] = 1
@@ -479,7 +476,7 @@ mode == "identify" {
     next
   }
   if (inpub) { if (isend(s)) inpub = 0; next }
-  if (match(s, RUN)) orun = 1
+  if (match(s, ` + awkRunRegex + `)) orun = 1
   if (substr(s, 1, 1) == "#" || s ~ /^[ \t]*$/) next
   if (sshkey(s) != "") sshl++; else sshbad = 1
 }
@@ -1083,6 +1080,21 @@ func (t *RemoteUnixTarget) statArgv(paths []string) []string {
 	argv = append(argv, "--")
 	return append(argv, paths...)
 }
+
+// awkRunRegex is the redaction run (RedactRunLength or more characters of
+// [A-Za-z0-9+/=]) as an awk regex LITERAL. It must not be a string: busybox
+// awk compiles a dynamic regex again at every match(), which made one
+// 1.2 MB file take 8.7 s of one core under busybox (0.3 s under mawk) and,
+// on a busy machine, past the 90-second command bound. A literal is compiled
+// once. It is spelled out, not written with an interval, because not every
+// awk the hosts run takes {n,}.
+//
+// Every "/" inside a bracket expression of the program is written \057:
+// busybox awk keeps the backslash of \/ in a bracket, so [A-Za-z0-9+\/=]
+// matched a backslash too there (and a run swallowed the backslashes after
+// it, a PEM body line or a key blob could hold one). TestAwkBracketSlash
+// holds it.
+var awkRunRegex = "/" + strings.Repeat(`[A-Za-z0-9+\057=]`, RedactRunLength) + `[A-Za-z0-9+\057=]*/`
 
 // remoteUnixBatchBudget is how many seconds batchScript may run before it
 // stops and answers for the paths it has done; Go asks for the rest singly.

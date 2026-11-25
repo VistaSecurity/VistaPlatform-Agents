@@ -58,7 +58,14 @@ Everything is in `shared/hostcrypto`, pure Go, no CGO.
   `filepath.WalkDir`, and per-platform permission reads.
 - The **remote Unix** target runs fixed `sh -c` scripts over the SSH runner
   (`find`, `stat`, `head`, `tr`, an awk program, `openssl x509`); a path is
-  always a positional argument, never script text.
+  always a positional argument, never script text. The awk program runs
+  under mawk, gawk, the BWK awk of macOS and busybox awk, and uses only
+  regex literals where it runs per line: busybox compiles a regex held in a
+  string again at every use, which once made a 1.2 MB file take 8.7 s of one
+  core there (0.3 s under mawk) and, on a busy host, past the runner's
+  90-second command bound. A "/" inside a bracket expression is written
+  `\057`: busybox keeps the backslash of `\/` there, so the base64 class
+  matched a backslash too.
 - The **remote Windows** target runs PowerShell over the SSH runner, the
   script on stdin and its arguments as base64 JSON; every absolute path is
   sent in the `\\?\` form, so a name such as `nul.conf`, `COM1.conf` or one

@@ -162,7 +162,7 @@ func TestRemoteUnixRealReadPublicCounts(t *testing.T) {
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
-	fxCheckCounts(t, NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS), fxCountingBundle(t))
+	fxCheckCounts(t, NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS), fxCountingBundle(t))
 }
 
 func TestRemoteWindowsRealReadPublicCounts(t *testing.T) {
@@ -250,7 +250,7 @@ func TestRemoteUnixRealSystemBundle(t *testing.T) {
 	if p == "" {
 		t.Skip("no system CA bundle")
 	}
-	fxCheckBundle(t, NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS), p)
+	fxCheckBundle(t, NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS), p)
 }
 
 // TestRemoteWindowsRealSystemBundle reads a system CA bundle (this
@@ -350,7 +350,7 @@ func TestStatIdentifyManyRealUnix(t *testing.T) {
 		t.Skip("POSIX tools not available")
 	}
 	paths := fxBatchTree(t, true)
-	rr := &tgtRecordingRunner{inner: hostinventory.NewLocalRunner()}
+	rr := &tgtRecordingRunner{inner: fxLocalRunner()}
 	rt := NewRemoteUnixTarget(rr, runtime.GOOS)
 	fxBatchParity(t, rt, paths)
 	if n := len(rr.runs); n != 1+2*len(paths) {
@@ -429,8 +429,8 @@ func TestStatIdentifyManySecrecyUnix(t *testing.T) {
 		t.Skip("POSIX tools not available")
 	}
 	paths := fxBatchTree(t, true)
-	rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
-	out, _, exit, err := hostinventory.NewLocalRunner().Run(context.Background(), rt.batchArgv(paths))
+	rt := NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS)
+	out, _, exit, err := fxLocalRunner().Run(context.Background(), rt.batchArgv(paths))
 	if err != nil || exit != 0 {
 		t.Fatalf("exit %d %v", exit, err)
 	}

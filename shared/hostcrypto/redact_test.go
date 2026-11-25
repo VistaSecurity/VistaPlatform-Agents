@@ -388,7 +388,7 @@ func (r tgtPathRunner) ReadFile(ctx context.Context, p string) ([]byte, error) {
 // system's awk, and every other awk installed (busybox standing in for the
 // BWK awk of macOS when that is absent).
 func tgtAwks(t *testing.T) map[string]hostinventory.Runner {
-	runners := map[string]hostinventory.Runner{"system awk": hostinventory.NewLocalRunner()}
+	runners := map[string]hostinventory.Runner{"system awk": fxLocalRunner()}
 	// The same binary under several names (nawk and awk are often mawk) is
 	// run once.
 	seen := map[string]bool{}
@@ -416,7 +416,7 @@ func tgtAwks(t *testing.T) map[string]hostinventory.Runner {
 		} else if err := os.Symlink(bin, filepath.Join(dir, "awk")); err != nil {
 			t.Fatal(err)
 		}
-		runners[impl] = tgtPathRunner{inner: hostinventory.NewLocalRunner(), path: dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+		runners[impl] = tgtPathRunner{inner: fxLocalRunner(), path: dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 	}
 	return runners
 }
@@ -584,7 +584,7 @@ func TestRemoteUnixSwapRace(t *testing.T) {
 					}
 				}
 			}()
-			rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+			rt := NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS)
 			ok, before, after, other := 0, 0, 0, 0
 			for i := 0; i < 1000; i++ {
 				b, err := rt.ReadFile(context.Background(), swap)
@@ -625,7 +625,7 @@ func TestFIFOsNeverHang(t *testing.T) {
 	}
 	targets := map[string]Target{"local": NewLocalTarget()}
 	if tgtRealToolsAvailable() {
-		targets["remote-unix"] = NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+		targets["remote-unix"] = NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS)
 	}
 	for name, tg := range targets {
 		ops := map[string]func(ctx context.Context) error{
@@ -692,7 +692,7 @@ func TestLongPathIsCounted(t *testing.T) {
 	_ = r.Close()
 	for name, tg := range map[string]Target{
 		"local":       NewLocalTarget(),
-		"remote-unix": NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS),
+		"remote-unix": NewRemoteUnixTarget(fxLocalRunner(), runtime.GOOS),
 	} {
 		files, err := tg.List(context.Background(), dir, ListOptions{MaxDepth: 30})
 		var lerr *ListError
@@ -727,13 +727,15 @@ func TestUTF16AndBOM(t *testing.T) {
 	}
 }
 
-// fxEach runs fn on every name, eight at a time. It is for loops of host
+// fxEach runs fn on every name, one worker per core (at most eight). It is for loops of host
 // commands whose checks only report (t.Errorf, t.Logf), which are safe from
 // several goroutines: every name is still checked, in a fraction of the time.
 func fxEach(names []string, fn func(string)) {
 	work := make(chan string)
 	var wg sync.WaitGroup
-	for w := 0; w < 8; w++ {
+	// Never more workers than cores: every worker runs host programs, and
+	// fxLocalRunner's slots bound them across the package anyway.
+	for w := 0; w < min(8, max(1, runtime.GOMAXPROCS(0))); w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
