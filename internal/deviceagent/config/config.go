@@ -38,6 +38,14 @@ const (
 	MinHostInventoryInterval = 1 * time.Hour
 )
 
+// Local host crypto inventory cadence (docs/host-crypto.md): the same default
+// and floor as host inventory, for the same reason. A collection reads every
+// key, keystore and configuration file in the platform's known places.
+const (
+	DefaultHostCryptoInterval = 24 * time.Hour
+	MinHostCryptoInterval     = 1 * time.Hour
+)
+
 // Config holds all configuration for the device agent
 type Config struct {
 	PlatformURL       string        `yaml:"platform_url" env:"PLATFORM_URL"`
@@ -62,8 +70,21 @@ type Config struct {
 	HostInventoryConnectionsEnabled bool `yaml:"host_inventory_connections_enabled" env:"HOST_INVENTORY_CONNECTIONS_ENABLED"`
 	// HostInventoryInterval is the local collection cadence. Below
 	// MinHostInventoryInterval it is raised to the floor, with a log line.
-	HostInventoryInterval time.Duration  `yaml:"host_inventory_interval" env:"HOST_INVENTORY_INTERVAL"`
-	Security              SecurityConfig `yaml:"security"`
+	HostInventoryInterval time.Duration `yaml:"host_inventory_interval" env:"HOST_INVENTORY_INTERVAL"`
+	// HostCryptoEnabled turns on the LOCAL host crypto inventory schedule.
+	// Off by default, as host inventory is. The control plane owns it from the
+	// first heartbeat (setting host_crypto_enabled); this is the starting
+	// position.
+	HostCryptoEnabled bool `yaml:"host_crypto_enabled" env:"HOST_CRYPTO_ENABLED"`
+	// HostCryptoInterval is its cadence; below MinHostCryptoInterval it is
+	// raised to the floor.
+	HostCryptoInterval time.Duration `yaml:"host_crypto_interval" env:"HOST_CRYPTO_INTERVAL"`
+	// HostCryptoExcludePaths are the paths no collection enters. The two
+	// opt-ins (home directories, default keystore passwords) have NO file
+	// key: they are consents, and a consent comes only from the platform's
+	// confirmed desired state, never from the device itself.
+	HostCryptoExcludePaths []string       `yaml:"host_crypto_exclude_paths"`
+	Security               SecurityConfig `yaml:"security"`
 
 	// RegistrationKeySHA256 is the SHA-256 (hex) of the registration key this
 	// agent enrolled with, written in its place once the key is no longer kept
@@ -197,8 +218,28 @@ func Load() *Config {
 	cfg.HostInventoryEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_ENABLED", false)
 	cfg.HostInventoryConnectionsEnabled = sharedconfig.GetEnvAsBool("HOST_INVENTORY_CONNECTIONS_ENABLED", false)
 	cfg.HostInventoryInterval = ParseHostInventoryInterval(sharedconfig.GetEnv("HOST_INVENTORY_INTERVAL", ""))
+	cfg.HostCryptoEnabled = sharedconfig.GetEnvAsBool("HOST_CRYPTO_ENABLED", false)
+	cfg.HostCryptoInterval = ParseHostCryptoInterval(sharedconfig.GetEnv("HOST_CRYPTO_INTERVAL", ""))
 
 	return cfg
+}
+
+// ParseHostCryptoInterval is ParseHostInventoryInterval for the host crypto
+// cadence: empty or unusable gives the default, below the floor is raised.
+func ParseHostCryptoInterval(s string) time.Duration {
+	if s == "" {
+		return DefaultHostCryptoInterval
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		log.Printf("⚠️  Invalid HOST_CRYPTO_INTERVAL %q — using %s", s, DefaultHostCryptoInterval)
+		return DefaultHostCryptoInterval
+	}
+	if d < MinHostCryptoInterval {
+		log.Printf("⚠️  HOST_CRYPTO_INTERVAL %s is below the %s floor — using %s", d, MinHostCryptoInterval, MinHostCryptoInterval)
+		return MinHostCryptoInterval
+	}
+	return d
 }
 
 // ParseHostInventoryInterval turns a duration string into a usable local
@@ -274,6 +315,13 @@ func LoadFromFile(path string) (*Config, error) {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = DefaultHeartbeatInterval
 	}
+	if cfg.HostCryptoInterval <= 0 {
+		cfg.HostCryptoInterval = DefaultHostCryptoInterval
+	} else if cfg.HostCryptoInterval < MinHostCryptoInterval {
+		log.Printf("⚠️  host_crypto_interval %s is below the %s floor — using %s",
+			cfg.HostCryptoInterval, MinHostCryptoInterval, MinHostCryptoInterval)
+		cfg.HostCryptoInterval = MinHostCryptoInterval
+	}
 	if cfg.HostInventoryInterval <= 0 {
 		cfg.HostInventoryInterval = DefaultHostInventoryInterval
 	} else if cfg.HostInventoryInterval < MinHostInventoryInterval {
@@ -320,6 +368,12 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 	if hi := os.Getenv("HOST_INVENTORY_INTERVAL"); hi != "" {
 		cfg.HostInventoryInterval = ParseHostInventoryInterval(hi)
+	}
+	if hc := os.Getenv("HOST_CRYPTO_ENABLED"); hc != "" {
+		cfg.HostCryptoEnabled = sharedconfig.GetEnvAsBool("HOST_CRYPTO_ENABLED", false)
+	}
+	if hc := os.Getenv("HOST_CRYPTO_INTERVAL"); hc != "" {
+		cfg.HostCryptoInterval = ParseHostCryptoInterval(hc)
 	}
 	if dataPath := os.Getenv("DATA_PATH"); dataPath != "" {
 		cfg.DataPath = dataPath

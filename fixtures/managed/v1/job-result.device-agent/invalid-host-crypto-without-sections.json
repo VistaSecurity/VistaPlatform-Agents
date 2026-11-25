@@ -1,0 +1,166 @@
+{
+  "job_id": "6e1d8f3b-4c52-4a7f-8b9e-2d3c4b5e6f70",
+  "success": true,
+  "completed_at": "2026-01-02T03:20:05Z",
+  "host_crypto": {
+    "collected": "2026-01-02T03:04:05Z",
+    "mode": "remote",
+    "platform": "linux",
+    "access": {
+      "elevated": true
+    },
+    "scope": {
+      "home_directories": false,
+      "default_keystore_passwords": false
+    },
+    "certificates": [
+      {
+        "location": {
+          "path": "/etc/ssl/certs/app.example.test.pem",
+          "owner": "root",
+          "group": "root",
+          "mode": "0644",
+          "world_readable": true,
+          "group_readable": true,
+          "size_bytes": 1200,
+          "modified_at": "2026-01-01T00:00:00Z",
+          "found_by": "config",
+          "used_by": [
+            {
+              "kind": "config",
+              "config_path": "/etc/nginx/sites-enabled/app",
+              "directive": "ssl_certificate",
+              "product": "nginx",
+              "context": "app.example.test:443"
+            }
+          ]
+        },
+        "subject_dn": "CN=app.example.test",
+        "issuer_dn": "CN=Example Test CA",
+        "serial_number": "1001",
+        "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "curve": "P-256",
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": false,
+        "self_signed": false,
+        "dns_names": [
+          "app.example.test"
+        ],
+        "public_key_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "trust_anchor": false,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n"
+      }
+    ],
+    "private_keys": [
+      {
+        "location": {
+          "path": "/etc/ssl/private/app.example.test.key",
+          "owner": "root",
+          "group": "root",
+          "mode": "0600",
+          "world_readable": false,
+          "group_readable": false,
+          "found_by": "config"
+        },
+        "role": "tls",
+        "format": "sec1",
+        "protection": "file",
+        "unknown": "remote: openssl pkey not available on the host"
+      }
+    ],
+    "keystores": [
+      {
+        "location": {
+          "path": "/opt/app/keystore.p12",
+          "found_by": "known_location"
+        },
+        "type": "pkcs12",
+        "opened": "not_opened",
+        "unknown": "remote: entries are not read"
+      }
+    ],
+    "ssh": {
+      "host_public_keys": [
+        {
+          "algorithm": "ssh-ed25519",
+          "size_bits": 256,
+          "fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    "configs": [
+      {
+        "location": {
+          "path": "/etc/ssh/sshd_config",
+          "found_by": "known_location"
+        },
+        "product": "sshd",
+        "protocols": [
+          "SSHv2"
+        ],
+        "key_exchanges": [
+          "sntrup761x25519-sha512@openssh.com"
+        ],
+        "references": [
+          {
+            "kind": "private_key",
+            "directive": "HostKey",
+            "path": "/etc/ssh/ssh_host_ed25519_key",
+            "status": "found"
+          }
+        ]
+      }
+    ],
+    "libraries": [
+      {
+        "name": "openssl",
+        "version": "3.0.13",
+        "source": "package",
+        "package": "libssl3"
+      }
+    ],
+    "protection": {
+      "volumes": [
+        {
+          "device": "/dev/nvme0n1p3",
+          "mount_point": "/",
+          "encrypted": true,
+          "method": "luks2",
+          "cipher": "aes-xts-plain64",
+          "key_size_bits": 512,
+          "protectors": [
+            "passphrase"
+          ]
+        }
+      ],
+      "tpm": {
+        "present": true,
+        "version": "2.0"
+      },
+      "secure_boot": true,
+      "fips_mode": false
+    },
+    "errors": [
+      {
+        "step": "processes",
+        "message": "other users' processes need root"
+      }
+    ],
+    "limits": [
+      {
+        "section": "certificates",
+        "limit": "max_records",
+        "detail": "stopped after 2000 records"
+      }
+    ]
+  },
+  "metadata": {
+    "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssh_host_key_type": "ssh-ed25519",
+    "ssh_host_key_verification": "first_use"
+  }
+}

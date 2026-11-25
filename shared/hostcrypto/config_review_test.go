@@ -350,11 +350,31 @@ func TestLinearityCheckCanFail(t *testing.T) {
 		return nil
 	}
 	gen := func(n int) string { return strings.Repeat("x\n", n) }
-	if n, t1, t4, ok := cfgGrowth(quad, gen); !ok || t4 <= 9*t1 {
-		t.Errorf("a quadratic parser was not caught: n=%d %v %v ok=%v", n, t1, t4, ok)
+	// Timing on a loaded machine is noisy in both directions, so each
+	// polarity gets three tries and must hold in at least one: a quadratic
+	// parser cannot look linear three times running, nor a linear one
+	// quadratic, except on a machine too busy to measure anything.
+	caught, flagged := false, true
+	var last string
+	for try := 0; try < 3 && (!caught || flagged); try++ {
+		if !caught {
+			n, t1, t4, ok := cfgGrowth(quad, gen)
+			caught = ok && t4 > 9*t1
+			last = fmt.Sprintf("quadratic n=%d %v %v ok=%v", n, t1, t4, ok)
+		}
+		if flagged {
+			n, t1, t4, ok := cfgGrowth(lin, gen)
+			flagged = ok && t4 > 9*t1
+			if flagged {
+				last = fmt.Sprintf("linear n=%d %v %v", n, t1, t4)
+			}
+		}
 	}
-	if n, t1, t4, ok := cfgGrowth(lin, gen); ok && t4 > 9*t1 {
-		t.Errorf("a linear parser was flagged: n=%d %v %v", n, t1, t4)
+	if !caught {
+		t.Errorf("a quadratic parser was not caught: %s", last)
+	}
+	if flagged {
+		t.Errorf("a linear parser was flagged: %s", last)
 	}
 	_ = sink
 }

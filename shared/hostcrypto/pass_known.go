@@ -754,6 +754,14 @@ func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 			paths = append(paths, fi.Path)
 		}
 		c.locPrefetch(ctx, paths)
+		// The keys among them are probed in batches too (probe_remote.go).
+		var keys []string
+		for _, p := range paths {
+			if r, ok := st.pre[p]; ok && r.IdentifyErr == nil && (r.Identity.Class == ClassPrivateKey || r.Identity.Class == ClassMixed) {
+				keys = append(keys, p)
+			}
+		}
+		c.jobPrefetchKeyProbes(ctx, keys)
 	}
 	switch e.Kind {
 	case locNSS:
@@ -1229,16 +1237,17 @@ func (c *collection) locWhyNot(f *locFile) string {
 	return "not read over a remote connection"
 }
 
-// locRemoteKeyProbe is the hook for describing a remote private key by a
-// command on the host that prints only public material (ssh-keygen -y,
-// openssl pkey -pubout). It is nil in this slice: a remote key is recorded
-// from its markers alone and says so in Unknown. When set, it returns the
-// keys it described; Location and Role are filled by the caller.
-var locRemoteKeyProbe func(ctx context.Context, t Target, path string, id Identity) ([]PrivateKey, bool)
+// locRemoteKeyProbe describes a remote private key by a command on the host
+// that prints only public material (probe_remote.go: ssh-keygen -y, openssl
+// pkey -pubout). It is given the description the markers allow and returns
+// it completed (algorithm, size, public key hash, encrypted or not) or with
+// Unknown saying why not; false when the host could not be asked at all, and
+// the markers' description stands. Location and Role are the caller's.
+var locRemoteKeyProbe = jobProbeRemoteKey
 
-// locRemoteKeystoreProbe is the same hook for keystores (keytool -list,
-// openssl pkcs12 -nokeys, klist -k). Nil in this slice.
-var locRemoteKeystoreProbe func(ctx context.Context, t Target, path string, id Identity) (KeystoreContents, bool)
+// locRemoteKeystoreProbe is the same for keystores (openssl pkcs12 -nokeys,
+// keytool -list); tryDefaults is the operator's default-password opt-in.
+var locRemoteKeystoreProbe = jobProbeRemoteKeystore
 
 // locKeyFromMarkers describes a private key that is not read, from its PEM
 // label or magic number: the format always, the algorithm where the label
@@ -1246,22 +1255,23 @@ var locRemoteKeystoreProbe func(ctx context.Context, t Target, path string, id I
 // says it in the label; the traditional formats say it in a header the
 // markers do not carry, so Encrypted stays nil).
 func (c *collection) locKeyFromMarkers(ctx context.Context, f *locFile) (PrivateKey, bool) {
-	if !c.target.Local() && locRemoteKeyProbe != nil {
-		if keys, ok := locRemoteKeyProbe(ctx, c.target, f.v.Path, f.id); ok && len(keys) > 0 {
-			for _, k := range keys[1:] {
-				c.locAddKey(f, k)
-			}
-			k := keys[0]
-			k.Location = locCopy(f.loc)
-			if k.Role == "" {
-				k.Role = f.v.Role
-			}
-			if k.Protection == "" {
-				k.Protection = KeyProtectionFile
-			}
-			return k, true
-		}
+	k, ok := c.locKeyFromMarkersOnly(f)
+	if !ok || c.target.Local() || locRemoteKeyProbe == nil ||
+		k.Format == KeyFormatPuTTY || k.Format == KeyFormatSSH1 {
+		return k, ok
 	}
+	if probed, ok := locRemoteKeyProbe(ctx, c, f.v.Path, f.id, k); ok {
+		probed.Location, probed.Role = k.Location, k.Role
+		if probed.Protection == "" {
+			probed.Protection = KeyProtectionFile
+		}
+		return probed, true
+	}
+	return k, true
+}
+
+// locKeyFromMarkersOnly is locKeyFromMarkers without the probe.
+func (c *collection) locKeyFromMarkersOnly(f *locFile) (PrivateKey, bool) {
 	k := PrivateKey{Location: locCopy(f.loc), Role: f.v.Role, Protection: KeyProtectionFile}
 	why := "remote: the key file is not read; size and public key need a command on the host"
 	if f.tooBig {
@@ -1332,7 +1342,7 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 	}
 	if !c.locReadable(f) {
 		if !c.target.Local() && locRemoteKeystoreProbe != nil {
-			if kc, ok := locRemoteKeystoreProbe(ctx, c.target, f.v.Path, f.id); ok {
+			if kc, ok := locRemoteKeystoreProbe(ctx, c.target, f.v.Path, typ, c.opts.DefaultKeystorePasswords); ok {
 				c.locAddKeystore(f, kc)
 				return locRead
 			}

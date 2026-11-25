@@ -251,6 +251,7 @@ func TestEveryAgentSettingHasAHandler(t *testing.T) {
 	applier := desiredstate.New()
 	sup := newHostInventorySupervisor(time.Hour, func(*interval, <-chan struct{}) {})
 	registerManagedSettings(applier, sup, newInterval(time.Minute), newInterval(time.Minute), func(bool) {})
+	registerHostCryptoSettings(applier, newHostCryptoSupervisor(time.Hour, hostCryptoSettings{}, func(*interval, <-chan struct{}) {}))
 
 	values := agentconfig.Values{}
 	for _, f := range agentconfig.FieldsFor(agentconfig.RuntimeAgent) {

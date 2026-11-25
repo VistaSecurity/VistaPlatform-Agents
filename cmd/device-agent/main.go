@@ -72,12 +72,16 @@ type DeviceAgent struct {
 	pollEvery     *interval
 	beatEvery     *interval
 	hostInventory *hostInventorySupervisor
+	hostCrypto    *hostCryptoSupervisor
 
 	// collector is the host-inventory collection step. Nil means the real one;
 	// it is a field only so a test can drive the REAL supervisor and the REAL
 	// heartbeat wiring without walking the test machine's package database,
 	// which takes seconds and reports whatever host the suite runs on.
 	collector hostInventoryCollector
+	// hostCryptoCollector is the host crypto collection step; nil means the
+	// real one, for the same reason collector is a field.
+	hostCryptoCollector hostCryptoCollector
 }
 
 type certificateRotator interface {
@@ -481,6 +485,22 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	registerManagedSettings(agent.applier, agent.hostInventory, agent.pollEvery, agent.beatEvery, func(on bool) {
 		setVerboseLogging(on)
 	})
+	// The two opt-ins start OFF whatever the device says: they are consents,
+	// and only the platform's desired state turns one on.
+	agent.hostCrypto = newHostCryptoSupervisor(cfg.HostCryptoInterval, hostCryptoSettings{
+		excludePaths: append([]string(nil), cfg.HostCryptoExcludePaths...),
+	}, agent.collectHostCrypto)
+	registerHostCryptoSettings(agent.applier, agent.hostCrypto)
+	// A host crypto job can run for up to an hour; the agent's lifetime
+	// cancels it (and its partial report is sent) rather than outliving Stop.
+	jobExecutor.SetShutdown(agent.context())
+	// The operator's excluded paths bind every collection, a job's included.
+	jobExecutor.SetHostCryptoExcludes(func() []string { return agent.hostCrypto.options().ExcludePaths })
+	// A job's opt-ins never exceed what the platform confirmed for this agent.
+	jobExecutor.SetHostCryptoConsents(func() (bool, bool) {
+		o := agent.hostCrypto.options()
+		return o.HomeDirectories, o.DefaultKeystorePasswords
+	})
 	// What the file says this agent is running, told to the platform on every
 	// beat. Without it the platform has nothing to go on for a device it has
 	// never been configured for, resolves the built-in defaults, and the first
@@ -580,6 +600,13 @@ func (a *DeviceAgent) Start() error {
 		log.Printf("🖥️  Local host inventory enabled, every %v", a.config.HostInventoryInterval)
 		if err := a.hostInventory.setEnabled(true); err != nil {
 			log.Printf("⚠️  Could not start host inventory: %v", err)
+		}
+	}
+	// Host crypto inventory likewise: the file is the starting position, the
+	// control plane owns it from the first beat.
+	if a.config.HostCryptoEnabled && a.hostCrypto != nil {
+		if err := a.hostCrypto.setEnabled(true); err != nil {
+			log.Printf("⚠️  Could not start host crypto inventory: %v", err)
 		}
 	}
 
@@ -866,6 +893,11 @@ func (a *DeviceAgent) Stop() {
 	if a.hostInventory != nil {
 		if err := a.hostInventory.setEnabled(false); err != nil {
 			log.Printf("⚠️  Could not stop host inventory: %v", err)
+		}
+	}
+	if a.hostCrypto != nil {
+		if err := a.hostCrypto.setEnabled(false); err != nil {
+			log.Printf("⚠️  Could not stop host crypto inventory: %v", err)
 		}
 	}
 

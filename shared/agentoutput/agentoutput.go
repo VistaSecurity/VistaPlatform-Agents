@@ -45,6 +45,10 @@ const (
 	KindSummary             Kind = "summary"
 )
 
+// KindHostCrypto is `device-agent host-crypto`: {"report": the host crypto
+// report}, the managed protocol's defs/host-crypto-report.json byte for byte.
+const KindHostCrypto Kind = "host_crypto"
+
 // Format is an output format.
 type Format string
 

@@ -127,6 +127,23 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			partial = true
 		}
 
+		// Remote: the candidates' Identify and Stat in one host program per
+		// batch (BatchTarget), not two per file.
+		pre := map[string]PathInfo{}
+		if bt, ok := c.target.(BatchTarget); ok && !local {
+			var want []string
+			for _, fi := range files {
+				if !fi.IsSymlink && !fi.IsDir && (ClassifyNamed(fi.Path, nil, nil).Class != ClassUnknown || interestingName(fi.Path)) {
+					want = append(want, fi.Path)
+				}
+			}
+			if len(want) > 1 {
+				got, _ := bt.StatIdentifyMany(ctx, want)
+				for _, r := range got {
+					pre[r.Path] = r
+				}
+			}
+		}
 		for _, fi := range files {
 			if fi.IsSymlink || fi.IsDir {
 				// A link is the file it points at, which a pass reaches by
@@ -140,7 +157,14 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 				partial = true
 				break
 			}
-			id, ok, readErr := sweepIdentify(ctx, c.target, local, fi.Path)
+			var id Identity
+			var ok, readErr bool
+			if r, have := pre[fi.Path]; have && r.IdentifyErr == nil {
+				id = r.Identity
+				ok = (id.Class != ClassText && id.Class != ClassUnknown) || interestingName(fi.Path)
+			} else {
+				id, ok, readErr = sweepIdentify(ctx, c.target, local, fi.Path)
+			}
 			if readErr {
 				unreadable++
 			}
@@ -150,7 +174,9 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			if fi.WorldReadable == nil {
 				// A remote Windows listing carries no ACL (one Get-Acl per
 				// file is too slow): Stat each HIT, not each file.
-				if st, serr := c.target.Stat(ctx, fi.Path); serr == nil {
+				if r, have := pre[fi.Path]; have && r.StatErr == nil {
+					fi = r.Info
+				} else if st, serr := c.target.Stat(ctx, fi.Path); serr == nil {
 					fi = st
 				}
 			}
@@ -203,6 +229,24 @@ func passSweep(ctx context.Context, c *collection) {
 		return
 	}
 	hits := sweep(ctx, c, c.opts.SweepRoots)
+	if !c.target.Local() {
+		// A remote sweep's key files are probed in batches, not one host
+		// program each (probe_remote.go); a hit that is no key answers
+		// NOTKEY at once.
+		paths := make([]string, 0, len(hits))
+		for _, h := range hits {
+			paths = append(paths, h.Info.Path)
+		}
+		// The hits' Stat and Identify are batched as pass 1's are
+		// (locPrefetch), and their keys probed in batches.
+		st := c.locSt()
+		if st.pre == nil {
+			st.pre = map[string]PathInfo{}
+			defer func() { st.pre = nil }()
+		}
+		c.locPrefetch(ctx, paths)
+		c.jobPrefetchKeyProbes(ctx, paths)
+	}
 	for _, h := range hits {
 		if c.timeUp(ctx, SectionSweep) {
 			break

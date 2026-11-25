@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -158,40 +157,108 @@ func (r *Report) limit(section, limit, detail string) {
 	r.Limits = append(r.Limits, LimitHit{Section: section, Limit: limit, Detail: boundMessage(detail)})
 }
 
-// recordError appends a bounded StepError. A step error identical to one
-// already recorded (same step, same message) is not repeated: the first one
-// says how many times it happened, as "<message> (N times)".
+// recordError appends a bounded StepError.
+//
+// Two rules on top of the bound:
+//
+//   - A failure that is a permission denial says, in the message, what the
+//     platform needs to see it (jobPrivilegeNote): the platform's console
+//     shows the message as the reason a section is partial, and "permission
+//     denied" alone does not tell an operator what to change. The note is
+//     taken back off at the end of a run that turned out to be elevated
+//     (jobDropPrivilegeNotes), where it would be wrong.
+//   - The same step and message recorded again is counted, not repeated:
+//     "... (2 times)". Several known locations share a listing root (/opt for
+//     /opt/java/* and /opt/jdk*, the depth-0 listing that looks for links),
+//     and each listing reports the same unreadable directories.
 func (r *Report) recordError(step string, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
 	msg = boundMessage(msg)
+	if jobIsPermission(err, msg) && !jobSaysPrivilege(msg) {
+		msg += jobPrivilegeNote(r.Platform)
+	}
 	for i := range r.Errors {
-		e := &r.Errors[i]
-		if e.Step != step {
+		if r.Errors[i].Step != step {
 			continue
 		}
-		base, n := repeatedMessage(e.Message)
+		base, n := jobSplitRepeat(r.Errors[i].Message)
 		if base == msg {
-			e.Message = fmt.Sprintf("%s (%d times)", base, n+1)
+			r.Errors[i].Message = fmt.Sprintf("%s (%d times)", msg, n+1)
 			return
 		}
 	}
 	r.Errors = append(r.Errors, StepError{Step: step, Message: msg})
 }
 
-var repeatedRE = regexp.MustCompile(`^(.*) \(([0-9]+) times\)$`)
-
-// repeatedMessage splits a recorded message into its text and how many times
-// it was recorded.
-func repeatedMessage(m string) (string, int) {
-	if g := repeatedRE.FindStringSubmatch(m); g != nil {
-		if n, err := strconv.Atoi(g[2]); err == nil {
-			return g[1], n
-		}
+// jobIsPermission reports whether a failure is the account not being allowed
+// to read something. Some passes wrap the Target's sentinels; others restate
+// a listing's denials as a count, which only the words carry.
+func jobIsPermission(err error, msg string) bool {
+	if err != nil && (errors.Is(err, ErrPermission) || errors.Is(err, fs.ErrPermission)) {
+		return true
 	}
-	return m, 1
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "permission denied") || strings.Contains(m, "access is denied") ||
+		strings.Contains(m, "directories could not be read")
+}
+
+// jobPrivilegeNotes are what each platform needs for a complete answer.
+var jobPrivilegeNotes = map[string]string{
+	hostinventory.PlatformLinux:   " (needs root)",
+	hostinventory.PlatformDarwin:  " (needs root and Full Disk Access)",
+	hostinventory.PlatformWindows: " (needs SYSTEM or an elevated administrator)",
+}
+
+// jobSaysPrivilege reports whether a message already names what it needs.
+func jobSaysPrivilege(m string) bool {
+	return strings.Contains(m, "root") || strings.Contains(m, "SYSTEM") ||
+		strings.Contains(m, "administrator") || strings.Contains(m, "Full Disk Access")
+}
+
+// jobPrivilegeNote is the note for a platform.
+func jobPrivilegeNote(platform string) string {
+	if n, ok := jobPrivilegeNotes[platform]; ok {
+		return n
+	}
+	return " (needs root or SYSTEM)"
+}
+
+// jobSplitRepeat splits "msg (N times)" into msg and N; anything else is
+// itself, once.
+func jobSplitRepeat(m string) (string, int) {
+	if !strings.HasSuffix(m, " times)") {
+		return m, 1
+	}
+	i := strings.LastIndex(m, " (")
+	if i < 0 {
+		return m, 1
+	}
+	var n int
+	if _, err := fmt.Sscanf(m[i:], " (%d times)", &n); err != nil || n < 2 {
+		return m, 1
+	}
+	return m[:i], n
+}
+
+// jobDropPrivilegeNotes takes the notes off again when the run was in fact
+// elevated (and, on macOS, had Full Disk Access): a denial then has another
+// cause, and "needs root" would send an operator the wrong way.
+func (r *Report) jobDropPrivilegeNotes() {
+	if r.Access.Elevated == nil || !*r.Access.Elevated {
+		return
+	}
+	if r.Platform == hostinventory.PlatformDarwin && (r.Access.FullDiskAccess == nil || !*r.Access.FullDiskAccess) {
+		return
+	}
+	for i := range r.Errors {
+		for _, n := range jobPrivilegeNotes {
+			r.Errors[i].Message = strings.Replace(r.Errors[i].Message, n, "", 1)
+		}
+		r.Errors[i].Message = strings.Replace(r.Errors[i].Message, " (needs root or SYSTEM)", "", 1)
+	}
 }
 
 // boundMessage keeps a message to one line of at most 300 bytes. Every error
@@ -302,6 +369,10 @@ type collection struct {
 	// what was visited, the configuration files found, the references
 	// followed. Created by the first of them; nil until then.
 	loc *locState
+
+	// jobKeyProbes are the remote key probes' answers, by path
+	// (probe_remote.go), filled in batches before a pass visits the files.
+	jobKeyProbes map[string][]byte
 
 	// runCtx is the run's context, and callerBound the caller's deadline
 	// when it is earlier than MaxDuration (0 otherwise): what a limit names.
@@ -573,6 +644,7 @@ func Collect(ctx context.Context, t Target, opts Options) (*Report, error) {
 		p(ctx, c)
 	}
 	c.registry.finish(rep)
+	rep.jobDropPrivilegeNotes()
 	rep.Collected = opts.now()
 	return rep, nil
 }
