@@ -19,7 +19,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
-	"github.com/gopacket/gopacket/pcap"
 	"github.com/gopacket/gopacket/tcpassembly"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
@@ -39,7 +38,7 @@ type capturedPacket struct {
 type PacketCapture struct {
 	config             *config.Config
 	interfaces         []string
-	handles            []*pcap.Handle
+	handles            []*pcapHandle
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup // captureInterface goroutines
@@ -693,7 +692,7 @@ func buildBPFFilter(cfg *config.Config) string {
 // resolveTargets, and starts capturing on it.
 func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 	// Open interface for capture
-	handle, err := pcap.OpenLive(iface, snapLenFromConfig(pc.config.Capture.BufferSize), true, pcap.BlockForever)
+	handle, err := pcapOpenLive(iface, snapLenFromConfig(pc.config.Capture.BufferSize), true, pcapBlockForever)
 	if err != nil {
 		return fmt.Errorf("failed to open interface %s: %v", iface, err)
 	}
@@ -716,7 +715,7 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 }
 
 // captureInterface captures packets from a specific interface and feeds the worker pool
-func (pc *PacketCapture) captureInterface(handle *pcap.Handle, iface string) {
+func (pc *PacketCapture) captureInterface(handle *pcapHandle, iface string) {
 	defer pc.wg.Done()
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())

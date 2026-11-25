@@ -31,6 +31,7 @@ type hostCryptoSettings struct {
 	homeDirectories          bool
 	defaultKeystorePasswords bool
 	excludePaths             []string
+	sweepRoots               []string
 }
 
 // hostCryptoSupervisor starts and stops the local loop as the platform turns
@@ -56,6 +57,15 @@ func newHostCryptoSupervisor(interval time.Duration, settings hostCryptoSettings
 // the whole desired state on every beat. Stopping cancels a collection in
 // flight: an agent told to stop reading its host's key files stops now.
 func (s *hostCryptoSupervisor) setEnabled(on bool) error {
+	return s.setEnabledBecause(on, "")
+}
+
+// shutdown stops the loop because the agent is stopping, and says so.
+func (s *hostCryptoSupervisor) shutdown() error {
+	return s.setEnabledBecause(false, "because the agent is stopping")
+}
+
+func (s *hostCryptoSupervisor) setEnabledBecause(on bool, why string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if on == s.enabled {
@@ -67,7 +77,10 @@ func (s *hostCryptoSupervisor) setEnabled(on bool) error {
 			close(s.stop)
 			s.stop = nil
 		}
-		log.Printf("🔐 Host crypto inventory turned off")
+		if why == "" {
+			why = "by the agent's settings"
+		}
+		log.Printf("🔐 Host crypto inventory stopped %s", why)
 		return nil
 	}
 	if s.run == nil {
@@ -75,7 +88,12 @@ func (s *hostCryptoSupervisor) setEnabled(on bool) error {
 	}
 	s.iv = newInterval(s.interval)
 	s.stop = make(chan struct{})
-	log.Printf("🔐 Host crypto inventory turned on, every %v", s.interval)
+	// No interval here: until the platform's settings arrive the one held is
+	// the file's (or the default), and the loop names the one it waits.
+	log.Printf("🔐 Host crypto inventory on; it collects once the platform's settings have arrived")
+	if devices.HostCryptoInContainer() {
+		log.Printf("🔐 Note: this agent runs in a Kubernetes pod, so a local host crypto collection describes the container, not the node")
+	}
 	go s.run(s.iv, s.stop)
 	return nil
 }
@@ -130,9 +148,22 @@ func (s *hostCryptoSupervisor) setExcludePaths(list string) error {
 	return nil
 }
 
+// setSweepRoots takes the canonical sweep-roots list, under its own rules
+// (at most 16, never a whole filesystem); a bad value keeps the old list.
+func (s *hostCryptoSupervisor) setSweepRoots(list string) error {
+	roots, problems := agentconfig.ParsePathFor(agentconfig.Registry[agentconfig.KeyHostCryptoSweepRoots], list)
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings.sweepRoots = roots
+	return nil
+}
+
 // options is the collector's options for the next scheduled collection: the
-// settings as they are now, every bound at the collector's default, and no
-// sweep (the schedule sweeps nothing; a job may ask for one).
+// settings as they are now and every bound at the collector's default; the
+// sweep covers the host_crypto_sweep_roots setting (none by default).
 func (s *hostCryptoSupervisor) options() hostcrypto.Options {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,6 +171,7 @@ func (s *hostCryptoSupervisor) options() hostcrypto.Options {
 		HomeDirectories:          s.settings.homeDirectories,
 		DefaultKeystorePasswords: s.settings.defaultKeystorePasswords,
 		ExcludePaths:             append([]string(nil), s.settings.excludePaths...),
+		SweepRoots:               append([]string(nil), s.settings.sweepRoots...),
 	}
 }
 
@@ -152,6 +184,7 @@ func registerHostCryptoSettings(applier *desiredstate.Applier, hc *hostCryptoSup
 	applier.Handle(agentconfig.KeyHostCryptoHomeDirectories, desiredstate.BoolSetter(hc.setHomeDirectories))
 	applier.Handle(agentconfig.KeyHostCryptoDefaultKeystorePasswords, desiredstate.BoolSetter(hc.setDefaultKeystorePasswords))
 	applier.Handle(agentconfig.KeyHostCryptoExcludePaths, desiredstate.TextSetter(hc.setExcludePaths))
+	applier.Handle(agentconfig.KeyHostCryptoSweepRoots, desiredstate.TextSetter(hc.setSweepRoots))
 }
 
 // hostCryptoLocalValues is what the configuration file says about host
@@ -164,6 +197,9 @@ func hostCryptoLocalValues(cfg *config.Config, v agentconfig.Values) {
 	// The two consents are never reported: the device does not hold them.
 	if len(cfg.HostCryptoExcludePaths) > 0 {
 		v[agentconfig.KeyHostCryptoExcludePaths] = agentconfig.Text(agentconfig.FormatPathList(cfg.HostCryptoExcludePaths))
+	}
+	if len(cfg.HostCryptoSweepRoots) > 0 {
+		v[agentconfig.KeyHostCryptoSweepRoots] = agentconfig.Text(agentconfig.FormatPathList(cfg.HostCryptoSweepRoots))
 	}
 }
 
@@ -277,6 +313,7 @@ func runLocalHostCryptoLoop(sub hostCryptoSubmitter, agentID string, every *inte
 	}
 
 	collect()
+	log.Printf("🔐 Host crypto inventory: next collection in about %v", every.get())
 	for waitCycle(every, stop, func(d time.Duration) time.Duration {
 		if d < floor {
 			d = floor

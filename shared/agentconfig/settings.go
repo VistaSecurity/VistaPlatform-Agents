@@ -39,6 +39,7 @@ const (
 	KeyHostCryptoHomeDirectories          Key = "host_crypto_home_directories"
 	KeyHostCryptoDefaultKeystorePasswords Key = "host_crypto_default_keystore_passwords"
 	KeyHostCryptoExcludePaths             Key = "host_crypto_exclude_paths"
+	KeyHostCryptoSweepRoots               Key = "host_crypto_sweep_roots"
 
 	// Sensor.
 	KeyActiveProbing         Key = "active_probing"
@@ -222,6 +223,21 @@ var Registry = func() map[Key]Field {
 			Description: "Absolute paths, one per line, that no host crypto collection by this agent reads or walks into: " +
 				"the scheduled one and every requested one, local or remote (on a remote host they are paths on that host). " +
 				"Pseudo-filesystems, network mounts and container layer stores are always skipped.",
+		},
+		{
+			// The only way pass 4 (the sweep) is reached from the product:
+			// the scheduled collection sweeps these, and every job adds them
+			// to its own sweep_roots, as it adds the excluded paths. A root in
+			// a home directory is swept only with the home-directories
+			// opt-in; a whole filesystem is refused (ParsePathFor).
+			Key: KeyHostCryptoSweepRoots, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindPathList, Apply: ApplyImmediate, Default: Text(""),
+			Max:                    MaxSweepRoots,
+			OlderDevicesRunDefault: true,
+			Label:                  "Directories host crypto inventory sweeps",
+			Description: "Absolute paths, one per line (at most 16), whose files every host crypto collection by this agent identifies by " +
+				"their content, so a key with an unexpected name is found: an application's directory, say. Not a whole filesystem. " +
+				"A directory in a home directory is swept only with home directories included.",
 		},
 		{
 			Key: KeyPollInterval, Runtimes: []Runtime{RuntimeAgent},

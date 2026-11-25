@@ -163,6 +163,15 @@ func newHostInventorySupervisor(interval time.Duration, run func(iv *interval, s
 // desired state on every beat, so idempotence here is what keeps a steady state
 // steady.
 func (s *hostInventorySupervisor) setEnabled(on bool) error {
+	return s.setEnabledBecause(on, "by the control plane")
+}
+
+// shutdown stops the loop because the agent is stopping, and says so.
+func (s *hostInventorySupervisor) shutdown() error {
+	return s.setEnabledBecause(false, "because the agent is stopping")
+}
+
+func (s *hostInventorySupervisor) setEnabledBecause(on bool, why string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if on == s.enabled {
@@ -174,7 +183,7 @@ func (s *hostInventorySupervisor) setEnabled(on bool) error {
 			close(s.stop)
 			s.stop = nil
 		}
-		log.Printf("🖥️  Host inventory turned off by the control plane")
+		log.Printf("🖥️  Host inventory stopped %s", why)
 		return nil
 	}
 	if s.run == nil {
@@ -182,7 +191,7 @@ func (s *hostInventorySupervisor) setEnabled(on bool) error {
 	}
 	s.iv = newInterval(s.interval)
 	s.stop = make(chan struct{})
-	log.Printf("🖥️  Host inventory turned on by the control plane, every %v", s.interval)
+	log.Printf("🖥️  Host inventory turned on %s, every %v", why, s.interval)
 	go s.run(s.iv, s.stop)
 	return nil
 }

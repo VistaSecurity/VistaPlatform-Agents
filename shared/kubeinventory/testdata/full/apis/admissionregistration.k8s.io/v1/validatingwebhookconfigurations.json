@@ -1,0 +1,42 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "cert-manager-webhook",
+    "uid": "c9453925-29d7-4733-81b8-508a6249d64c",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ]
+   },
+   "webhooks": [
+    {
+     "name": "webhook.cert-manager.io",
+     "failurePolicy": "Fail",
+     "clientConfig": {
+      "caBundle": "{{CERT:ca-webhook}}",
+      "service": {
+       "namespace": "cert-manager",
+       "name": "cert-manager-webhook",
+       "port": 443,
+       "path": "/validate"
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

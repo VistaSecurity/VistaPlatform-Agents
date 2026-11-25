@@ -18,6 +18,24 @@ then packaging (`scripts/release/package.mjs`) and the smoke run on every
 system in the release (`scripts/release/smoke.sh`, below). It holds
 `contents: read` only.
 
+**Container images.** Each agent that has an `image` in `release/agents.json`
+is also built for `linux/amd64` and `linux/arm64` as a static executable
+(`scripts/build.sh <agent> linux-<arch> container`: CGO off, the image's build
+tags; for the sensor that leaves out packet capture and libpcap), and
+`package.mjs` assembles the image from it with `scripts/release/image.mjs`:
+no container engine, no base image, one layer, a pure function of the
+executables and the commit's time. The image is a release asset
+(`<image>_<version>_linux.oci.tar`), signed, attested and listed in
+`SHA256SUMS` like the rest. A **tagged** release also pushes it to
+`ghcr.io/<owner>/<image>` exactly as packaged (`push-images.mjs`, which refuses
+to move a tag that names other bytes) and signs it there by digest
+(`sign-images.sh`) with the release identity, before the draft release is
+created; `agents-release.json` then names the registry reference. A nightly
+publishes the archive only. The release run does not start the images
+(`runtime_qualified` is `false` for them); the pull-request gate builds the
+same executables on every change, and the images are started in a cluster by
+the pull-request tests.
+
 Each trusted workflow keeps its write permissions in one job, run in its own
 environment (`release`, `nightly`, `compatibility`), and `scripts/check-workflows.mjs`
 fails any workflow that holds a write anywhere else, is triggered by anything
@@ -182,6 +200,12 @@ Applied by an administrator; GitHub, not this repository, enforces them.
   update, deletion and non-fast-forward refused to everyone. `nightly-*` tags:
   update and non-fast-forward refused to everyone, deletion by administrators
   only (pruning). Every other tag: refused to everyone.
+- **Packages.** The `release` job holds `packages: write` to push the images to
+  `ghcr.io/<owner>/vista-device-agent` and `ghcr.io/<owner>/vista-sensor`.
+  Each package must be public (or readable by the clusters that pull it) and
+  must grant this repository's Actions write access; a package created by the
+  first push belongs to the organisation and is private until an administrator
+  changes its visibility.
 - **Environments.** `release` deployable from `v*` tags only; `nightly` and
   `compatibility` from `main` only. Required reviewers where the plan offers
   them. No environment holds a secret: signing is keyless.

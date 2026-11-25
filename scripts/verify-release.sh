@@ -184,6 +184,45 @@ done < <(jq -r '.agents[] | .kind as $k | .artifacts[] |
   [$k, .type, .os, .arch, .file, .sha256, (.size|tostring), .signature.sha256,
    (if .sbom then (.sbom.url | split("/") | last) else "-" end), (if .sbom then .sbom.sha256 else "-" end)] | @tsv' "$meta")
 
+# 4b. Container images: each is a release asset with its digest, size and
+#     signature bundle like any other, and it really is the image the metadata
+#     names: the archive's one image has that digest, and every blob in the
+#     archive is what its name says. A registry copy pulled by that digest is
+#     therefore the same image.
+while IFS=$'\t' read -r name file digest size bundle_sha image_digest; do
+  [ -n "$file" ] || continue
+  if [ ! -f "$dir/$file" ]; then bad "$file: listed in agents-release.json but not in the release"; continue; fi
+  [ "$(sha "$dir/$file")" = "$digest" ] || bad "$file: sha256 differs from agents-release.json"
+  [ "$(wc -c < "$dir/$file" | tr -d ' ')" = "$size" ] || bad "$file: size differs from agents-release.json"
+  if [ -f "$dir/$file.sigstore.json" ]; then
+    [ "$(sha "$dir/$file.sigstore.json")" = "$bundle_sha" ] || bad "$file.sigstore.json: differs from agents-release.json"
+  else
+    bad "$file: no signature bundle"
+  fi
+  cosign_verify "$file" "$release_identity" || true
+  rm -rf "${work:?}/img"; mkdir -p "$work/img"
+  if ! tar -xf "$dir/$file" -C "$work/img" 2>/dev/null || [ ! -f "$work/img/index.json" ]; then
+    bad "$file: not a readable OCI image archive"; continue
+  fi
+  if [ "$(jq -r '.manifests | length' "$work/img/index.json")" != 1 ] ||
+     [ "$(jq -r '.manifests[0].digest' "$work/img/index.json")" != "$image_digest" ]; then
+    bad "$file: is not image $image_digest"; continue
+  fi
+  blobs_ok=true
+  while IFS= read -r blob; do
+    [ "$(sha "$blob")" = "$(basename "$blob")" ] || blobs_ok=false
+  done < <(find "$work/img/blobs/sha256" -type f)
+  [ -f "$work/img/blobs/sha256/${image_digest#sha256:}" ] || blobs_ok=false
+  # Every platform the metadata names is a manifest of the image's index.
+  while IFS= read -r want; do
+    jq -e --arg d "$want" '.manifests | any(.digest == $d)' "$work/img/blobs/sha256/${image_digest#sha256:}" >/dev/null 2>&1 || blobs_ok=false
+  done < <(jq -r --arg n "$name" '.images[] | select(.name == $n) | .platforms[].digest' "$meta")
+  if [ "$blobs_ok" = true ]; then ok "$file: image $image_digest"; else bad "$file: the archive's contents do not match its digests or the platforms agents-release.json names"; fi
+  while IFS=$'\t' read -r sbom sbom_sha; do
+    if [ -f "$dir/$sbom" ] && [ "$(sha "$dir/$sbom")" = "$sbom_sha" ]; then :; else bad "$sbom: missing or differs from agents-release.json"; fi
+  done < <(jq -r --arg n "$name" '.images[] | select(.name == $n) | .platforms[].sbom | [(.url | split("/") | last), .sha256] | @tsv' "$meta")
+done < <(jq -r '(.images // [])[] | [.name, .file, .sha256, (.size|tostring), .signature.sha256, .digest] | @tsv' "$meta")
+
 # 5. Each package holds byte-for-byte the binary published beside it (as the
 #    one entry with that digest under the package's top directory) and the
 #    same THIRD_PARTY_LICENSES.
@@ -221,7 +260,7 @@ if [ "$prov_status" = attested ]; then
       else
         bad "$file: provenance does not verify"
       fi
-    done < <(jq -r '.agents[].artifacts[].file' "$meta")
+    done < <(jq -r '.agents[].artifacts[].file, (.images // [])[].file' "$meta")
   fi
 else
   reason=$(jq -r '.provenance.reason // "no reason given"' "$meta")

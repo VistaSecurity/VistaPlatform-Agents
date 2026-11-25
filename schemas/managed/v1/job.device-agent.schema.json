@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.vistasecurity.io/agents/managed/v1/job.device-agent.schema.json",
   "title": "Device agent job",
-  "description": "GET /api/v1/device-interrogation-service/agents/{id}/jobs, with X-Agent-Capabilities: 204 with the protocol in its Vista-Agent-Protocol header when there is nothing to do, else 200 with this body. A type the agent does not run is answered with a result whose failure_code is unsupported_command; the type is therefore an open string. Credentials, when present, are sealed only.",
+  "description": "GET /api/v1/device-interrogation-service/agents/{id}/jobs, with X-Agent-Capabilities: 204 with the protocol in its Vista-Agent-Protocol header when there is nothing to do, else 200 with this body. A type the agent does not run is answered with a result whose failure_code is unsupported_command; the type is therefore an open string. Credentials, when present, are sealed only. A kubernetes_inventory job (capability kubernetes_inventory_v1) carries no credentials: it describes the cluster the agent runs in, with the agent's own service account.",
   "type": "object",
   "required": [
     "id",
@@ -22,7 +22,7 @@
     "type": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$",
-      "description": "device_interrogation, device_discovery (capability device_discovery), host_inventory, host_crypto (capability host_crypto_v1; parameters in defs/host-crypto-job.json); anything else is refused."
+      "description": "device_interrogation, device_discovery (capability device_discovery), host_inventory, kubernetes_inventory (capability kubernetes_inventory_v1), host_crypto (capability host_crypto_v1; parameters in defs/host-crypto-job.json); anything else is refused."
     },
     "asset_id": {
       "type": [
@@ -76,6 +76,43 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "kubernetes_inventory"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "credentials": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "maxProperties": 0
+              }
+            ]
+          },
+          "parameters": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "defs/kubernetes-inventory-parameters.json"
+              }
+            ]
+          }
+        }
+      }
+    },
     {
       "if": {
         "required": ["type"],

@@ -11,8 +11,10 @@
 #   build    (contents: read) .github/workflows/build-agents.yml: build every
 #            target, check, package, smoke-run linux/amd64, linux/arm64,
 #            darwin/amd64, darwin/arm64 and windows/amd64.
-#   publish  (the `release` environment; contents, id-token and attestations:
-#            write) sign every artefact keyless, attest SLSA provenance, write
+#   publish  (the `release` environment; contents, id-token, attestations and
+#            packages: write) sign every artefact keyless, push the container
+#            images to ghcr.io exactly as packaged and sign them by digest with
+#            the same identity, attest SLSA provenance, write
 #            and sign agents-release.json and the first compatibility record
 #            (every claim pending), write and sign SHA256SUMS, verify all of it
 #            with scripts/verify-release.sh, create a DRAFT release, upload,
@@ -62,6 +64,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       channel: ${{ steps.resolve.outputs.channel }}
       source-time: ${{ steps.resolve.outputs.source_time }}
+      image-repository: ${{ steps.images.outputs.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -81,6 +84,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}
         run: scripts/release/github-release.sh precheck "$GITHUB_REPOSITORY" "$TAG"
+      # Where the container images go: this repository owner's namespace on
+      # ghcr.io. A registry path is lower-case; the owner's name need not be.
+      - name: The registry path of the container images
+        id: images
+        run: echo "repository=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
   build:
     name: build
@@ -93,6 +101,7 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       source-time: ${{ needs.prepare.outputs.source-time }}
       require-notices: true
+      image-repository: ${{ needs.prepare.outputs.image-repository }}
 
   publish:
     name: publish
@@ -104,6 +113,7 @@ jobs:
       contents: write       # the draft release and its assets
       id-token: write       # keyless cosign signatures and the provenance attestation
       attestations: write   # GitHub's attestation store
+      packages: write       # the container images and their signatures on ghcr.io
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -151,6 +161,20 @@ jobs:
         run: |
           mapfile -t files < <(sed 's/^[0-9a-f]\{64\}  //' "$STATE/artifacts.sha256")
           scripts/release/sign.sh "$IDENTITY" "$ASSETS" "${files[@]}"
+      # The images go to the registry exactly as packaged (no engine, no
+      # re-encoding), so the digest pushed is the digest in the archive that
+      # was just signed and that agents-release.json will name. A tag that
+      # already names other bytes stops the job; a re-run of the same commit
+      # finds its own images and uploads nothing.
+      - name: Push the container images
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ github.token }}
+        run: node scripts/release/push-images.mjs --assets "$ASSETS" --state "$STATE"
+      - name: Sign the container images by digest
+        run: |
+          cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          scripts/release/sign-images.sh "$IDENTITY" "$STATE"
       # GitHub attests build provenance on public repositories, and on private
       # ones only under GitHub Enterprise Cloud. While this repository is
       # private, a release candidate records provenance as unavailable (and
@@ -193,7 +217,7 @@ jobs:
           node scripts/release/metadata.mjs --assets "$ASSETS" --state "$STATE" --repo "$GITHUB_REPOSITORY" \
             --run-url "$RUN_URL" --smoke "$SMOKE" --provenance "$MODE" \
             --provenance-reason "the repository was private when this release was built; GitHub attests private repositories only under Enterprise Cloud" \
-            --issued-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --issued-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --images-pushed
       - name: Sign the metadata and the record
         run: |
           record=$(jq -r .initial_record.file "$ASSETS/agents-release.json")

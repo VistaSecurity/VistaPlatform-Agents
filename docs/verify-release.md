@@ -16,13 +16,15 @@ before and after publishing.
 | `vista-device-agent_<version>_<os>_<arch>[.exe]` | the device interrogation agent binary |
 | `<binary>.tar.gz` (`.zip` for Windows) | the binary with its installer (where there is one), `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES`, under one top-level directory |
 | `<binary>.cdx.json` | CycloneDX 1.6 SBOM of the binary, generated from the module list compiled into it |
+| `vista-sensor_<version>_linux.oci.tar`, `vista-device-agent_<version>_linux.oci.tar` | the agents' container images, each one OCI image layout archive holding the `linux/amd64` and `linux/arm64` images (see "Container images" below) |
+| `<image>_<version>_linux_<arch>.image.cdx.json` | CycloneDX 1.6 SBOM of the executable inside that platform's image |
 | `install-sensor.sh`, `install-sensor-macos.sh`, `install-sensor.ps1`, `install-device-agent.sh`, `install-device-agent-macos.sh`, `install-device-agent.ps1` | the installers (Linux, macOS, Windows) |
 | `THIRD_PARTY_LICENSES` | the licence text of every third-party component linked into the binaries |
 | `agents-release.json` | the release metadata (schema `schemas/release/v1/release.schema.json`): every file above with its digest, size, signature bundle, provenance, which targets were executed in the release run, and what the host must provide |
 | `compatibility-agents-<version>-c<n>.json` | compatibility records (schema `schemas/compatibility/v1/record.schema.json`): which platform versions were tested with these exact bytes. The first (`c1`) ships with the release and says `pending` for every claim |
 | `SHA256SUMS` | the digest of every asset the release run published (everything in this table except the `.sigstore.json` bundles and `SHA256SUMS` itself). Compatibility records added after the release (`c2` and on) are not in it: they are checked by their own signature and the `agents-release.json` digest they name |
-| `<asset>.sigstore.json` | the Sigstore signature bundle of each binary, package, installer, `agents-release.json`, compatibility record and `SHA256SUMS` |
-| `provenance.intoto.jsonl` | the SLSA v1 build-provenance attestation naming every binary, package and installer |
+| `<asset>.sigstore.json` | the Sigstore signature bundle of each binary, package, installer, image archive, `agents-release.json`, compatibility record and `SHA256SUMS` |
+| `provenance.intoto.jsonl` | the SLSA v1 build-provenance attestation naming every binary, package, installer and image archive |
 
 Release kinds:
 
@@ -203,6 +205,69 @@ A platform version is supported with these agents only where a record signed
 by `compatibility.yml` says `tested` for that exact version and edition. A
 newer record for the same release can supersede an older one (`supersedes`);
 both stay published, and records are never edited.
+
+## Container images
+
+The agents run in a Kubernetes cluster from two images, `vista-device-agent`
+and `vista-sensor` ([`device-agent/KUBERNETES.md`](device-agent/KUBERNETES.md)).
+An image holds one static executable, the licence files and nothing of an
+operating system; it runs as user 65532. The sensor image has no packet
+capture: it runs scans only.
+
+Each image is published twice, as the same bytes:
+
+- **as a release asset**, `<image>_<version>_linux.oci.tar`: an OCI image
+  layout archive. It is signed and listed like every other file of the
+  release, so everything above applies to it, and `scripts/verify-release.sh`
+  also checks that the archive holds exactly the image `agents-release.json`
+  names;
+- **in a registry**, by a tagged release (`vX.Y.Z` and `vX.Y.Z-rc.N`):
+  `ghcr.io/vistasecurity/<image>`. A nightly publishes the archive only.
+
+`agents-release.json` lists the images under `images`: for each, the archive's
+SHA-256, and `digest`, the digest of the image itself. That digest is what a
+registry reports and what you pull by. **Refer to an image by digest
+(`ghcr.io/vistasecurity/vista-device-agent@sha256:...`), never by a tag
+alone:** a digest names bytes, a tag names whatever it was last pointed at.
+
+**Verify the image in the registry.** The release workflow signs each image
+by digest with the identity that signs the release:
+
+```sh
+TAG=v6.2.0     # example: your <tag>
+IMAGE=ghcr.io/vistasecurity/vista-device-agent
+DIGEST=$(jq -r '.images[] | select(.name == "vista-device-agent") | .digest' agents-release.json)
+cosign verify "$IMAGE@$DIGEST" \
+  --certificate-identity "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Take `DIGEST` from an `agents-release.json` whose own signature you have
+verified (step 4 above), not from the registry: that ties the image you run to
+the release, not merely to "some image this repository signed". A cluster
+policy that admits only signed images (Kyverno, Sigstore policy-controller)
+checks the same identity and issuer.
+
+**Or use the archive and your own registry.** Verify the archive like any
+other file, then copy it, which keeps the digest:
+
+```sh
+F=vista-device-agent_6.2.0_linux.oci.tar     # example: <image>_<version>_linux.oci.tar
+cosign verify-blob --bundle "$F.sigstore.json" \
+  --certificate-identity "https://github.com/VistaSecurity/VistaPlatform-Agents/.github/workflows/release.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$F"
+skopeo copy --all --preserve-digests "oci-archive:$F" docker://registry.example.com/vista/vista-device-agent:6.2.0
+```
+
+(`ctr images import`, `kind load image-archive` and `docker load`, with
+Docker's containerd image store, read the same archive.) The digest your
+registry reports must be the `digest` in `agents-release.json`.
+
+What the release run does not do: it builds and checks the images but does not
+start them, so `agents-release.json` says `runtime_qualified: false` for an
+image. The images are started in a cluster by this repository's pull-request
+tests, built from the same source by the same script.
 
 ## Windows
 

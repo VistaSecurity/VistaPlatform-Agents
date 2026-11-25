@@ -41,6 +41,7 @@ const (
 	KindScanHost            Kind = "scan_host"
 	KindDeviceInterrogation Kind = "device_interrogation"
 	KindHostInventory       Kind = "host_inventory"
+	KindKubernetesInventory Kind = "kubernetes_inventory"
 	KindError               Kind = "error"
 	KindSummary             Kind = "summary"
 )
@@ -118,6 +119,12 @@ type Summary struct {
 	// Scope says how much was looked at, so an empty result reads as "saw
 	// nothing", not "found nothing wrong".
 	Scope string `json:"scope,omitempty"`
+	// StepErrors and PartialSections are what a record's own report says
+	// did not complete (NoteReport): its step errors, counted, and the
+	// sections it marks partial or failed, named. Errors counts error
+	// RECORDS only, as it always has.
+	StepErrors      int      `json:"step_errors,omitempty"`
+	PartialSections []string `json:"partial_sections,omitempty"`
 }
 
 // Endpoint is one CSV row: a host, port and protocol the run observed. A
@@ -214,8 +221,11 @@ type Writer struct {
 	counts    map[Kind]int
 	endpoints int
 	errors    int
-	warnings  []string
-	seenRows  map[string]bool
+	// stepErrors and partialSections are NoteReport's.
+	stepErrors      int
+	partialSections []string
+	warnings        []string
+	seenRows        map[string]bool
 	// special is an existing output path that is not a regular file
 	// (/dev/null, a named pipe, /dev/stdout): written in place, with no
 	// temporary file and no rename, which such a path cannot take.
@@ -423,6 +433,17 @@ func (w *Writer) Warn(format string, args ...any) {
 // summary. partial marks the result partial even when no error record was
 // written (a collector warning, a section that did not complete). It returns
 // the summary it wrote.
+// NoteReport adds to the summary what a record's own report says did not
+// complete: how many step errors it holds and which sections it marks
+// partial or failed. They are counted and named in the human summary too, so
+// "0 error(s)" never stands beside a report with eight.
+func (w *Writer) NoteReport(stepErrors int, partialSections []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stepErrors += stepErrors
+	w.partialSections = append(w.partialSections, partialSections...)
+}
+
 func (w *Writer) Close(partial bool, scope string) (Summary, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -440,6 +461,8 @@ func (w *Writer) Close(partial bool, scope string) (Summary, error) {
 		DurationSeconds: now.Sub(w.start).Seconds(),
 		FinishedAt:      now,
 		Scope:           scope,
+		StepErrors:      w.stepErrors,
+		PartialSections: w.partialSections,
 	}
 	for k, n := range w.counts {
 		sum.Records[k] = n
@@ -520,8 +543,15 @@ func (w *Writer) printSummary(sum Summary, writeErr error) {
 		kinds = []string{"no observations"}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s; %d endpoint(s); %d error(s); %.1fs\n",
-		w.opts.Agent, strings.Join(kinds, ", "), sum.Endpoints, sum.Errors, sum.DurationSeconds)
+	errs := fmt.Sprintf("%d error(s)", sum.Errors)
+	if sum.StepErrors > 0 {
+		errs = fmt.Sprintf("%d error record(s), %d step error(s) in the report", sum.Errors, sum.StepErrors)
+	}
+	fmt.Fprintf(&b, "%s: %s; %d endpoint(s); %s; %.1fs\n",
+		w.opts.Agent, strings.Join(kinds, ", "), sum.Endpoints, errs, sum.DurationSeconds)
+	if len(sum.PartialSections) > 0 {
+		fmt.Fprintf(&b, "  incomplete sections: %s\n", strings.Join(sum.PartialSections, ", "))
+	}
 	if sum.Scope != "" {
 		fmt.Fprintf(&b, "  looked at: %s\n", sum.Scope)
 	}

@@ -73,7 +73,13 @@ which names it accepts.
    `THIRD_PARTY_TLS_ENRICHMENT`, `VERBOSE`. An enrolled sensor keeps the
    `controlPlaneUrl` it enrolled with and ignores `CONTROL_PLANE_URL` unless
    `CONTROL_PLANE_URL_OVERRIDE=1` is also set. The Linux and macOS services set
-   `SENSOR_IP_ADDRESS` to the installer's `--ip`.
+   `SENSOR_IP_ADDRESS` to the installer's `--ip`. `PLATFORM_CA_FINGERPRINT`
+   is the default of `-ca-fingerprint`. `CAPTURE_DISABLED=true` (or
+   `capture.disabled: true` in the file) turns passive capture off: the sensor
+   opens no interface, needs no capture privileges, and enrolls, heartbeats
+   and runs scan jobs as usual. That is how the sensor runs in a container; a
+   `DATA_PATH` set in the environment is also where it looks for its saved
+   enrollment when it starts.
 3. The configuration file.
 4. Built-in defaults.
 

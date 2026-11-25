@@ -1,0 +1,321 @@
+# Vista Platform agents for a Kubernetes cluster: the device agent, which reads
+# what the cluster's API says about its cryptography, and the sensor, which
+# scans what the cluster runs. One file, plain Kubernetes, no Helm.
+#
+#   kubectl apply -f vista-agents.yaml
+#
+# Before applying, replace the four values marked REPLACE in the Secret at the
+# end and the two image references (or let scripts/render-kubernetes-manifest.mjs
+# do it from a release's agents-release.json). Guide:
+# docs/device-agent/KUBERNETES.md.
+#
+# What this grants, all of it:
+#   - the device agent's service account may LIST the resources named in the
+#     ClusterRole below and GET three ConfigMaps by name. No Secret, no write
+#     verb, no exec, no logs, no wildcard.
+#   - the sensor's service account may do nothing: it has no token and no
+#     binding. The sensor reaches the cluster over the network only.
+# Both run as an unprivileged user with a read-only root filesystem, no
+# capability and no host access.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+    # The pods below meet the "restricted" Pod Security Standard; this makes
+    # the cluster hold them to it.
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vista-device-agent
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vista-sensor
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+# The sensor never talks to the Kubernetes API.
+automountServiceAccountToken: false
+---
+# Everything the device agent may read. Every rule is one the collector uses
+# (shared/kubeinventory/calls.go); a test fails when this role and that table
+# differ in either direction. Resources of an API the cluster does not serve
+# (no cert-manager, no Gateway API, no mesh) are harmless here: the rule
+# matches nothing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vista-device-agent-inventory
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+rules:
+  - nonResourceURLs: ["/version"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "pods", "services"]
+    verbs: ["list"]
+  # Three ConfigMaps, by name: the mesh trust anchors and Cilium's encryption
+  # settings. No other ConfigMap can be read, and none can be listed.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["istio-ca-root-cert", "linkerd-identity-trust-roots", "cilium-config"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["list"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses", "servicecidrs"]
+    verbs: ["list"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "tlsroutes", "tcproutes"]
+    verbs: ["list"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "issuers", "clusterissuers"]
+    verbs: ["list"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests"]
+    verbs: ["list"]
+  - apiGroups: ["security.istio.io"]
+    resources: ["peerauthentications"]
+    verbs: ["list"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["destinationrules"]
+    verbs: ["list"]
+  - apiGroups: ["policy.linkerd.io"]
+    resources: ["servers", "authorizationpolicies"]
+    verbs: ["list"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+    verbs: ["list"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vista-device-agent-inventory
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vista-device-agent-inventory
+subjects:
+  - kind: ServiceAccount
+    name: vista-device-agent
+    namespace: vista-agents
+---
+# Each agent keeps its enrollment (its private key, its certificate, its id) on
+# a small volume, so that a restarted pod is the same agent. Without one a
+# restart would try to enroll again with a registration key that is spent.
+# This uses the cluster's default StorageClass; name another with
+# storageClassName if the cluster has no default.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vista-device-agent-data
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vista-sensor-data
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vista-device-agent
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/name: vista-device-agent
+    app.kubernetes.io/part-of: vista-agents
+spec:
+  replicas: 1
+  # One agent, one identity, one volume: the old pod goes before the new one
+  # starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vista-device-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vista-device-agent
+        app.kubernetes.io/part-of: vista-agents
+    spec:
+      serviceAccountName: vista-device-agent
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: device-agent
+          # Pin by digest: the digest is in the release's agents-release.json.
+          image: ghcr.io/vistasecurity/vista-device-agent:REPLACE-WITH-VERSION
+          args: ["-interactive=false"]
+          env:
+            - name: PLATFORM_URL
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: platform-url}
+            - name: REGISTRATION_KEY
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: device-agent-registration-key}
+            - name: PLATFORM_CA_FINGERPRINT
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: platform-ca-fingerprint, optional: true}
+            - name: DATA_PATH
+              value: /var/lib/vista
+            # The agent's host is a container: there is no host to inventory.
+            - name: HOST_INVENTORY_ENABLED
+              value: "false"
+          # Present only after tls-secrets-opt-in.yaml is applied; it carries
+          # the one setting that turns on reading TLS Secrets.
+          envFrom:
+            - configMapRef:
+                name: vista-device-agent-options
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/vista}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vista-device-agent-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vista-sensor
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/name: vista-sensor
+    app.kubernetes.io/part-of: vista-agents
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vista-sensor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vista-sensor
+        app.kubernetes.io/part-of: vista-agents
+    spec:
+      serviceAccountName: vista-sensor
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sensor
+          # Pin by digest: the digest is in the release's agents-release.json.
+          image: ghcr.io/vistasecurity/vista-sensor:REPLACE-WITH-VERSION
+          args: ["-interactive=false"]
+          env:
+            - name: CONTROL_PLANE_URL
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: platform-url}
+            - name: REGISTRATION_KEY
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: sensor-registration-key}
+            - name: PLATFORM_CA_FINGERPRINT
+              valueFrom:
+                secretKeyRef: {name: vista-agents-enrollment, key: platform-ca-fingerprint, optional: true}
+            - name: DATA_PATH
+              value: /var/lib/vista
+            # Scans only: no interface is opened and nothing is captured.
+            - name: CAPTURE_DISABLED
+              value: "true"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/vista}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vista-sensor-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+# How the agents find the platform and enroll. Replace every value marked
+# REPLACE. Each registration key is used once, by the first start of its
+# agent; after that the agent's identity is on its volume and the key is of
+# no further use to anyone.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vista-agents-enrollment
+  namespace: vista-agents
+  labels:
+    app.kubernetes.io/part-of: vista-agents
+type: Opaque
+stringData:
+  platform-url: "https://REPLACE-WITH-YOUR-PLATFORM"
+  device-agent-registration-key: "REPLACE-WITH-THE-DEVICE-AGENT-REGISTRATION-KEY"
+  sensor-registration-key: "REPLACE-WITH-THE-SENSOR-REGISTRATION-KEY"
+  # The SHA-256 fingerprint of the platform's CA certificate, when the
+  # platform's certificate is signed by a private CA; leave empty when it is
+  # publicly trusted.
+  platform-ca-fingerprint: ""

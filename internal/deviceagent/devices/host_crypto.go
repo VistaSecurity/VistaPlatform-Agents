@@ -15,7 +15,10 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentconfig"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostcrypto"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
+	"github.com/vistasecurity/vistaplatform-agents/shared/sshtrust"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Host crypto inventory (docs/host-crypto.md), in the agent.
@@ -50,7 +53,7 @@ const (
 	HostCryptoMaxDuration          = time.Hour
 	HostCryptoMinDuration          = time.Minute
 	HostCryptoMaxExcludePaths      = agentconfig.MaxPathListEntries
-	HostCryptoMaxSweepRoots        = 16
+	HostCryptoMaxSweepRoots        = agentconfig.MaxSweepRoots
 )
 
 // hostCryptoDefaultDuration is the collector's own default run bound, used to
@@ -130,10 +133,10 @@ func ParseHostCryptoOptions(opts map[string]interface{}) (hostcrypto.Options, []
 	if out.DefaultKeystorePasswords, err = hostCryptoBool(opts, "default_keystore_passwords"); err != nil {
 		return out, nil, err
 	}
-	if out.ExcludePaths, err = hostCryptoPaths(opts, "exclude_paths", HostCryptoMaxExcludePaths); err != nil {
+	if out.ExcludePaths, err = hostCryptoPaths(opts, "exclude_paths", HostCryptoMaxExcludePaths, agentconfig.CheckPath); err != nil {
 		return out, nil, err
 	}
-	if out.SweepRoots, err = hostCryptoPaths(opts, "sweep_roots", HostCryptoMaxSweepRoots); err != nil {
+	if out.SweepRoots, err = hostCryptoPaths(opts, "sweep_roots", HostCryptoMaxSweepRoots, agentconfig.CheckSweepRoot); err != nil {
 		return out, nil, err
 	}
 	n, low, err := hostCryptoBound(opts, "max_files", HostCryptoMaxFiles)
@@ -187,7 +190,7 @@ func hostCryptoBool(opts map[string]interface{}, key string) (bool, error) {
 
 // hostCryptoPaths reads a list of absolute paths under the one path rule
 // (agentconfig.CheckPath), refusing the whole list for one bad entry.
-func hostCryptoPaths(opts map[string]interface{}, key string, max int) ([]string, error) {
+func hostCryptoPaths(opts map[string]interface{}, key string, max int, check func(string) string) ([]string, error) {
 	v, ok := opts[key]
 	if !ok || v == nil {
 		return nil, nil
@@ -205,7 +208,7 @@ func hostCryptoPaths(opts map[string]interface{}, key string, max int) ([]string
 		if !ok {
 			return nil, fmt.Errorf("option %s must be a list of paths", key)
 		}
-		if problem := agentconfig.CheckPath(s); problem != "" {
+		if problem := check(s); problem != "" {
 			return nil, fmt.Errorf("option %s: %s", key, problem)
 		}
 		out = append(out, s)
@@ -292,8 +295,54 @@ func CollectLocalHostCrypto(ctx context.Context, agentID string, opts hostcrypto
 	// The agent's own platform: asking the host with uname, as a remote
 	// collection must, would only add a way to fail.
 	opts.Platform = runtime.GOOS
-	return hostcrypto.Collect(ctx, hostcrypto.NewLocalTarget(), opts)
+	opts, notes := HostCryptoSweepScope(opts)
+	rep, err := hostcrypto.Collect(ctx, hostcrypto.NewLocalTarget(), opts)
+	if rep != nil {
+		rep.Errors = append(rep.Errors, notes...)
+		if HostCryptoInContainer() {
+			rep.Errors = append(rep.Errors, hostcrypto.StepError{Step: hostcrypto.SectionPlatform, Message: HostCryptoContainerNote})
+		}
+	}
+	return rep, err
 }
+
+// HostCryptoInContainer reports whether this agent runs in a Kubernetes pod
+// (a mounted service account). A variable so tests can say either.
+var HostCryptoInContainer = kubeinventory.InClusterAvailable
+
+// HostCryptoContainerNote is what a LOCAL collection made in a pod says:
+// the agent's own filesystem is the container's, so the report describes the
+// container image, not the node it runs on.
+const HostCryptoContainerNote = "this agent runs in a Kubernetes pod: a local collection describes the container's own filesystem, not the node's; collect a node with a remote host_crypto job over SSH"
+
+// HostCryptoSweepScope applies the sweep-root rules every collection keeps,
+// whoever asked: a root that is a whole filesystem is refused (a sweep of it
+// would spend the whole file budget on the first directories it meets and
+// report the rest as cut), and a root inside a home directory needs the
+// home-directories opt-in. Each root dropped is returned as a step error.
+func HostCryptoSweepScope(opts hostcrypto.Options) (hostcrypto.Options, []hostcrypto.StepError) {
+	var keep []string
+	var notes []hostcrypto.StepError
+	for _, r := range opts.SweepRoots {
+		switch {
+		case agentconfig.IsFilesystemRoot(r):
+			notes = append(notes, hostcrypto.StepError{Step: hostcrypto.SectionSweep,
+				Message: r + ": a whole filesystem is not a sweep root; name the directory the application keeps its keys in"})
+		case !opts.HomeDirectories && agentconfig.IsUnderHome(r):
+			notes = append(notes, hostcrypto.StepError{Step: hostcrypto.SectionSweep,
+				Message: r + ": in a home directory; not swept without the home directories opt-in"})
+		default:
+			keep = append(keep, r)
+		}
+	}
+	opts.SweepRoots = keep
+	return opts, notes
+}
+
+// SetHostCryptoSweepRoots hands the executor the agent's
+// host_crypto_sweep_roots setting; its roots are added to every job's
+// sweep_roots, as the excluded paths are.
+func (e *JobExecutor) SetHostCryptoSweepRoots(f func() []string) { e.hostCryptoSweepRoots = f }
 
 // CollectRemoteHostCrypto collects the host runner reaches. The platform is
 // asked of the host first (uname, else PowerShell), because which target
@@ -322,7 +371,12 @@ func CollectRemoteHostCrypto(ctx context.Context, runner hostinventory.Runner, o
 	opts.Mode = hostinventory.ModeRemote
 	opts.Platform = platform
 	opts.AgentID = ""
-	return hostcrypto.Collect(ctx, target, opts)
+	opts, notes := HostCryptoSweepScope(opts)
+	rep, err := hostcrypto.Collect(ctx, target, opts)
+	if rep != nil {
+		rep.Errors = append(rep.Errors, notes...)
+	}
+	return rep, err
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +455,9 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 	if e.hostCryptoExcludes != nil {
 		params.Options.ExcludePaths = MergeHostCryptoExcludes(params.Options.ExcludePaths, e.hostCryptoExcludes())
 	}
+	if e.hostCryptoSweepRoots != nil {
+		params.Options.SweepRoots = MergeHostCryptoExcludes(params.Options.SweepRoots, e.hostCryptoSweepRoots())
+	}
 	clamped := clampHostCryptoConsents(&params.Options, e.hostCryptoConsents)
 
 	ctx, cancel := context.WithCancel(parent)
@@ -443,7 +500,11 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 		runner, err := dial(transport, job.Parameters, decrypted)
 		if err != nil {
 			security.ClearCredentials(decrypted)
-			return e.submitFailure(job, fmt.Sprintf("Could not reach the target: %v", err))
+			msg := fmt.Sprintf("Could not reach the target: %v", err)
+			if hint := HostKeyHint(err); hint != "" {
+				msg += " (" + hint + ")"
+			}
+			return e.submitFailure(job, msg)
 		}
 		// The session is authenticated; the credentials are done with.
 		security.ClearCredentials(decrypted)
@@ -553,4 +614,31 @@ func HostCryptoJobResult(job *models.Job, rep *hostcrypto.Report, collectErr err
 		res.Error = redact.Text("Host crypto inventory failed: " + collectErr.Error())
 	}
 	return res
+}
+
+// HostKeyHint says what to do about an SSH host-key refusal, or "" for any
+// other error. The policy is shared/sshtrust's, the same for every remote
+// collection: a pinned key is compared; with no pin, a known_hosts file the
+// agent's account HAS is used strictly, so a host it does not list is
+// refused; only with no pin and no known_hosts file is the key accepted on
+// first contact (and returned for pinning). Nothing here weakens that.
+func HostKeyHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ke *knownhosts.KeyError
+	if errors.As(err, &ke) {
+		if len(ke.Want) > 0 {
+			return "the host's key is not the one known_hosts lists for it: if the host was rebuilt, verify its new key and update known_hosts; otherwise this is what an interception looks like"
+		}
+		return "the host is not in the known_hosts file of the account the agent runs as, which is then used strictly: pin the host's key (SHA256:..., from `ssh-keyscan HOST | ssh-keygen -lf -` checked against the host itself), or add the host to that known_hosts"
+	}
+	var me *sshtrust.MismatchError
+	if errors.As(err, &me) {
+		return "the host presented a different key from the one pinned for it"
+	}
+	if strings.Contains(err.Error(), "knownhosts: key is unknown") {
+		return "the host is not in the known_hosts file of the account the agent runs as: pin its key or add it to that known_hosts"
+	}
+	return ""
 }
