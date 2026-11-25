@@ -339,6 +339,9 @@ func (c *collection) locFollowRef(ctx context.Context, cf locConfigFile, cfg Cry
 		v.Role = locRefRole(cf.Product)
 	}
 	res, fi := c.locVisit(ctx, v)
+	if res == locRead {
+		c.covNeighbour(ctx, p, v.Section)
+	}
 	switch res {
 	case locMissing:
 		return RefMissing

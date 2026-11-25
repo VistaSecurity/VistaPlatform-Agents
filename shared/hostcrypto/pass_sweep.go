@@ -167,6 +167,12 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			}
 			if readErr {
 				unreadable++
+			} else if local {
+				// Remembered for coverage: a local sweep identified this file
+				// by content (pass_coverage.go).
+				sc := c.locSt().sweepCov()
+				sc.ids[fi.Path] = id
+				sc.charged[fi.Path] = true
 			}
 			if !ok {
 				continue
@@ -249,10 +255,34 @@ func passSweep(ctx context.Context, c *collection) {
 	}
 	for _, h := range hits {
 		if c.timeUp(ctx, SectionSweep) {
-			break
+			c.locFlushRecords()
+			return
 		}
 		info := h.Info
 		c.locVisit(ctx, locVisit{Path: info.Path, Kind: locMaterial, FoundBy: FoundBySweep, Section: SectionSweep, Info: &info, Charged: true})
+	}
+	// A local sweep covers the directories it walked: each is listed again
+	// on its own and every file in it accounted for (covDir); the sweep's
+	// content identities spare reading the files twice. A remote sweep is
+	// by name and covers nothing.
+	if c.target.Local() {
+		sc := c.locSt().sweepCov()
+		dirs := map[string]bool{}
+		var order []string
+		for p := range sc.ids {
+			d := c.locSt().style.dir(p)
+			if !dirs[d] {
+				dirs[d] = true
+				order = append(order, d)
+			}
+		}
+		sort.Strings(order)
+		for _, d := range order {
+			if c.timeUp(ctx, SectionSweep) {
+				break
+			}
+			c.covDir(ctx, d, FoundBySweep, SectionSweep, covMaxEntriesKnown, sc)
+		}
 	}
 	c.locFlushRecords()
 }

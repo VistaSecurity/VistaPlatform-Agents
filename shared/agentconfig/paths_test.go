@@ -113,3 +113,44 @@ func TestValidateAndNormalizePathList(t *testing.T) {
 		t.Fatalf("change %q does not say none for the empty list", c)
 	}
 }
+
+func TestSweepRootsSetting(t *testing.T) {
+	f := Registry[KeyHostCryptoSweepRoots]
+	if f.Kind != KindPathList || f.Default.S == nil || *f.Default.S != "" || !AppliesTo(KeyHostCryptoSweepRoots, RuntimeAgent) {
+		t.Fatalf("field %+v", f)
+	}
+	for in, ok := range map[string]bool{
+		"/opt/app\n/srv/certs": true, `C:\ProgramData\App`: true, "/": false, "//": false, `C:\`: false, "C:/": false,
+		`\\fileserver\share`: false, `\\fileserver\share\certs`: true, "relative": false,
+	} {
+		err := Validate(RuntimeAgent, Values{KeyHostCryptoSweepRoots: Text(in)})
+		if (err == nil) != ok {
+			t.Errorf("%q: %v, want ok=%v", in, err, ok)
+		}
+	}
+	var many []string
+	for i := 0; i <= MaxSweepRoots; i++ {
+		many = append(many, fmt.Sprintf("/srv/r%02d", i))
+	}
+	if err := Validate(RuntimeAgent, Values{KeyHostCryptoSweepRoots: Text(strings.Join(many, "\n"))}); err == nil {
+		t.Errorf("%d sweep roots accepted", len(many))
+	}
+	if err := Validate(RuntimeAgent, Values{KeyHostCryptoSweepRoots: Text(strings.Join(many[:MaxSweepRoots], "\n"))}); err != nil {
+		t.Errorf("%d sweep roots refused: %v", MaxSweepRoots, err)
+	}
+	// The excluded paths keep their own, larger bound and accept "/".
+	if err := Validate(RuntimeAgent, Values{KeyHostCryptoExcludePaths: Text(strings.Join(append(many, "/"), "\n"))}); err != nil {
+		t.Errorf("exclude paths: %v", err)
+	}
+}
+
+func TestIsUnderHome(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/home/alice/app": true, "/home": true, "/Users/bob/keys": true, "/root/.ssh": true, "/var/root/x": true,
+		`C:\Users\carol\certs`: true, "c:/users/x": true, "/opt/app": false, "/homestead": false, `D:\Data`: false,
+	} {
+		if IsUnderHome(p) != want {
+			t.Errorf("IsUnderHome(%q) = %v", p, !want)
+		}
+	}
+}

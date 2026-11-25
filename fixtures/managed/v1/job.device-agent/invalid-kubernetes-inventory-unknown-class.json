@@ -1,0 +1,24 @@
+{
+  "id": "5d0c2a4e-7b1f-4c3a-9e2d-6f8a1b0c9d7e",
+  "type": "kubernetes_inventory",
+  "credentials": null,
+  "parameters": {
+    "probe_kubelets": true,
+    "extra_label_keys": [
+      "team.example.test/owner"
+    ],
+    "max_part_bytes": 8388608,
+    "classes": [
+      "secrets"
+    ]
+  },
+  "created_at": "2026-01-02T03:04:05Z",
+  "expires_at": null,
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "device_discovery",
+      "kubernetes_inventory_v1"
+    ]
+  }
+}

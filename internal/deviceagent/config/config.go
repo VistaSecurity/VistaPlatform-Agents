@@ -83,8 +83,11 @@ type Config struct {
 	// opt-ins (home directories, default keystore passwords) have NO file
 	// key: they are consents, and a consent comes only from the platform's
 	// confirmed desired state, never from the device itself.
-	HostCryptoExcludePaths []string       `yaml:"host_crypto_exclude_paths"`
-	Security               SecurityConfig `yaml:"security"`
+	HostCryptoExcludePaths []string `yaml:"host_crypto_exclude_paths"`
+	// HostCryptoSweepRoots are the directories every collection sweeps by
+	// content (the host_crypto_sweep_roots setting\'s starting value).
+	HostCryptoSweepRoots []string       `yaml:"host_crypto_sweep_roots"`
+	Security             SecurityConfig `yaml:"security"`
 
 	// RegistrationKeySHA256 is the SHA-256 (hex) of the registration key this
 	// agent enrolled with, written in its place once the key is no longer kept

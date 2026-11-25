@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
@@ -96,6 +97,10 @@ type JobResult struct {
 	// and checked by hostcrypto.ResultPayload: raw bytes rather than the
 	// struct so what was checked is exactly what is sent.
 	HostCrypto json.RawMessage `json:"host_crypto,omitempty"`
+	// KubernetesInventory is one part of a kubernetes_inventory job's
+	// collection (docs/design/kubernetes-inventory.md). A collection is sent
+	// as one result per part, all with the job's id; no other job sets it.
+	KubernetesInventory *kubeinventory.Inventory `json:"kubernetes_inventory,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

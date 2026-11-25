@@ -569,3 +569,85 @@ func TestExecute_HostCryptoJobOptInsAreClampedToConsents(t *testing.T) {
 		}
 	}
 }
+
+// The sweep-root rules every collection keeps: a whole filesystem is not
+// swept; a home directory only with the opt-in.
+func TestHostCryptoSweepScope(t *testing.T) {
+	in := hostcrypto.Options{SweepRoots: []string{"/", `C:\`, "/opt/app", "/home/alice/app", `C:\Users\bob\keys`}}
+	got, notes := HostCryptoSweepScope(in)
+	if strings.Join(got.SweepRoots, ",") != "/opt/app" || len(notes) != 4 {
+		t.Fatalf("without home directories: %v, %v", got.SweepRoots, notes)
+	}
+	in.HomeDirectories = true
+	got, notes = HostCryptoSweepScope(in)
+	if len(got.SweepRoots) != 3 || len(notes) != 2 {
+		t.Fatalf("with home directories: %v, %v", got.SweepRoots, notes)
+	}
+}
+
+// The sweep-roots setting reaches every job (merged into its sweep_roots),
+// and a job's own whole-filesystem root is refused.
+func TestExecute_HostCryptoSweepRootsSetting(t *testing.T) {
+	dir, _ := hcjKeyDir(t)
+	exec, rec := newTestExecutor()
+	exec.SetHostCryptoSweepRoots(func() []string { return []string{dir} })
+	if err := exec.Execute(context.Background(), hcjJob(t, map[string]any{"mode": "local", "options": map[string]any{"max_duration_seconds": 60}})); err != nil {
+		t.Fatal(err)
+	}
+	r := hcjReport(t, rec.last())
+	if len(r.Scope.SweepRoots) != 1 || r.Scope.SweepRoots[0] != dir {
+		t.Fatalf("scope %+v", r.Scope)
+	}
+	found := false
+	for _, k := range r.PrivateKeys {
+		found = found || strings.HasPrefix(k.Location.Path, dir)
+	}
+	if !found {
+		t.Fatal("the setting's sweep root was not swept")
+	}
+	exec, rec = newTestExecutor()
+	if err := exec.Execute(context.Background(), hcjJob(t, map[string]any{"mode": "local", "options": map[string]any{"sweep_roots": []string{"/"}}})); err != nil {
+		t.Fatal(err)
+	}
+	if res := rec.last(); res.Success || !strings.Contains(res.Error, "whole filesystem") {
+		t.Fatalf("a job sweeping / was not refused: %+v", res)
+	}
+}
+
+// In a pod, a local collection says it describes the container; outside one
+// it says nothing of the kind.
+func TestHostCryptoInContainerNote(t *testing.T) {
+	saved := HostCryptoInContainer
+	t.Cleanup(func() { HostCryptoInContainer = saved })
+	for _, inPod := range []bool{true, false} {
+		HostCryptoInContainer = func() bool { return inPod }
+		rep, err := CollectLocalHostCrypto(context.Background(), "a", hostcrypto.Options{MaxFiles: 10, MaxDuration: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		noted := false
+		for _, e := range rep.Errors {
+			noted = noted || e.Message == HostCryptoContainerNote
+		}
+		if noted != inPod {
+			t.Errorf("in a pod %v: noted %v", inPod, noted)
+		}
+	}
+}
+
+// The executor records what the platform was told for each job, so the
+// agent's log line can say a failed job failed.
+func TestExecutorOutcome(t *testing.T) {
+	rec := &recordingClient{}
+	exec := &JobExecutor{submitter: &outcomeSubmitter{inner: rec}, config: secretConfig()}
+	job := hcjJob(t, map[string]any{"mode": "nonsense"})
+	if err := exec.Execute(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if ok, succeeded := exec.Outcome(job.ID); !ok || succeeded {
+		t.Fatalf("outcome of a refused job: %v %v", ok, succeeded)
+	}
+	if ok, _ := exec.Outcome(uuid.New()); ok {
+		t.Fatal("an outcome for a job never run")
+	}
+}

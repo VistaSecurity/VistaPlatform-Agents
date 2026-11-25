@@ -5,8 +5,8 @@
 No platform, no account, nothing uploaded: name what to look at and the agent
 writes what it observed to a file.
 
-- [`standalone.md`](standalone.md): how to run `capture`, `scan`, `collect`
-  and `host-inventory`, the flags, and what to do when something goes wrong.
+- [`standalone.md`](standalone.md): how to run `capture`, `scan`, `collect`,
+  `host-inventory` and `kubernetes-inventory`, the flags, and what to do when something goes wrong.
 - [`standalone-output.md`](standalone-output.md): the output format record by
   record, the CSV columns, what is stable, and `jq` recipes.
 - [`host-crypto.md`](host-crypto.md): describing a host's certificates, keys,
@@ -22,6 +22,9 @@ writes what it observed to a file.
   [`sensor/WINDOWS_USAGE.md`](sensor/WINDOWS_USAGE.md); its files and logs:
   [`sensor/CONFIGURATION_AND_LOGS.md`](sensor/CONFIGURATION_AND_LOGS.md); its
   certificate: [`sensor/CERTIFICATE_MANAGEMENT.md`](sensor/CERTIFICATE_MANAGEMENT.md).
+- Both agents in a Kubernetes cluster:
+  [`device-agent/KUBERNETES.md`](device-agent/KUBERNETES.md): the manifest,
+  what is read and what never is, the TLS Secrets opt-in, removal.
 - Device agent: the setup guide for [Linux](device-agent/LINUX_SETUP.md),
   [macOS](device-agent/MACOS_SETUP.md) or [Windows](device-agent/WINDOWS.md);
   its certificate:
@@ -40,6 +43,8 @@ writes what it observed to a file.
 
 - [`design/standalone-mode.md`](design/standalone-mode.md): the standalone
   mode design and the rules it keeps.
+- [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md): the
+  Kubernetes inventory job, what it reads and the record it returns.
 - [`design/host-crypto.md`](design/host-crypto.md): the host crypto collector's
   design and the rules for changing it.
 - [`development/standalone.md`](development/standalone.md): where the

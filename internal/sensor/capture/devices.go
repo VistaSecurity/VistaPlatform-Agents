@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"github.com/gopacket/gopacket/pcap"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/capture/ifselect"
 )
 
@@ -20,14 +19,14 @@ const (
 // ListDevices returns the capture devices libpcap reports, with their
 // non-nil addresses in the order libpcap gives them.
 func ListDevices() ([]Device, error) {
-	found, err := pcap.FindAllDevs()
+	found, err := pcapFindAllDevs()
 	if err != nil {
 		return nil, err
 	}
 	return devicesFromPcap(found), nil
 }
 
-func devicesFromPcap(found []pcap.Interface) []Device {
+func devicesFromPcap(found []pcapInterface) []Device {
 	devices := make([]Device, 0, len(found))
 	for _, d := range found {
 		dev := Device{

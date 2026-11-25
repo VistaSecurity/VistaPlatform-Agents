@@ -1,0 +1,1231 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "web-7c9d8f6b5-aaaaa",
+    "uid": "a55bc3bd-c2ec-41e9-856e-51bd9b30e354",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "labels": {
+     "app": "web",
+     "pod-template-hash": "7c9d8f6b5"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "web-7c9d8f6b5",
+      "uid": "df93d73e-eded-4106-8700-a3f625e4e47d",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "web",
+      "image": "registry.example.test/shop/web:1.4.2",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "https",
+        "containerPort": 8443,
+        "protocol": "TCP"
+       },
+       {
+        "name": "metrics",
+        "containerPort": 9090,
+        "protocol": "TCP"
+       }
+      ]
+     },
+     {
+      "name": "istio-proxy",
+      "image": "registry.example.test/istio/proxyv2:1.26.0",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "http-envoy-prom",
+        "containerPort": 15090,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "initContainers": [
+     {
+      "name": "migrate",
+      "image": "registry.example.test/shop/migrate:1.4.2",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "serviceAccountName": "web",
+    "nodeName": "node-a",
+    "volumes": [
+     {
+      "name": "tls",
+      "secret": {
+       "secretName": "web-tls"
+      }
+     },
+     {
+      "name": "cfg",
+      "configMap": {
+       "name": "app-config"
+      }
+     }
+    ]
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.17",
+    "podIPs": [
+     {
+      "ip": "198.51.100.17"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "web-7c9d8f6b5-bbbbb",
+    "uid": "c8802709-b530-4e82-89b4-435171765c0c",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "labels": {
+     "app": "web"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "web-7c9d8f6b5",
+      "uid": "df93d73e-eded-4106-8700-a3f625e4e47d",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "web",
+      "image": "registry.example.test/shop/web:1.4.2",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "https",
+        "containerPort": 8443,
+        "protocol": "TCP"
+       },
+       {
+        "name": "metrics",
+        "containerPort": 9090,
+        "protocol": "TCP"
+       }
+      ]
+     },
+     {
+      "name": "istio-proxy",
+      "image": "registry.example.test/istio/proxyv2:1.26.0",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "http-envoy-prom",
+        "containerPort": 15090,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "initContainers": [
+     {
+      "name": "migrate",
+      "image": "registry.example.test/shop/migrate:1.4.2",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "serviceAccountName": "web",
+    "nodeName": "node-a",
+    "volumes": [
+     {
+      "name": "tls",
+      "secret": {
+       "secretName": "web-tls"
+      }
+     },
+     {
+      "name": "cfg",
+      "configMap": {
+       "name": "app-config"
+      }
+     }
+    ]
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.18",
+    "podIPs": [
+     {
+      "ip": "198.51.100.18"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "db-0",
+    "uid": "3f8dec9c-768e-4a8d-8d59-9f2f224ccfa2",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "labels": {
+     "app": "db"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "StatefulSet",
+      "name": "db",
+      "uid": "e1606d77-4dcb-486f-8441-533e3c2d2280",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "db",
+      "image": "registry.example.test/shop/db:16",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "pg",
+        "containerPort": 5432,
+        "protocol": "TCP"
+       }
+      ]
+     },
+     {
+      "name": "istio-proxy",
+      "image": "registry.example.test/istio/proxyv2:1.26.0",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "http-envoy-prom",
+        "containerPort": 15090,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "serviceAccountName": "db",
+    "nodeName": "node-b"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.140",
+    "podIPs": [
+     {
+      "ip": "198.51.100.140"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "report-29001-zzzzz",
+    "uid": "ccbaaae6-2020-4d6a-801b-7a91cea1ed59",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "labels": {
+     "app": "report"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "name": "report-29001",
+      "uid": "19e47520-230e-4aec-81da-a3d141e4981b",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "report",
+      "image": "registry.example.test/shop/report:3",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "nodeName": "node-b"
+   },
+   "status": {
+    "phase": "Succeeded",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "False"
+     }
+    ],
+    "podIP": "198.51.100.141",
+    "podIPs": [
+     {
+      "ip": "198.51.100.141"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "canary-6f6f6f6f6-ccccc",
+    "uid": "af397304-eae9-47f7-8837-2beeaf40f3ce",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "labels": {
+     "app": "canary"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "canary-6f6f6f6f6",
+      "uid": "a39bd509-5f70-4354-88f7-cf898efb3d61",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "canary",
+      "image": "registry.example.test/shop/canary:9",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "http",
+        "containerPort": 8080,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "nodeName": "node-a"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.19",
+    "podIPs": [
+     {
+      "ip": "198.51.100.19"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "debug",
+    "uid": "391c962d-dc94-4a55-8ddf-b8d15bae95e1",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "default",
+    "labels": {
+     "run": "debug"
+    }
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "shell",
+      "image": "registry.example.test/tools/shell:1",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "nodeName": "node-a"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.30",
+    "podIPs": [
+     {
+      "ip": "198.51.100.30"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "kube-apiserver-node-a",
+    "uid": "67afc669-f937-4be6-8791-e41937c026bb",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "kube-system",
+    "labels": {
+     "component": "kube-apiserver"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "name": "node-a",
+      "uid": "a0d4825d-d42f-4ef6-816d-c0e48f18e204",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "kube-apiserver",
+      "image": "registry.example.test/kube-apiserver:v1.33.4",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "https",
+        "containerPort": 6443,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "hostNetwork": true,
+    "nodeName": "node-a"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "127.0.0.1",
+    "podIPs": [
+     {
+      "ip": "127.0.0.1"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "node-exporter-aaaaa",
+    "uid": "44d050bb-6d1d-49e5-8ffc-4533e29e2578",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "kube-system",
+    "labels": {
+     "k8s-app": "node-exporter"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "node-exporter",
+      "uid": "ff5c70d2-b92c-485b-8f07-764bc1f60f76",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "exporter",
+      "image": "registry.example.test/node-exporter:1.9",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "metrics",
+        "containerPort": 9100,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "hostNetwork": true,
+    "nodeName": "node-a"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "127.0.0.1",
+    "podIPs": [
+     {
+      "ip": "127.0.0.1"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "api-5d5d5d5d5-ddddd",
+    "uid": "7e54e439-8943-46d6-8ac9-132d4b1da08c",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "mesh",
+    "labels": {
+     "app": "api"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "name": "api-5d5d5d5d5",
+      "uid": "ae8b5a5a-ce6f-48d0-8a21-0219f9e04bb9",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "api",
+      "image": "registry.example.test/mesh/api:2",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      },
+      "ports": [
+       {
+        "name": "http",
+        "containerPort": 8080,
+        "protocol": "TCP"
+       }
+      ]
+     },
+     {
+      "name": "linkerd-proxy",
+      "image": "registry.example.test/linkerd/proxy:2.18",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst",
+    "nodeName": "node-b"
+   },
+   "status": {
+    "phase": "Running",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     }
+    ],
+    "podIP": "198.51.100.150",
+    "podIPs": [
+     {
+      "ip": "198.51.100.150"
+     }
+    ]
+   }
+  },
+  {
+   "metadata": {
+    "name": "pending-no-address",
+    "uid": "83940665-8060-4aed-849b-2e3d2f052e7a",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop"
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "x",
+      "image": "registry.example.test/x:1",
+      "env": [
+       {
+        "name": "DB_PASSWORD",
+        "value": "env-secret-value"
+       },
+       {
+        "name": "TOKEN",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "db-password",
+          "key": "password"
+         }
+        }
+       }
+      ],
+      "command": [
+       "/bin/app",
+       "--api-key=command-secret-value"
+      ],
+      "args": [
+       "--password=args-secret-value"
+      ],
+      "volumeMounts": [
+       {
+        "name": "tls",
+        "mountPath": "/tls"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "1"
+       }
+      }
+     }
+    ],
+    "restartPolicy": "Always",
+    "dnsPolicy": "ClusterFirst"
+   },
+   "status": {
+    "phase": "Pending",
+    "startTime": "2026-01-02T03:04:05Z",
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "False"
+     }
+    ]
+   }
+  }
+ ]
+}

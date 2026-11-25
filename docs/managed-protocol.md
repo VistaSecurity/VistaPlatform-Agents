@@ -48,6 +48,12 @@ enforced whatever else an answer carries.
   metadata envelope (`defs/envelope.json`). Everything a device collector
   returns has passed the agent's projection allowlists and redaction before it
   is sent: the agents collect posture, never key material.
+- **A Kubernetes inventory carries no credentials.** A `kubernetes_inventory`
+  job (capability `kubernetes_inventory_v1`, offered only by a device agent
+  running in a cluster) describes the cluster the agent runs in through the
+  agent's own service account. Its result is the typed, closed record of
+  `defs/kubernetes-inventory.json`, sent as one job result per part. See
+  [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md).
 - **Certificate rotation** happens when the client certificate has under 30 days
   left: a fresh key, a new certificate, a new agent secret, and the old
   certificate is revoked.
@@ -98,8 +104,9 @@ that negotiates it ([`host-crypto.md`](host-crypto.md)):
   `default_keystore_passwords`, `exclude_paths`, `sweep_roots`, `max_files`,
   `max_file_bytes`, `max_records_per_section`, `max_duration_seconds`). An
   option the agent does not know is refused; a bound above its maximum is
-  lowered to it. The agent adds its `host_crypto_exclude_paths` setting to
-  every job's `exclude_paths`. The result carries the report as `host_crypto`
+  lowered to it. The agent adds its `host_crypto_exclude_paths` and
+  `host_crypto_sweep_roots` settings to every job's `exclude_paths` and
+  `sweep_roots`. A sweep root may not be a whole filesystem. The result carries the report as `host_crypto`
   ([`defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)),
   also on a failure that has a partial report. A job's overall timeout, when
   it names no `timeout_seconds`, is its `max_duration_seconds` (15 minutes by

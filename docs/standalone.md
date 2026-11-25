@@ -18,6 +18,7 @@ see [vistasecurity.io](https://vistasecurity.io) if you want that.
 | Scan addresses you own | `crypto-sensor scan --target T` |
 | Ask one device about its own cryptography | `device-agent collect --type TYPE --target HOST` |
 | Inventory the machine you are on | `device-agent host-inventory` |
+| Inventory the Kubernetes cluster a pod runs in | `device-agent kubernetes-inventory` |
 | Describe the certificates, keys and crypto policy of this machine, or one over SSH | `device-agent host-crypto [--remote USER@HOST]` |
 
 Every field of the output: [`standalone-output.md`](standalone-output.md). The
@@ -26,7 +27,7 @@ design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode
 ## Get the binary
 
 1. Open the [releases page](https://github.com/VistaSecurity/VistaPlatform-Agents/releases)
-   and pick `v6.1.0-rc.1` or a later release (see below). Download the
+   and pick `v6.1.0` or a later release (see below). Download the
    archive for your agent and system (the README's
    ["Which file do I need"](../README.md#which-file-do-i-need) table names it)
    and `SHA256SUMS`.
@@ -49,13 +50,11 @@ design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode
   else.
 
 The first release with standalone mode is
-[`v6.1.0-rc.1`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0-rc.1),
-a release candidate, and every release after it has it too; so do the nightly
-builds from 2026-11-23 on. GitHub's "Latest" label stays on the newest stable
-release, which until v6.1.0 ships is v6.0.0, and **v6.0.0 has no standalone
-mode**: an older binary has no subcommands and would start as a managed agent
-instead. A binary that has it lists the standalone commands at the top of
-`--help`.
+[`v6.1.0`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0),
+and every release after it has it too; so do the nightly builds from
+2026-11-23 on. **v6.0.0 and earlier have no standalone mode**: an older binary
+has no subcommands and would start as a managed agent instead. A binary that
+has it lists the standalone commands at the top of `--help`.
 
 ### macOS: before the first run
 
@@ -215,6 +214,37 @@ installed packages and the certificates in its system stores. It contacts
 nothing on the network. Run it as an administrator for the fullest result; as
 an ordinary user some sections may not complete, and the summary says which.
 
+## Inventory the Kubernetes cluster a pod runs in
+
+```bash
+device-agent kubernetes-inventory --out cluster.json --format json
+```
+
+Run it **in a pod** of the cluster. It reads the cluster's API with the pod's
+service account and writes what the cluster declares about its cryptography:
+workloads and the ports they declare, Services and what backs them, TLS on
+Ingress and Gateway listeners, cert-manager, service-mesh mTLS policy, webhook
+and aggregated-API CA bundles, and the certificates the API server and the
+kubelets serve. What is read, and the record field by field:
+[`design/kubernetes-inventory.md`](design/kubernetes-inventory.md).
+
+- It takes **no kubeconfig, token or API server address**. Outside a pod it
+  stops with "not running in a Kubernetes cluster" and writes nothing.
+- It only reads: `get` and `list`, on a fixed list of resources. The service
+  account needs a role that grants them; a class the role does not grant is
+  reported as `failed`, `not_permitted`, and the run is partial (exit 2).
+- It connects to the API server and to each node's kubelet port
+  (`--no-kubelet-probe` turns the second off) and to nothing else. It does not
+  scan Services or pods; `crypto-sensor scan` does that.
+- **Secrets are not read.** `--read-tls-secrets` (or
+  `VISTA_KUBERNETES_READ_TLS_SECRETS=true`) adds the certificates of Secrets
+  of type `kubernetes.io/tls`, and needs permission to list Secrets, which
+  Kubernetes cannot limit to certificates or to that type. The agent asks the
+  API server for TLS Secrets only and never decodes a private key.
+- Labels are reported from a short built-in list; `--label-key KEY` adds one.
+- `--no-certificate-pem` writes each certificate's parsed fields without its
+  PEM; `--timeout` bounds the whole run (default 10 minutes).
+
 ## Describe a host's cryptography
 
 ```bash
@@ -233,13 +263,17 @@ fullest result; on macOS give the terminal Full Disk Access too.
   credential comes from `--identity-file` (a private key only you can read;
   its passphrase from `VISTA_DEVICE_KEY_PASSPHRASE`), a `--credentials` file
   (`username`, `password`, `private_key`, `passphrase`) or
-  `VISTA_DEVICE_PASSWORD`. `--ssh-host-key` pins the host key; without it the
-  key is checked against `known_hosts`, or accepted on first contact, and the
-  summary names the pin to use next time.
+  `VISTA_DEVICE_PASSWORD`. `--ssh-host-key SHA256:...` pins the host's key.
+  Without a pin your `~/.ssh/known_hosts` decides, strictly: a host it does
+  not list is refused, and the error says how to pin it. Only with no
+  `known_hosts` file at all is the key accepted on first contact; the summary
+  then names the pin to use next time. Details:
+  [`host-crypto.md`](host-crypto.md#another-host-over-ssh).
 - `--home-directories` and `--default-keystore-passwords`: the two opt-ins.
-- `--exclude PATH` (repeatable): never entered. `--root PATH` (repeatable):
-  swept for key material by content (by name and size with `--remote`); no
-  sweep without one.
+- `--exclude PATH` (repeatable): never entered. `--root PATH` (repeatable, at
+  most 16): swept for key material by content (by name and size with
+  `--remote`); no sweep without one. Not a whole filesystem; a root in a home
+  directory needs `--home-directories`.
 - `--max-duration` bounds the run (default 15 minutes, 1 minute to 1 hour).
 - The output file is readable by you alone on every system, because it says
   where every key on the host is and who can read it: 0600 on Linux and
@@ -279,8 +313,8 @@ Every record has the same envelope:
 ```
 
 The kinds are `run` (first), `passive_observation`, `scan_host`,
-`device_interrogation`, `host_inventory`, `host_crypto`, `error` and `summary`
-(last).
+`device_interrogation`, `host_inventory`, `kubernetes_inventory`,
+`host_crypto`, `error` and `summary` (last).
 [`standalone-output.md`](standalone-output.md) describes every field, the CSV
 columns, what stays stable between releases, and has `jq` recipes. For example,
 every TLS endpoint a scan saw, with its versions:

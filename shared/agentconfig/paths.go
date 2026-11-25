@@ -33,6 +33,12 @@ const MaxPathLength = 1024
 // duplicates removed. Every unusable entry produces its own problem naming
 // it, and any problem means the list as a whole is refused, as for ports.
 func ParsePathList(s string) ([]string, []string) {
+	return ParsePathListWith(s, MaxPathListEntries, CheckPath)
+}
+
+// ParsePathListWith is ParsePathList with a field's own bound and path rule
+// (the sweep roots: at most MaxSweepRoots, CheckSweepRoot).
+func ParsePathListWith(s string, max int, check func(string) string) ([]string, []string) {
 	seen := map[string]struct{}{}
 	var paths, problems []string
 	for _, line := range strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == '\r' }) {
@@ -40,7 +46,7 @@ func ParsePathList(s string) ([]string, []string) {
 		if p == "" {
 			continue
 		}
-		if problem := CheckPath(p); problem != "" {
+		if problem := check(p); problem != "" {
 			problems = append(problems, problem)
 			continue
 		}
@@ -51,8 +57,8 @@ func ParsePathList(s string) ([]string, []string) {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
-	if len(paths) > MaxPathListEntries {
-		problems = append(problems, fmt.Sprintf("%d paths listed; at most %d are allowed", len(paths), MaxPathListEntries))
+	if len(paths) > max {
+		problems = append(problems, fmt.Sprintf("%d paths listed; at most %d are allowed", len(paths), max))
 	}
 	return paths, problems
 }
@@ -109,4 +115,62 @@ func FormatPathList(paths []string) string {
 	}
 	sort.Strings(keep)
 	return strings.Join(keep, "\n")
+}
+
+// MaxSweepRoots bounds the sweep-roots setting and a job's sweep_roots.
+const MaxSweepRoots = 16
+
+// IsFilesystemRoot reports whether p names a whole filesystem: "/", a drive
+// root ("C:\", "C:/") or a share root ("\\server\share").
+func IsFilesystemRoot(p string) bool {
+	t := strings.TrimRight(p, `/\`)
+	switch {
+	case t == "":
+		return true
+	case len(t) == 2 && isASCIILetter(t[0]) && t[1] == ':':
+		return true
+	case strings.HasPrefix(p, `\\`):
+		parts := strings.FieldsFunc(t, func(r rune) bool { return r == '\\' || r == '/' })
+		return len(parts) <= 2
+	}
+	return false
+}
+
+// IsUnderHome reports whether p is in (or is) a home directory on any of the
+// platforms the agent collects: /home, /Users, /root, /var/root, and a
+// drive's \Users.
+func IsUnderHome(p string) bool {
+	q := strings.ReplaceAll(p, `\`, "/")
+	if len(q) >= 2 && isASCIILetter(q[0]) && q[1] == ':' {
+		q = q[2:]
+	}
+	q = strings.ToLower(q)
+	for _, h := range []string{"/home", "/users", "/root", "/var/root"} {
+		if q == h || strings.HasPrefix(q, h+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckSweepRoot is CheckPath plus the rule a sweep root keeps: not a whole
+// filesystem.
+func CheckSweepRoot(p string) string {
+	if problem := CheckPath(p); problem != "" {
+		return problem
+	}
+	if IsFilesystemRoot(p) {
+		return fmt.Sprintf("%q is a whole filesystem: a sweep of it would spend the file budget on the first directories it meets; name the directory the application keeps its keys in", p)
+	}
+	return ""
+}
+
+// ParsePathFor reads a path-list setting under its field's rules: the sweep
+// roots at most MaxSweepRoots and never a whole filesystem, every other
+// path list as ParsePathList.
+func ParsePathFor(f Field, s string) ([]string, []string) {
+	if f.Key == KeyHostCryptoSweepRoots {
+		return ParsePathListWith(s, MaxSweepRoots, CheckSweepRoot)
+	}
+	return ParsePathList(s)
 }

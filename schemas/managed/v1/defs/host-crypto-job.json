@@ -4,23 +4,71 @@
   "title": "Host crypto job parameters",
   "description": "The parameters of a device-agent job of type host_crypto (capability host_crypto_v1; docs/host-crypto.md). mode local collects the host the agent runs on; mode remote reaches another host over SSH with the job's sealed credentials (username and password or private_key, with passphrase), addressed and pinned exactly as a remote host_inventory job is. options is closed: an option the agent does not know is refused, never ignored. A bound above its maximum is lowered to it by the agent.",
   "type": "object",
-  "required": ["mode"],
+  "required": [
+    "mode"
+  ],
   "additionalProperties": true,
   "properties": {
-    "mode": { "enum": ["local", "remote"] },
-    "transport": { "const": "ssh" },
-    "ip_address": { "type": "string", "minLength": 1 },
-    "hostname": { "type": "string", "minLength": 1 },
-    "ssh_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-    "ssh_host_key_fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}=?$" },
-    "insecure_skip_verify": { "type": "boolean" },
-    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
-    "options": { "$ref": "#/$defs/options" }
+    "mode": {
+      "enum": [
+        "local",
+        "remote"
+      ]
+    },
+    "transport": {
+      "const": "ssh"
+    },
+    "ip_address": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hostname": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ssh_port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "ssh_host_key_fingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9+/]{43}=?$"
+    },
+    "insecure_skip_verify": {
+      "type": "boolean"
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "options": {
+      "$ref": "#/$defs/options"
+    }
   },
   "allOf": [
     {
-      "if": { "properties": { "mode": { "const": "remote" } } },
-      "then": { "anyOf": [ { "required": ["ip_address"] }, { "required": ["hostname"] } ] }
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "remote"
+          }
+        }
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": [
+              "ip_address"
+            ]
+          },
+          {
+            "required": [
+              "hostname"
+            ]
+          }
+        ]
+      }
     }
   ],
   "$defs": {
@@ -29,22 +77,75 @@
       "minLength": 1,
       "maxLength": 1024,
       "pattern": "^(/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\x00-\\x1f\\x7f]*$",
-      "not": { "pattern": "(^|[\\\\/])\\.\\.([\\\\/]|$)" },
+      "not": {
+        "pattern": "(^|[\\\\/])\\.\\.([\\\\/]|$)"
+      },
       "description": "An absolute path: /... on Linux and macOS, C:\\... or \\\\server\\share on Windows. No control characters and no \"..\" segment (shared/agentconfig CheckPath)."
     },
     "options": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "home_directories": { "type": "boolean", "description": "Per-user material: SSH keys, GnuPG homes, NSS databases, keychains. Default false." },
-        "default_keystore_passwords": { "type": "boolean", "description": "Try the well-known keystore passwords; only whether one worked is recorded. Default false." },
-        "exclude_paths": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/path" } },
-        "sweep_roots": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/path" } },
-        "max_files": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Default 200000." },
-        "max_file_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864, "description": "Default 10485760." },
-        "max_records_per_section": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "Default 2000." },
-        "max_duration_seconds": { "type": "integer", "minimum": 60, "maximum": 3600, "description": "Default 900." }
+        "home_directories": {
+          "type": "boolean",
+          "description": "Per-user material: SSH keys, GnuPG homes, NSS databases, keychains. Default false."
+        },
+        "default_keystore_passwords": {
+          "type": "boolean",
+          "description": "Try the well-known keystore passwords; only whether one worked is recorded. Default false."
+        },
+        "exclude_paths": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "sweep_roots": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/sweep_root"
+          }
+        },
+        "max_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Default 200000."
+        },
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864,
+          "description": "Default 10485760."
+        },
+        "max_records_per_section": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "Default 2000."
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 3600,
+          "description": "Default 900."
+        }
       }
+    },
+    "sweep_root": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/path"
+        },
+        {
+          "not": {
+            "pattern": "^(/+|[A-Za-z]:[\\\\/]*|\\\\\\\\[^\\\\/]+[\\\\/]+[^\\\\/]+[\\\\/]*)$"
+          }
+        }
+      ],
+      "description": "A path, and not a whole filesystem (\"/\", a drive root, a share root): a sweep of one would spend the file budget on the first directories it meets. A root in a home directory is swept only with home_directories."
     }
   }
 }

@@ -1,0 +1,39 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "report-29001",
+    "uid": "19e47520-230e-4aec-81da-a3d141e4981b",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "ownerReferences": [
+     {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "name": "report",
+      "uid": "e9b612e6-2b50-43e9-8a8b-30a1a4acb67a",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {},
+   "status": {}
+  }
+ ]
+}

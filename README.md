@@ -13,8 +13,8 @@ they do not score or judge.
 ## Quick start
 
 Standalone mode is in
-[`v6.1.0-rc.1`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0-rc.1)
-and later (not in v6.0.0, which GitHub labels "Latest" until v6.1.0 ships).
+[`v6.1.0`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0)
+and later (not in v6.0.0 or earlier).
 Download the archive for your system ("[Which file do I need](#which-file-do-i-need)"),
 verify it ([`docs/verify-release.md`](docs/verify-release.md)), unpack it, then:
 
@@ -57,6 +57,9 @@ own platform: see "[Installing](#installing)" below.
   separately.
 - `internal/`, `shared/`: the code they are built from, maintained here.
 - `scripts/`: the installers, the build script and the release tooling.
+- `deploy/kubernetes/`: the manifest that runs both agents in a cluster.
+- `schemas/`: the managed protocol, the standalone output and the release
+  metadata, as JSON Schema.
 - Nightly and tagged builds, installers and compatibility metadata, published
   as this repository's releases. Every artefact carries a Sigstore signature.
 
@@ -104,6 +107,12 @@ carries the installer for its system.
 |---|---|---|---|
 | Sensor | `install-sensor.sh` ([guide](docs/sensor/LINUX_SETUP.md)) | `install-sensor-macos.sh` ([guide](docs/sensor/MACOS_SETUP.md)) | `install-sensor.ps1` ([guide](docs/sensor/WINDOWS_SETUP.md)) |
 | Device agent | `install-device-agent.sh` ([guide](docs/device-agent/LINUX_SETUP.md)) | `install-device-agent-macos.sh` ([guide](docs/device-agent/MACOS_SETUP.md)) | `install-device-agent.ps1` ([guide](docs/device-agent/WINDOWS.md)) |
+
+In a Kubernetes cluster both agents run from container images and one
+manifest ([`deploy/kubernetes/`](deploy/kubernetes/)): the device agent
+inventories what the cluster declares about its cryptography with a read-only
+role and no access to Secrets, and the sensor scans what the cluster runs.
+Guide: [`docs/device-agent/KUBERNETES.md`](docs/device-agent/KUBERNETES.md).
 
 To upgrade, run the new release's installer with no key: it keeps the agent's
 identity. A registration key works once; a new key registers the host as a new
@@ -163,8 +172,10 @@ tooling: see [`docs/verify-release.md`](docs/verify-release.md).
 
 Every pull request runs `.github/workflows/pr.yml` on GitHub-hosted runners
 with a read-only token and no secrets: build, vet and test with CGO on
-linux/amd64, CGO-free cross-builds for Linux, macOS and Windows, gofmt,
-golangci-lint, govulncheck, and `scripts/check-workflows.mjs`, which fails if
+linux/amd64, CGO-free cross-builds for Linux, macOS and Windows, the static
+executables of the container images, the agents run in a kind cluster
+(`scripts/test-kubernetes.sh`), gofmt, golangci-lint, govulncheck, and
+`scripts/check-workflows.mjs`, which fails if
 any workflow asks for a runner GitHub does not host, uses an action that is not
 pinned to a commit SHA, asks for write permissions on a pull request, or (in
 the release workflows) holds a write permission outside the publishing job and

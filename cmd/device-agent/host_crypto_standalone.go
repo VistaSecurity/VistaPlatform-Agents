@@ -127,12 +127,14 @@ func runHostCrypto(args []string, env standaloneEnv) int {
 		name  string
 		paths []string
 		max   int
-	}{{"--exclude", f.exclude, devices.HostCryptoMaxExcludePaths}, {"--root", f.roots, devices.HostCryptoMaxSweepRoots}} {
+		check func(string) string
+	}{{"--exclude", f.exclude, devices.HostCryptoMaxExcludePaths, agentconfig.CheckPath},
+		{"--root", f.roots, devices.HostCryptoMaxSweepRoots, agentconfig.CheckSweepRoot}} {
 		if len(list.paths) > list.max {
 			return usageError(env, "host-crypto", "%s is given %d times; at most %d are allowed", list.name, len(list.paths), list.max)
 		}
 		for _, p := range list.paths {
-			if problem := agentconfig.CheckPath(p); problem != "" {
+			if problem := list.check(p); problem != "" {
 				return usageError(env, "host-crypto", "%s: %s", list.name, problem)
 			}
 		}
@@ -220,7 +222,11 @@ func runHostCrypto(args []string, env standaloneEnv) int {
 		dial, err := env.dialHostCrypto(sshCfg)
 		sshCfg.Password, sshCfg.PrivateKeyPEM, sshCfg.Passphrase = "", "", ""
 		if err != nil {
-			return fail(sshCfg.Host, "connect", "could not connect: "+err.Error())
+			msg := "could not connect: " + err.Error()
+			if hint := devices.HostKeyHint(err); hint != "" {
+				msg += " (" + strings.Replace(hint, "pin the host's key", "pin the host's key with --ssh-host-key", 1) + ")"
+			}
+			return fail(sshCfg.Host, "connect", msg)
 		}
 		if dial.close != nil {
 			defer dial.close()
@@ -260,15 +266,19 @@ func runHostCrypto(args []string, env standaloneEnv) int {
 		return 1
 	}
 	partial := collectErr != nil || len(report.Limits) > 0
+	var incomplete []string
 	for _, s := range hostCryptoSortedSections(report) {
 		switch report.Sections[s] {
 		case hostcrypto.SectionFailed:
 			partial = true
 			w.Warn("section %s failed", s)
+			incomplete = append(incomplete, s+" (failed)")
 		case hostcrypto.SectionPartial:
 			w.Warn("section %s is partial", s)
+			incomplete = append(incomplete, s)
 		}
 	}
+	w.NoteReport(len(report.Errors), incomplete)
 	for _, l := range report.Limits {
 		w.Warn("%s: bound %s: %s", l.Section, l.Limit, l.Detail)
 	}

@@ -178,11 +178,34 @@ run can pin it.
 | `report` | The machine's inventory, by section: `host`, `platform`, `hardware`, `interfaces`, `listeners` (listening TCP ports and their processes), `bound_udp_sockets`, `packages`, `cert_stores` (certificates in the system stores), and `sections`, which says which sections completed. |
 | `observations` | The same inventory as the observation records the managed agent would report. |
 
+### `kubernetes_inventory` (`device-agent kubernetes-inventory`)
+
+One record: the whole collection, in the field names of the managed protocol's
+record
+([`schemas/managed/v1/defs/kubernetes-inventory.json`](../schemas/managed/v1/defs/kubernetes-inventory.json);
+described in [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md)).
+
+| Field | Meaning |
+|---|---|
+| `cluster` | The cluster's id (the UID of its `kube-system` namespace), version, distribution, CA bundle, API endpoints, pod and Service ranges. |
+| `sections` | For each class, `ok`, `failed` or `unsupported`, with a reason. An empty list means "none" only under `ok`. |
+| `nodes`, `namespaces`, `workloads`, `pods`, `services` | What runs, and where: every pod names its workload, every Service says what backs it. |
+| `ingresses`, `gateways`, `routes` | Hosts, listeners, whether TLS is configured and which Secret is named. |
+| `cert_manager_certificates`, `cert_manager_issuers`, `cert_manager_requests`, `certificate_signing_requests` | What issues certificates and whether it is healthy. |
+| `mesh`, `istio_peer_authentications`, `istio_destination_rules`, `linkerd_servers`, `linkerd_authorization_policies` | Service-mesh mTLS policy as written, and the mode in force. |
+| `api_server`, `kubelets` | The TLS handshakes with the API server and each kubelet. |
+| `admission_webhooks`, `api_services` | The CA bundle each webhook and aggregated API is verified with. |
+| `tls_secrets` | Only with `--read-tls-secrets`: the certificates in each TLS Secret. |
+| `certificates` | Every distinct certificate once, keyed by `fingerprint_sha256`; the other records name certificates by that fingerprint. |
+
+It has no CSV rows. It never carries a private key, the content of a Secret
+other than certificates, environment variables, commands or annotations.
+
 ### `host_crypto` (`device-agent host-crypto`)
 
 | Field | Meaning |
 |---|---|
-| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
+| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `coverage` (the directories seen completely, and the files in them that were not read, with why), `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
 
 An empty list means "none found" only when its section says `ok`.
 
@@ -193,7 +216,7 @@ Something that did not work. The run goes on where it can.
 | Field | Meaning |
 |---|---|
 | `target` | What failed: an address, a device, a file, or empty for the run as a whole. |
-| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`, `connect`, `host_crypto`. |
+| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`, `kubernetes_inventory`, `connect`, `host_crypto`. |
 | `reason` | Why, in words. Secrets are scrubbed from it. |
 
 ### `summary`
@@ -208,6 +231,8 @@ Always last.
 | `warnings` | The warnings, as text, when there are any: packets dropped, an interrupted run, a collector section that did not complete, the SSH host key accepted without a pin. |
 | `partial` | `true` when some part failed; the exit status is then 2. |
 | `scope` | How much was looked at, in words: "3 addresses in 1 target, depth standard, pace polite", or the packet count of a capture. |
+| `step_errors` | `host-crypto` only: how many step errors the report holds (its `errors`); `errors` above counts error records. |
+| `partial_sections` | `host-crypto` only: the report's sections that did not complete (`partial`, or `failed` marked so). |
 | `duration_seconds`, `finished_at` | How long the run took and when it ended. |
 
 ## The CSV

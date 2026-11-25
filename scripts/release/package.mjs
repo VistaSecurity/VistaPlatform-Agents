@@ -4,6 +4,12 @@
 //
 //   node scripts/release/package.mjs --builds DIR --tag TAG --source-sha SHA \
 //        --source-time RFC3339 --out ASSETS --state STATE [--require-notices]
+//        [--repo OWNER/REPO] [--image-repository REGISTRY/PATH]
+//
+// --image-repository (ghcr.io/owner) is where a tagged release pushes its
+// images. It names each image inside its archive, so that containerd, kind
+// and docker call it by the reference a manifest uses; it does not change the
+// image's digest.
 //
 // DIR holds one directory per build leg, build-<kind>-<os>-<arch>/, with the
 // executable scripts/build.sh produced. For every target in release/agents.json
@@ -15,9 +21,15 @@
 //                                                 NOTICE, THIRD_PARTY_LICENSES
 //   <binary>.cdx.json                             CycloneDX SBOM of the binary
 //   install-*.sh, install-*.ps1                   the installers
+//   <image>_<version>_linux.oci.tar               the agent's container image,
+//                                                 every platform in one OCI
+//                                                 archive (image.mjs), from the
+//                                                 container build legs
+//   <image>_<version>_linux_<arch>.image.cdx.json CycloneDX SBOM of the
+//                                                 executable in that image
 //   THIRD_PARTY_LICENSES
-// and into STATE: artifacts.sha256 (binaries, packages and installers: the
-// provenance subjects) and package.json (what the metadata step needs).
+// and into STATE: artifacts.sha256 (binaries, packages, installers and images:
+// the provenance subjects) and package.json (what the metadata step needs).
 // Exit 1 with every problem listed; nothing is written to ASSETS unless every
 // check passed.
 
@@ -29,10 +41,11 @@ import { fileURLToPath } from 'node:url';
 
 import { tarGz, zip } from './archive.mjs';
 import { checkBuildInfo, checkVersionStamp, modulesOf, readBuildInfo } from './buildinfo.mjs';
+import { buildImage } from './image.mjs';
 import { buildNotices, goModuleDir } from './licenses.mjs';
 import {
-  REPO_ROOT, NOTICES_ASSET, binaryAsset, exeSuffix, expectedArtifacts, loadSurface, packageAsset, packageRoot,
-  parseTag, sbomAsset, sha256File, stableJson,
+  REPO_ROOT, NOTICES_ASSET, binaryAsset, containerBuildDir, exeSuffix, expectedArtifacts, expectedImages, imageAsset,
+  imageSbomAsset, loadSurface, packageAsset, packageRoot, parseTag, repoUrl, sbomAsset, sha256File, stableJson,
 } from './lib.mjs';
 import { cyclonedx } from './sbom.mjs';
 
@@ -80,6 +93,31 @@ export function packageRelease(opts, deps = {}) {
       }
       binaries.push({ agent, target: t, exe, file, info });
     }
+  }
+  // The container builds: one static executable per platform of each image.
+  const containerBuilds = [];
+  for (const agent of surface.agents.filter((a) => a.image)) {
+    for (const arch of agent.image.arches) {
+      const where = `${agent.kind} image linux/${arch}`;
+      const exe = path.join(opts.builds, containerBuildDir(agent, arch), agent.executable);
+      if (!existsSync(exe)) { errors.push(`${where}: no binary at ${exe}`); continue; }
+      let info;
+      try { info = read(exe); } catch (e) { errors.push(`${where}: cannot read build information: ${e.message}`); continue; }
+      for (const e of checkBuildInfo(info, {
+        modulePath, command: agent.command, goos: 'linux', goarch: arch, cgo: false, tags: agent.image.build_tags,
+        version: tag.version, sourceSha: opts.sourceSha, goVersion,
+      })) errors.push(`${where}: ${e}`);
+      for (const e of checkVersionStamp(readFileSync(exe), tag.version)) errors.push(`${where}: ${e}`);
+      for (const m of modulesOf(info)) {
+        const key = `${m.path}@${m.version}`;
+        if (!modules.has(key)) modules.set(key, { ...m, usedBy: new Set() });
+        modules.get(key).usedBy.add(where);
+      }
+      containerBuilds.push({ agent, arch, exe, info });
+    }
+  }
+  if (opts.imageRepository !== undefined && !/^[a-z0-9.-]+(:\d+)?(\/[a-z0-9._-]+)+$/.test(opts.imageRepository)) {
+    errors.push(`--image-repository must be a lower-case registry path such as ghcr.io/owner, got ${JSON.stringify(opts.imageRepository)}`);
   }
   const licenseFile = existsSync(path.join(root, 'LICENSE'));
   const noticePath = path.join(root, 'NOTICE');
@@ -135,7 +173,50 @@ export function packageRelease(opts, deps = {}) {
     for (const file of Object.values(agent.installers || {})) write(file, readFileSync(path.join(root, 'scripts', file)), 0o755);
   }
 
-  const artifacts = expectedArtifacts(surface, tag.version);
+  // One image per agent, every platform in it. The image holds the container
+  // build of the executable and the same notices as a package.
+  const images = [];
+  for (const agent of surface.agents.filter((a) => a.image)) {
+    const builds = containerBuilds.filter((b) => b.agent === agent);
+    const file = imageAsset(agent, tag.version);
+    const built = buildImage({
+      name: agent.image.name,
+      version: tag.version,
+      executable: agent.executable,
+      args: agent.image.args,
+      env: agent.image.env,
+      platforms: builds.map((b) => ({ os: 'linux', arch: b.arch, binary: readFileSync(b.exe) })),
+      docs: extras.map((e) => ({ name: e.name, data: e.data })),
+      labels: {
+        'org.opencontainers.image.title': agent.image.name,
+        'org.opencontainers.image.version': tag.version,
+        'org.opencontainers.image.revision': opts.sourceSha,
+        'org.opencontainers.image.created': opts.sourceTime,
+        'org.opencontainers.image.licenses': surface.license,
+        ...(opts.repo ? { 'org.opencontainers.image.source': repoUrl(opts.repo) } : {}),
+      },
+      sourceTime: opts.sourceTime,
+      refName: opts.imageRepository ? `${opts.imageRepository}/${agent.image.name}:${tag.version}` : undefined,
+    });
+    write(file, built.archive, 0o644);
+    const platforms = builds.map((b) => {
+      const exeSha = sha256File(b.exe);
+      const sbomFile = imageSbomAsset(agent, tag.version, b.arch);
+      write(sbomFile, stableJson(cyclonedx({
+        info: b.info,
+        binary: { file: `${file}:/usr/local/bin/${agent.executable} (linux/${b.arch})`, sha256: exeSha, kind: agent.kind, version: tag.version, requires: [] },
+        licenses: notices.licenses,
+        sourceTime: opts.sourceTime,
+      })), 0o644);
+      return { os: 'linux', arch: b.arch, digest: built.platforms.find((x) => x.arch === b.arch).digest, executable_sha256: exeSha, sbom_file: sbomFile };
+    });
+    images.push({
+      kind: agent.kind, name: agent.image.name, file, digest: built.digest, platforms,
+      repository: opts.imageRepository ? `${opts.imageRepository}/${agent.image.name}` : null,
+    });
+  }
+
+  const artifacts = [...expectedArtifacts(surface, tag.version), ...expectedImages(surface, tag.version)];
   const missing = artifacts.filter((a) => !existsSync(path.join(opts.out, a.file)));
   if (missing.length) return { errors: missing.map((a) => `not produced: ${a.file}`) };
   const sums = artifacts.map((a) => a.file).sort().map((f) => `${sha256File(path.join(opts.out, f))}  ${f}\n`).join('');
@@ -144,6 +225,7 @@ export function packageRelease(opts, deps = {}) {
     tag: tag.tag, channel: tag.channel, version: tag.version, nightly_id: tag.nightlyId,
     source_sha: opts.sourceSha, source_time: opts.sourceTime, go_version: goVersion, module_path: modulePath,
     license_file: licenseFile, notice_file: notice !== null,
+    images,
   }));
   return { errors: [], artifacts, modules: modules.size };
 }
@@ -154,6 +236,7 @@ function main() {
       builds: { type: 'string' }, tag: { type: 'string' }, 'source-sha': { type: 'string' },
       'source-time': { type: 'string' }, out: { type: 'string' }, state: { type: 'string' },
       root: { type: 'string' }, 'require-notices': { type: 'boolean', default: false },
+      repo: { type: 'string' }, 'image-repository': { type: 'string' },
     },
   });
   for (const k of ['builds', 'tag', 'source-sha', 'source-time', 'out', 'state']) {
@@ -164,6 +247,7 @@ function main() {
     res = packageRelease({
       builds: values.builds, tag: values.tag, sourceSha: values['source-sha'], sourceTime: values['source-time'],
       out: values.out, state: values.state, root: values.root, requireNotices: values['require-notices'],
+      repo: values.repo, imageRepository: values['image-repository'],
     });
   } catch (e) {
     console.error(`package.mjs: ${e.message}`);

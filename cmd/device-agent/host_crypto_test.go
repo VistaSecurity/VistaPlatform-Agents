@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -777,4 +778,56 @@ func TestHostCryptoLoop_WaitsForTheFirstDesiredState(t *testing.T) {
 	waitFor(t, func() bool { return calls.Load() == 1 }, "the collection once the desired state is in")
 	close(stop)
 	<-done
+}
+
+// The sweep-roots setting reaches the scheduled collection, under its own
+// rules: a whole filesystem is refused and the previous list kept.
+func TestHostCryptoSweepRootsSettingReachesTheSchedule(t *testing.T) {
+	applier := desiredstate.New()
+	s := newHostCryptoSupervisor(time.Hour, hostCryptoSettings{}, func(_ *interval, stop <-chan struct{}) { <-stop })
+	registerHostCryptoSettings(applier, s)
+	applier.Apply("rev-1", agentconfig.Values{agentconfig.KeyHostCryptoSweepRoots: agentconfig.Text("/srv/app\n/opt/certs")})
+	if _, failures, _ := applier.Report(); len(failures) != 0 {
+		t.Fatalf("failures %v", failures)
+	}
+	if got := strings.Join(s.options().SweepRoots, ","); got != "/opt/certs,/srv/app" {
+		t.Fatalf("sweep roots %q", got)
+	}
+	applier.Apply("rev-2", agentconfig.Values{agentconfig.KeyHostCryptoSweepRoots: agentconfig.Text("/")})
+	if _, failures, _ := applier.Report(); failures[string(agentconfig.KeyHostCryptoSweepRoots)] == "" {
+		t.Fatal("a whole-filesystem sweep root was applied")
+	}
+	if got := strings.Join(s.options().SweepRoots, ","); got != "/opt/certs,/srv/app" {
+		t.Fatalf("a refused value changed the list: %q", got)
+	}
+	if v := localValues(&config.Config{HostCryptoSweepRoots: []string{"/b", "/a"}}); v[agentconfig.KeyHostCryptoSweepRoots].S == nil ||
+		*v[agentconfig.KeyHostCryptoSweepRoots].S != "/a\n/b" {
+		t.Fatalf("local value %v", v)
+	}
+}
+
+// The standalone summary counts the report's step errors and names its
+// incomplete sections, so "0 error(s)" never stands beside a report with
+// errors in it.
+func TestStandaloneHostCrypto_SummaryCountsTheReportsErrors(t *testing.T) {
+	r := hcjReport(hostinventory.ModeLocal, map[string]string{hostcrypto.SectionPlatform: hostcrypto.SectionOK,
+		hostcrypto.SectionPrivateKeys: hostcrypto.SectionPartial, hostcrypto.SectionProcesses: hostcrypto.SectionPartial})
+	for i := 0; i < 3; i++ {
+		r.Errors = append(r.Errors, hostcrypto.StepError{Step: hostcrypto.SectionPrivateKeys, Message: fmt.Sprintf("e%d", i)})
+	}
+	res := runCmd(t, standaloneEnv{collectHostCrypto: hcjFakeCollector(r, nil)}, "host-crypto")
+	if !strings.Contains(res.stderr, "3 step error(s) in the report") || !strings.Contains(res.stderr, "incomplete sections: private_keys, processes") {
+		t.Fatalf("summary:\n%s", res.stderr)
+	}
+	var sum struct {
+		Data struct {
+			StepErrors      int      `json:"step_errors"`
+			PartialSections []string `json:"partial_sections"`
+		} `json:"data"`
+	}
+	lines := strings.Split(strings.TrimSpace(res.stdout), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &sum); err != nil || sum.Data.StepErrors != 3 || len(sum.Data.PartialSections) != 2 {
+		t.Fatalf("summary record: %+v %v", sum, err)
+	}
+	outputschema.ValidateJSONL(t, []byte(res.stdout))
 }

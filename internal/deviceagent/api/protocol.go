@@ -19,6 +19,7 @@ import (
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostcrypto"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
@@ -39,8 +40,18 @@ const hostInventoryNegotiationWait = 2 * time.Minute
 // the one list: the registration offer, the gate and the job poll's header
 // all read it, so a capability cannot be offered in one and missing from
 // another.
+//
+// host_crypto_v1 is always offered. kubernetes_inventory_v1 is offered only
+// by an agent that runs in a cluster (a mounted service account), because only
+// such an agent can run the job: a platform that sees the capability may queue
+// it, and one that does not never hands this agent a job it would have to
+// refuse.
 func AgentCapabilities() []string {
-	return append(di.AgentCapabilities(), hostcrypto.CapabilityHostCrypto)
+	caps := append(di.AgentCapabilities(), hostcrypto.CapabilityHostCrypto)
+	if kubeinventory.InClusterAvailable() {
+		caps = append(caps, kubeinventory.Capability)
+	}
+	return caps
 }
 
 // Gate is the client's view of the platform's protocol.

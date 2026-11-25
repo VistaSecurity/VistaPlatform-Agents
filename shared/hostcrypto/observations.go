@@ -455,7 +455,20 @@ func jobBound(rep *Report, maxBytes int) (*Report, []byte, error) {
 		}
 	}
 
-	// 2. Cut the largest list, by encoded size, to the longest prefix with
+	// 2. Coverage goes before any item does. A covered directory tells the
+	// platform that an item it held there and this report lacks is gone, so
+	// a report whose items were cut must claim no coverage at all, or the
+	// cut items would be retired. Dropping it is also cheap honesty on its
+	// own: no coverage means "not known", never "gone".
+	if len(cp.Coverage.Directories) > 0 || len(cp.Coverage.SkippedFiles) > 0 {
+		cp.Coverage = Coverage{}
+		cp.limit(covLimitSection, LimitMaxResultBytes, "coverage left out to fit the result bound; no directory is claimed complete")
+		if b, err = json.Marshal(cp); err == nil && len(b) <= maxBytes {
+			return cp, b, nil
+		}
+	}
+
+	// 3. Cut the largest list, by encoded size, to the longest prefix with
 	// which the report fits (a binary search on its length), then the next
 	// largest, until it fits. Every section cut is partial with the limit,
 	// and so are the sweep and home directories when what was cut came
@@ -518,7 +531,7 @@ func jobBound(rep *Report, maxBytes int) (*Report, []byte, error) {
 		}
 	}
 
-	// 3. The step errors, which a pathological host can make long: keep the
+	// 4. The step errors, which a pathological host can make long: keep the
 	// first ones and say how many were left out.
 	if n := len(cp.Errors); n > 1 {
 		for keep := n / 2; keep >= 0; keep /= 2 {

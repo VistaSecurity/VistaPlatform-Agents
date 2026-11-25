@@ -1,0 +1,72 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "edge",
+    "uid": "e285bbf3-08bf-4b35-8b4c-d7134dd73e4e",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop"
+   },
+   "spec": {
+    "gatewayClassName": "istio",
+    "listeners": [
+     {
+      "name": "https",
+      "hostname": "api.example.test",
+      "port": 443,
+      "protocol": "HTTPS",
+      "tls": {
+       "mode": "Terminate",
+       "certificateRefs": [
+        {
+         "group": "",
+         "kind": "Secret",
+         "name": "web-tls"
+        }
+       ]
+      }
+     },
+     {
+      "name": "http",
+      "port": 80,
+      "protocol": "HTTP"
+     }
+    ]
+   },
+   "status": {
+    "addresses": [
+     {
+      "type": "IPAddress",
+      "value": "192.0.2.81"
+     }
+    ],
+    "listeners": [
+     {
+      "name": "https",
+      "attachedRoutes": 1
+     },
+     {
+      "name": "http",
+      "attachedRoutes": 0
+     }
+    ]
+   }
+  }
+ ]
+}

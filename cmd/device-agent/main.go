@@ -112,7 +112,7 @@ func main() {
 		// installs that cannot answer a prompt. The agent pins the platform CA
 		// only if it hashes to this value — which, unlike the interactive
 		// prompt, is not trust-on-first-use.
-		caFingerprint = flag.String("ca-fingerprint", "",
+		caFingerprint = flag.String("ca-fingerprint", os.Getenv("PLATFORM_CA_FINGERPRINT"),
 			"Expected SHA-256 fingerprint of the platform's CA certificate. Required for unattended "+
 				"enrollment against a platform whose certificate is signed by a private CA this host does not trust.")
 		// hostInventoryOnce is a SUPPORT flag: collect this host once, print
@@ -489,6 +489,7 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	// and only the platform's desired state turns one on.
 	agent.hostCrypto = newHostCryptoSupervisor(cfg.HostCryptoInterval, hostCryptoSettings{
 		excludePaths: append([]string(nil), cfg.HostCryptoExcludePaths...),
+		sweepRoots:   append([]string(nil), cfg.HostCryptoSweepRoots...),
 	}, agent.collectHostCrypto)
 	registerHostCryptoSettings(agent.applier, agent.hostCrypto)
 	// A host crypto job can run for up to an hour; the agent's lifetime
@@ -496,6 +497,7 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	jobExecutor.SetShutdown(agent.context())
 	// The operator's excluded paths bind every collection, a job's included.
 	jobExecutor.SetHostCryptoExcludes(func() []string { return agent.hostCrypto.options().ExcludePaths })
+	jobExecutor.SetHostCryptoSweepRoots(func() []string { return agent.hostCrypto.options().SweepRoots })
 	// A job's opt-ins never exceed what the platform confirmed for this agent.
 	jobExecutor.SetHostCryptoConsents(func() (bool, bool) {
 		o := agent.hostCrypto.options()
@@ -532,13 +534,26 @@ func isFlagSet(name string) bool {
 func findDefaultConfigFile() string {
 	for _, path := range []string{
 		"agent-config.yaml",
-		filepath.Join(getDefaultDataPath(), "agent-config.yaml"),
+		filepath.Join(configuredDataPath(), "agent-config.yaml"),
 	} {
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}
 	}
 	return ""
+}
+
+// configuredDataPath is where this agent keeps its enrollment: DATA_PATH when
+// the environment sets it (a container, where the data directory is a mounted
+// volume), else the platform default. Without this an agent started with
+// DATA_PATH enrolled, saved its identity there, and on its next start looked
+// for it in the default directory, found nothing, and tried to enroll again
+// with a spent key.
+func configuredDataPath() string {
+	if p := strings.TrimSpace(os.Getenv("DATA_PATH")); p != "" {
+		return p
+	}
+	return getDefaultDataPath()
 }
 
 // shouldRunInteractive decides whether to open the configuration dialogue.
@@ -597,8 +612,7 @@ func (a *DeviceAgent) Start() error {
 	// Started through the supervisor so the control plane can turn it on and
 	// off later; the file value is only the STARTING position.
 	if a.config.HostInventoryEnabled {
-		log.Printf("🖥️  Local host inventory enabled, every %v", a.config.HostInventoryInterval)
-		if err := a.hostInventory.setEnabled(true); err != nil {
+		if err := a.hostInventory.setEnabledBecause(true, "by the configuration file"); err != nil {
 			log.Printf("⚠️  Could not start host inventory: %v", err)
 		}
 	}
@@ -891,12 +905,12 @@ func (a *DeviceAgent) Stop() {
 	cancel()
 
 	if a.hostInventory != nil {
-		if err := a.hostInventory.setEnabled(false); err != nil {
+		if err := a.hostInventory.shutdown(); err != nil {
 			log.Printf("⚠️  Could not stop host inventory: %v", err)
 		}
 	}
 	if a.hostCrypto != nil {
-		if err := a.hostCrypto.setEnabled(false); err != nil {
+		if err := a.hostCrypto.shutdown(); err != nil {
 			log.Printf("⚠️  Could not stop host crypto inventory: %v", err)
 		}
 	}
@@ -1131,6 +1145,10 @@ func (a *DeviceAgent) executeJobPoll() {
 		return
 	}
 
+	if ok, succeeded := a.jobExecutor.Outcome(job.ID); ok && !succeeded {
+		log.Printf("❌ Job %s failed; its result was reported", job.ID)
+		return
+	}
 	log.Printf("✅ Job %s completed successfully", job.ID)
 }
 

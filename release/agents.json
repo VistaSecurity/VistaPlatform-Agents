@@ -1,5 +1,5 @@
 {
-  "_comment": "The release surface of this repository, read by scripts/release/*.mjs and checked against the workflows by scripts/release-metadata.test.mjs. A target, an installer, a capability or a protocol version is added here and in the build matrix of .github/workflows/build-agents.yml in the same reviewed change; the test fails when the two disagree, and when a capability named here is not a string constant in the Go source.",
+  "_comment": "The release surface of this repository, read by scripts/release/*.mjs and checked against the workflows by scripts/release-metadata.test.mjs. A target, an installer, an image, a capability or a protocol version is added here and in the build matrix of .github/workflows/build-agents.yml in the same reviewed change; the test fails when the two disagree, and when a capability named here is not a string constant in the Go source.",
   "agents": [
     {
       "kind": "sensor",
@@ -16,7 +16,14 @@
         { "os": "windows", "arch": "386", "runner": "ubuntu-24.04", "cgo": false, "requires": ["npcap"] }
       ],
       "installers": { "linux": "install-sensor.sh", "darwin": "install-sensor-macos.sh", "windows": "install-sensor.ps1" },
-      "capabilities": ["identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"]
+      "capabilities": ["identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"],
+      "image": {
+        "name": "vista-sensor",
+        "build_tags": "container,nocapture",
+        "arches": ["amd64", "arm64"],
+        "args": ["-interactive=false"],
+        "env": { "DATA_PATH": "/var/lib/vista", "CAPTURE_DISABLED": "true" }
+      }
     },
     {
       "kind": "device-agent",
@@ -32,7 +39,14 @@
         { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] }
       ],
       "installers": { "linux": "install-device-agent.sh", "darwin": "install-device-agent-macos.sh", "windows": "install-device-agent.ps1" },
-      "capabilities": ["device_discovery"]
+      "capabilities": ["device_discovery", "kubernetes_inventory_v1"],
+      "image": {
+        "name": "vista-device-agent",
+        "build_tags": "container",
+        "arches": ["amd64", "arm64"],
+        "args": ["-interactive=false"],
+        "env": { "DATA_PATH": "/var/lib/vista", "HOST_INVENTORY_ENABLED": "false" }
+      }
     }
   ],
   "smoke": [

@@ -131,7 +131,7 @@ func Validate(rt Runtime, vals Values) error {
 				problems = append(problems, fmt.Sprintf("%s: expected a list of paths, got %q", k, v.String()))
 				continue
 			}
-			_, bad := ParsePathList(*v.S)
+			_, bad := ParsePathFor(f, *v.S)
 			for _, b := range bad {
 				problems = append(problems, fmt.Sprintf("%s: %s", k, b))
 			}
@@ -192,7 +192,7 @@ func Normalize(rt Runtime, vals Values) (Values, []string) {
 			if v.S == nil {
 				continue
 			}
-			paths, bad := ParsePathList(*v.S)
+			paths, bad := ParsePathFor(f, *v.S)
 			if len(bad) > 0 {
 				continue
 			}

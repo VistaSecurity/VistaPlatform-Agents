@@ -21,11 +21,14 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/devices"
 	"github.com/vistasecurity/vistaplatform-agents/internal/testsupport/outputschema"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentoutput"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation/devicetest"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory/kubetest"
 )
 
 // The standalone commands, driven through runStandalone (the same entry main
@@ -580,5 +583,99 @@ func TestRunStandalone_LeavesManagedInvocationsAlone(t *testing.T) {
 		if _, ok := runStandalone(args, standaloneEnv{}); ok {
 			t.Errorf("runStandalone(%q) claimed a managed invocation", args)
 		}
+	}
+}
+
+func kubeEnv(t *testing.T, getenv func(string) string) (standaloneEnv, *kubetest.Cluster) {
+	t.Helper()
+	cl := kubetest.New(t)
+	cl.Load(filepath.Join("..", "..", "shared", "kubeinventory", "testdata", "full"))
+	return standaloneEnv{getenv: getenv, kubeClient: func() (*kubeinventory.Client, error) {
+		host, port := cl.HostPort()
+		return kubeinventory.NewClient(host, port, cl.Dir)
+	}}, cl
+}
+
+func TestStandaloneKubernetesInventory(t *testing.T) {
+	env, cl := kubeEnv(t, nil)
+	res := runCmd(t, env, "kubernetes-inventory", "--no-kubelet-probe", "--label-key", "team")
+	if res.code != 0 {
+		t.Fatalf("exit = %d; stderr:\n%s", res.code, res.stderr)
+	}
+	kinds := outputschema.ValidateJSONL(t, []byte(res.stdout))
+	if countKind(kinds, agentoutput.KindKubernetesInventory) != 1 {
+		t.Fatalf("kinds = %v", kinds)
+	}
+	for _, want := range []string{`"distribution":"kubeadm"`, `"workload":{"kind":"Deployment","name":"web"}`, `"team":"payments"`, `"tls_secrets":"not_enabled"`} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("the record lacks %s", want)
+		}
+	}
+	if strings.Contains(res.stdout, "secret-value") || strings.Contains(res.stdout, "PRIVATE KEY") {
+		t.Error("something the collector must leave in the cluster is in the output")
+	}
+	for _, r := range cl.Requests() {
+		if strings.Contains(r.Path, "secrets") {
+			t.Errorf("the Secrets API was called without the flag: %s", r.Path)
+		}
+	}
+
+	// The flag, or the variable the manifest sets, turns on TLS Secrets.
+	for _, tc := range []struct {
+		env  func(string) string
+		args []string
+	}{
+		{nil, []string{"kubernetes-inventory", "--no-kubelet-probe", "--read-tls-secrets", "--format", "json"}},
+		{func(k string) string {
+			if k == devices.EnvReadTLSSecrets {
+				return "true"
+			}
+			return ""
+		}, []string{"kubernetes-inventory", "--no-kubelet-probe", "--format", "json"}},
+	} {
+		env, _ := kubeEnv(t, tc.env)
+		res := runCmd(t, env, tc.args...)
+		if res.code != 0 || !strings.Contains(res.stdout, `"tls_secrets": "enabled"`) || !strings.Contains(res.stdout, `"web-tls"`) || strings.Contains(res.stdout, "PRIVATE KEY") {
+			t.Errorf("%v: exit %d\n%s", tc.args, res.code, res.stderr)
+		}
+	}
+
+	// A class the role does not grant: the run is partial and says which.
+	env, cl = kubeEnv(t, nil)
+	cl.SetStatus("/apis/apps/v1/deployments", 403)
+	res = runCmd(t, env, "kubernetes-inventory", "--no-kubelet-probe")
+	if res.code != 2 || !strings.Contains(res.stderr, "workloads (not_permitted)") {
+		t.Errorf("exit = %d; stderr:\n%s", res.code, res.stderr)
+	}
+
+	// Without the cluster's id nothing but the error is written.
+	env, cl = kubeEnv(t, nil)
+	cl.SetStatus("/api/v1/namespaces", 403)
+	res = runCmd(t, env, "kubernetes-inventory")
+	kinds = outputschema.ValidateJSONL(t, []byte(res.stdout))
+	if res.code != 1 || countKind(kinds, agentoutput.KindError) != 1 || countKind(kinds, agentoutput.KindKubernetesInventory) != 0 {
+		t.Errorf("exit = %d, kinds = %v", res.code, kinds)
+	}
+}
+
+// Outside a pod there is no cluster to describe, and no flag that names one.
+func TestStandaloneKubernetesInventory_OnlyInACluster(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	out := filepath.Join(t.TempDir(), "out.jsonl")
+	res := runCmd(t, standaloneEnv{}, "kubernetes-inventory", "--out", out)
+	if res.code != 1 || !strings.Contains(res.stderr, "not running in a Kubernetes cluster") {
+		t.Errorf("exit = %d; stderr:\n%s", res.code, res.stderr)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("an output file was written")
+	}
+	for _, flag := range []string{"--kubeconfig", "--server", "--token", "--context"} {
+		if res := runCmd(t, standaloneEnv{}, "kubernetes-inventory", flag, "x"); res.code != 1 || !strings.Contains(res.stderr, "flag provided but not defined") {
+			t.Errorf("%s: exit %d\n%s", flag, res.code, res.stderr)
+		}
+	}
+	res = runCmd(t, standaloneEnv{}, "kubernetes-inventory", "--help")
+	if res.code != 0 || !strings.Contains(res.stdout, "takes no kubeconfig") || strings.Contains(res.stdout, "-kubeconfig") {
+		t.Errorf("help: exit %d\n%s", res.code, res.stdout)
 	}
 }

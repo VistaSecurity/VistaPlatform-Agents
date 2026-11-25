@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/kubernetes-inventory-parameters.json",
+  "title": "Kubernetes inventory job parameters",
+  "description": "The parameters of a kubernetes_inventory job. All optional. The job always describes the cluster the agent runs in, through the agent's own service account: it carries no credentials, and parameters that would name another cluster or supply a credential make the job invalid. No parameter turns on reading TLS Secrets.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "classes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "cluster",
+          "nodes",
+          "namespaces",
+          "workloads",
+          "pods",
+          "services",
+          "ingresses",
+          "gateways",
+          "cert_manager",
+          "certificate_signing_requests",
+          "tls_secrets",
+          "mesh_istio",
+          "mesh_linkerd",
+          "mesh_cilium",
+          "api_server_certificate",
+          "kubelet_certificates",
+          "control_plane_node_certificates",
+          "admission_webhooks",
+          "api_services"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Collect only these classes; the others answer unsupported, not_requested. Default: all. `cluster` is always collected."
+    },
+    "probe_kubelets": {
+      "type": "boolean",
+      "description": "Handshake with each node's kubelet port. Default true."
+    },
+    "include_certificate_pem": {
+      "type": "boolean",
+      "description": "Send certificate_pem with each certificate. Default true."
+    },
+    "extra_label_keys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 317,
+        "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?/)?[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$"
+      },
+      "uniqueItems": true,
+      "maxItems": 32,
+      "description": "Label keys to report in addition to the built-in allowlist."
+    },
+    "max_items_per_class": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "max_part_bytes": {
+      "type": "integer",
+      "minimum": 1048576,
+      "maximum": 25165824
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600
+    }
+  },
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "kubeconfig"
+        ]
+      },
+      {
+        "required": [
+          "token"
+        ]
+      },
+      {
+        "required": [
+          "bearer_token"
+        ]
+      },
+      {
+        "required": [
+          "api_server"
+        ]
+      },
+      {
+        "required": [
+          "server"
+        ]
+      },
+      {
+        "required": [
+          "ca_data"
+        ]
+      },
+      {
+        "required": [
+          "client_certificate"
+        ]
+      },
+      {
+        "required": [
+          "client_key"
+        ]
+      },
+      {
+        "required": [
+          "username"
+        ]
+      },
+      {
+        "required": [
+          "password"
+        ]
+      }
+    ]
+  }
+}

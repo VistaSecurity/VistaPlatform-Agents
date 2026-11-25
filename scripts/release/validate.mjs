@@ -48,6 +48,27 @@ function artifactRules(doc, slug, tag, errors) {
       provenance.push(a.provenance);
     });
   });
+  (doc.images || []).forEach((img, i) => {
+    const at = `/images/${i}`;
+    if (files.has(img.file)) errors.push(`${at}: file ${img.file} appears twice`);
+    files.add(img.file);
+    if (img.url !== assetUrl(slug, tag, img.file)) errors.push(`${at}/url: ${img.url} is not ${assetUrl(slug, tag, img.file)}`);
+    if (img.signature && img.signature.bundle_url !== assetUrl(slug, tag, bundleAsset(img.file))) errors.push(`${at}/signature/bundle_url: must be the bundle asset of ${img.file}`);
+    if (img.file !== `${img.name}_${img.version}_linux.oci.tar`) errors.push(`${at}/file: ${img.file} is not ${img.name}_${img.version}_linux.oci.tar`);
+    const seen = new Set();
+    (img.platforms || []).forEach((p, j) => {
+      if (seen.has(p.arch)) errors.push(`${at}/platforms/${j}: ${p.arch} appears twice`);
+      seen.add(p.arch);
+      const sbom = `${img.name}_${img.version}_linux_${p.arch}.image.cdx.json`;
+      if (p.sbom && p.sbom.url !== assetUrl(slug, tag, sbom)) errors.push(`${at}/platforms/${j}/sbom/url: must be the asset ${sbom}`);
+    });
+    if (img.registry) {
+      if (img.registry.reference !== `${img.registry.repository}@${img.digest}`) errors.push(`${at}/registry/reference: must be ${img.registry.repository}@${img.digest}`);
+      if (img.registry.tag !== img.version) errors.push(`${at}/registry/tag: must be the release version ${img.version}`);
+      if (!img.registry.repository.endsWith(`/${img.name}`)) errors.push(`${at}/registry/repository: must end with /${img.name}`);
+    }
+    provenance.push(img.provenance);
+  });
   return provenance;
 }
 
@@ -72,6 +93,7 @@ export function semanticRelease(doc) {
   if (doc.signing && doc.signing.identity !== identity) errors.push(`/signing/identity: must be ${identity}`);
   if (r.workflow && !r.workflow.run_url.startsWith(`https://github.com/${slug}/actions/runs/`)) errors.push('/release/workflow/run_url: not a run of the source repository');
   for (const a of doc.agents || []) if (a.version !== r.version) errors.push(`/agents/${a.kind}/version: ${a.version} is not the release version ${r.version}`);
+  for (const img of doc.images || []) if (img.version !== r.version) errors.push(`/images/${img.name}/version: ${img.version} is not the release version ${r.version}`);
   const prov = artifactRules(doc, slug, r.tag, errors);
   const p = doc.provenance || {};
   if (p.status === 'attested') {
