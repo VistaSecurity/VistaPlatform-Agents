@@ -827,8 +827,14 @@ func sortUsage(u []Usage) {
 			return a.Kind < b.Kind
 		case a.ConfigPath != b.ConfigPath:
 			return a.ConfigPath < b.ConfigPath
+		case a.RootConfigPath != b.RootConfigPath:
+			return a.RootConfigPath < b.RootConfigPath
 		case a.Directive != b.Directive:
 			return a.Directive < b.Directive
+		case a.Product != b.Product:
+			return a.Product < b.Product
+		case a.Context != b.Context:
+			return a.Context < b.Context
 		case a.Process != b.Process:
 			return a.Process < b.Process
 		case a.Address != b.Address:

@@ -189,9 +189,18 @@ type Usage struct {
 	// Kind is "config" (a configuration file names it), "process" (a running
 	// process holds it open) or "listener" (that process listens on a port).
 	Kind string `json:"kind"`
-	// ConfigPath and Directive are set for kind "config".
-	ConfigPath string `json:"config_path,omitempty"`
-	Directive  string `json:"directive,omitempty"`
+	// ConfigPath and Directive are set for kind "config". ConfigPath is the
+	// file that holds the directive: an included file when the directive is
+	// in one, with RootConfigPath then naming the configuration that
+	// includes it (empty when ConfigPath is itself the root).
+	ConfigPath     string `json:"config_path,omitempty"`
+	RootConfigPath string `json:"root_config_path,omitempty"`
+	Directive      string `json:"directive,omitempty"`
+	// Product and Context are the configuration's (CryptoConfig.Product and
+	// .Context): what reads it, and the server block, Match block or section
+	// whose directive names the item.
+	Product string `json:"product,omitempty"`
+	Context string `json:"context,omitempty"`
 	// Process is the executable's name, set for "process" and "listener".
 	Process string `json:"process,omitempty"`
 	// Address, Port and Transport are set for kind "listener".
@@ -245,6 +254,7 @@ const (
 	KeyFormatOpenSSH       = "openssh"        // PEM "OPENSSH PRIVATE KEY"
 	KeyFormatPuTTY         = "putty"          // PuTTY-User-Key-File-2/3
 	KeyFormatPGP           = "pgp"            // an OpenPGP secret key
+	KeyFormatSSH1          = "ssh1"           // "SSH PRIVATE KEY FILE FORMAT 1.1", legacy SSH-1 (RSA only)
 	KeyFormatPlatformStore = "platform_store" // CNG, CAPI, keychain
 )
 
@@ -333,6 +343,10 @@ type Keystore struct {
 	// counted. Nil when it could not.
 	EntryCount *int            `json:"entry_count,omitempty"`
 	Entries    []KeystoreEntry `json:"entries,omitempty"`
+	// Unknown explains, in a few words, why the contents are empty or
+	// incomplete: "remote: entries are not read", "a platform store; its
+	// contents are read from the store".
+	Unknown string `json:"unknown,omitempty"`
 }
 
 // KeystoreEntry is one entry of a keystore.
@@ -385,16 +399,22 @@ type SSHPublicKey struct {
 	// Restricted is true when the entry carries options that limit it (from=,
 	// command=, restrict). Authorized keys only.
 	Restricted *bool `json:"restricted,omitempty"`
-	// CertificateAuthority is true for a cert-authority entry.
-	CertificateAuthority bool `json:"certificate_authority,omitempty"`
+	// CertificateAuthority is whether an authorized_keys entry carries the
+	// cert-authority option. Nil when it could not be known (a remote
+	// collection: options do not cross) and for keys that are not
+	// authorized_keys entries.
+	CertificateAuthority *bool `json:"certificate_authority,omitempty"`
 }
 
 // KnownHostsFile is summarised, never listed: its entries are other people's
 // hosts.
 type KnownHostsFile struct {
 	Location Location `json:"location"`
-	Entries  int      `json:"entries"`
-	Hashed   bool     `json:"hashed"`
+	// Entries and Hashed are nil when the file could not be read in this
+	// mode (a known_hosts file is not public, so a remote collection records
+	// only that it exists and who can read it).
+	Entries *int  `json:"entries,omitempty"`
+	Hashed  *bool `json:"hashed,omitempty"`
 }
 
 // CryptoConfig is the cryptographic policy one configuration file sets, for
@@ -455,7 +475,18 @@ type ConfigReference struct {
 	Kind      string `json:"kind"`
 	Directive string `json:"directive"`
 	Path      string `json:"path"`
+	// Status is what the collector found at Path: one of the Ref
+	// constants. Empty when no collector followed it (a parser alone).
+	Status string `json:"status,omitempty"`
 }
+
+// What a collector found at a ConfigReference's path.
+const (
+	RefFound       = "found"        // the file (or directory) exists and was visited
+	RefMissing     = "missing"      // nothing at the path (a glob that matched nothing)
+	RefUnreadable  = "unreadable"   // it exists and could not be read; Errors says why
+	RefNotFollowed = "not_followed" // the path holds a variable, a % token or ~, and names no one file
+)
 
 // CryptoLibrary is one cryptographic library or provider present on the host.
 type CryptoLibrary struct {

@@ -376,7 +376,7 @@ func ParseSSHPublicKeyLine(line []byte) (SSHPublicKey, bool) {
 		return SSHPublicKey{}, false
 	}
 	out := keySSHPublicKey(d)
-	restricted := false
+	restricted, ca := false, false
 	for _, o := range options {
 		name := strings.ToLower(o)
 		if i := strings.IndexByte(name, '='); i >= 0 {
@@ -384,13 +384,13 @@ func ParseSSHPublicKeyLine(line []byte) (SSHPublicKey, bool) {
 		}
 		name = strings.TrimSpace(name)
 		if name == "cert-authority" {
-			out.CertificateAuthority = true
+			ca = true
 		}
 		if keyRestrictingOptions[name] {
 			restricted = true
 		}
 	}
-	out.Restricted = &restricted
+	out.Restricted, out.CertificateAuthority = &restricted, &ca
 	return out, true
 }
 
