@@ -29,6 +29,10 @@ device-agent host-crypto --out crypto.jsonl
 device-agent host-crypto --remote admin@db1.example.test --identity-file ~/.ssh/id_ed25519 --out db1.jsonl
 ```
 
+A standalone run's output file is readable by its owner alone on every
+system (on Windows: you, SYSTEM and Administrators, nothing inherited); see
+[`standalone.md`](standalone.md) for `--allow-inherited-permissions`.
+
 ## What it never collects
 
 Posture, never key material. A report says a key's algorithm, size, format,

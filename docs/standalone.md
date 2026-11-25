@@ -241,6 +241,13 @@ fullest result; on macOS give the terminal Full Disk Access too.
   swept for key material by content (by name and size with `--remote`); no
   sweep without one.
 - `--max-duration` bounds the run (default 15 minutes, 1 minute to 1 hour).
+- The output file is readable by you alone on every system, because it says
+  where every key on the host is and who can read it: 0600 on Linux and
+  macOS, and on Windows an access list granting only you, SYSTEM and
+  Administrators, with nothing inherited from the folder, set when the file
+  is created. On a volume that cannot hold that access list (FAT, some
+  network shares) the run stops before writing unless you pass
+  `--allow-inherited-permissions`, which keeps the folder's permissions.
 
 A section the account could not read completely is a warning in the summary;
 a section that failed, or a bound that cut one short, makes the result partial
