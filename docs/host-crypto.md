@@ -144,11 +144,20 @@ of a private key file crosses the connection:
 - Only **certificates** and **SSH public key lines** are read from files.
   A certificate crosses as a certificate parser on the host re-encodes it,
   never as the file's bytes; a file holding a private key is refused whole.
-- A private key or keystore is described from its markers (its first bytes
-  and its PEM labels) and its permissions, and, where the host has the tool,
-  from a command that prints only a public key (`ssh-keygen -y`,
-  `openssl pkey -pubout`, `keytool -list`). Otherwise the field is left empty
-  and `unknown` says why.
+- A private key is described from its markers (its first bytes and its PEM
+  labels) and its permissions, and then by a command on the host that prints
+  only its public key: `ssh-keygen -y` (on Linux, macOS and, where OpenSSH is
+  installed, Windows), else `openssl pkey -pubout` (Linux and macOS). Neither
+  can prompt: an encrypted key makes them fail at once, and the key is then
+  reported as encrypted. Where neither tool can read it, or the account may
+  not, the fields stay empty and `unknown` says why.
+- A keystore on Linux or macOS is listed by `openssl pkcs12 -nokeys -info`
+  (PKCS#12) or `keytool -list` (JKS, JCEKS), which print no key. Only the
+  empty password is tried, unless you opt in to default passwords: those are
+  sent on the command's standard input, never in its arguments, so they never
+  appear in the host's process list. Windows keystores are not listed
+  remotely (Windows has no built-in tool that lists one without being able to
+  print its keys), nor are keytabs.
 - Configuration is filtered **on the host** to the named directives before
   anything is sent.
 - The sweep goes by file name and size only.
