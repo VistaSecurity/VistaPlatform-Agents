@@ -31,8 +31,13 @@ import (
 func passFollowConfiguration(ctx context.Context, c *collection) {
 	st := c.locSt()
 	defer c.locFlush()
+	// When time is already up, pass 1's records still go to the registry
+	// (the deferred flush), and pass 2's sections say they were cut.
+	if c.stoppedBefore(ctx, locPassSections(c)...) {
+		return
+	}
 	for i := 0; i < len(st.configs); i++ {
-		if c.timeUp(ctx, SectionConfigs) {
+		if c.locTimeUp(ctx, SectionConfigs) {
 			return
 		}
 		c.locReadConfig(ctx, st.configs[i])
@@ -96,7 +101,7 @@ func (c *collection) locReadConfig(ctx context.Context, cf locConfigFile) {
 	loc := c.locLocation(cf.Info, cf.Path, cf.FoundBy, cf.UsedBy)
 	for i := range cfgs {
 		for j := range cfgs[i].References {
-			if c.timeUp(ctx, SectionConfigs) {
+			if c.locTimeUp(ctx, SectionConfigs) {
 				break
 			}
 			cfgs[i].References[j].Status = c.locFollowRef(ctx, cf, cfgs[i], cfgs[i].References[j], inc)
@@ -117,7 +122,7 @@ func (c *collection) locConfigErr(p string, err error) {
 	case errors.Is(err, ErrFileTooLarge):
 		c.limit(SectionConfigs, "max_file_bytes", fmt.Sprintf("did not read configuration over %d bytes", c.opts.maxFileBytes()))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(context.Background(), SectionConfigs)
+		c.locStoppedAll()
 	default:
 		st.count(SectionConfigs, false)
 		c.partial(SectionConfigs, fmt.Errorf("%s: %w", p, err))
@@ -138,7 +143,7 @@ func (c *collection) locResolver(ctx context.Context, cf locConfigFile, inc *loc
 		var used int64
 		failed := false
 		for _, p := range paths {
-			if c.timeUp(ctx, SectionConfigs) || c.files(SectionConfigs, 1) == 0 {
+			if c.locTimeUp(ctx, SectionConfigs) || c.files(SectionConfigs, 1) == 0 {
 				break
 			}
 			text, err := c.readConfig(ctx, p, cf.Product)

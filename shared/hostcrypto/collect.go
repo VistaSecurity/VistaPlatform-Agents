@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -156,13 +158,40 @@ func (r *Report) limit(section, limit, detail string) {
 	r.Limits = append(r.Limits, LimitHit{Section: section, Limit: limit, Detail: boundMessage(detail)})
 }
 
-// recordError appends a bounded StepError.
+// recordError appends a bounded StepError. A step error identical to one
+// already recorded (same step, same message) is not repeated: the first one
+// says how many times it happened, as "<message> (N times)".
 func (r *Report) recordError(step string, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
-	r.Errors = append(r.Errors, StepError{Step: step, Message: boundMessage(msg)})
+	msg = boundMessage(msg)
+	for i := range r.Errors {
+		e := &r.Errors[i]
+		if e.Step != step {
+			continue
+		}
+		base, n := repeatedMessage(e.Message)
+		if base == msg {
+			e.Message = fmt.Sprintf("%s (%d times)", base, n+1)
+			return
+		}
+	}
+	r.Errors = append(r.Errors, StepError{Step: step, Message: msg})
+}
+
+var repeatedRE = regexp.MustCompile(`^(.*) \(([0-9]+) times\)$`)
+
+// repeatedMessage splits a recorded message into its text and how many times
+// it was recorded.
+func repeatedMessage(m string) (string, int) {
+	if g := repeatedRE.FindStringSubmatch(m); g != nil {
+		if n, err := strconv.Atoi(g[2]); err == nil {
+			return g[1], n
+		}
+	}
+	return m, 1
 }
 
 // boundMessage keeps a message to one line of at most 300 bytes. Every error
@@ -274,6 +303,12 @@ type collection struct {
 	// followed. Created by the first of them; nil until then.
 	loc *locState
 
+	// runCtx is the run's context, and callerBound the caller's deadline
+	// when it is earlier than MaxDuration (0 otherwise): what a limit names.
+	runCtx         context.Context
+	callerBound    time.Duration
+	callerDeadline bool
+
 	mu sync.Mutex
 }
 
@@ -283,13 +318,64 @@ func (c *collection) mark(section, outcome string) {
 	c.report.mark(section, outcome)
 }
 
+// fail marks a section failed, unless the run's time is up or its context
+// ended: a step cut short by the deadline or by the caller is partial, with
+// the limit, never failed.
 func (c *collection) fail(section string, err error) {
+	if c.stopping(err) {
+		c.limit(section, "max_duration", c.stopDetail())
+		c.note(section, err)
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.report.fail(section, err)
 }
 
+// stopping reports whether err, or the run's own state, says the run is
+// being stopped by its deadline or its caller.
+func (c *collection) stopping(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if c.runCtx != nil && c.runCtx.Err() != nil {
+		return true
+	}
+	return c.budget != nil && c.budget.expired()
+}
+
+// stopDetail says which bound stopped the run: the caller's cancellation, the
+// caller's deadline, or Options.MaxDuration, with the bound that applied.
+func (c *collection) stopDetail() string {
+	if c.runCtx != nil && errors.Is(c.runCtx.Err(), context.Canceled) {
+		return "the caller cancelled the collection"
+	}
+	if c.callerDeadline {
+		if c.callerBound <= 0 {
+			return "stopped at the caller's deadline (already past when the collection started)"
+		}
+		return fmt.Sprintf("stopped at the caller's deadline (%s after the start)", c.callerBound.Round(time.Millisecond))
+	}
+	return fmt.Sprintf("stopped after %s", c.opts.maxDuration())
+}
+
+// stoppedBefore is what a pass asks first: when time is already up, every
+// section the pass would have read gets the limit (partial: not read, not
+// failed) and the pass does not run.
+func (c *collection) stoppedBefore(ctx context.Context, sections ...string) bool {
+	if ctx.Err() == nil && (c.budget == nil || !c.budget.expired()) {
+		return false
+	}
+	for _, s := range sections {
+		c.limit(s, "max_duration", c.stopDetail())
+	}
+	return true
+}
+
 func (c *collection) partial(section string, err error) {
+	if c.stopping(err) {
+		c.limit(section, "max_duration", c.stopDetail())
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.report.partial(section, err)
@@ -329,7 +415,7 @@ func (c *collection) files(section string, n int) int {
 // recording the max_duration limit for section (once) when it has.
 func (c *collection) timeUp(ctx context.Context, section string) bool {
 	if ctx.Err() != nil || c.budget.expired() {
-		c.limit(section, "max_duration", fmt.Sprintf("stopped after %s", c.opts.maxDuration()))
+		c.limit(section, "max_duration", c.stopDetail())
 		return true
 	}
 	return false
@@ -424,6 +510,15 @@ func Collect(ctx context.Context, t Target, opts Options) (*Report, error) {
 		return nil, fmt.Errorf("hostcrypto: unknown mode %q", opts.Mode)
 	}
 
+	// The bound that applies is the earlier of the caller's deadline and
+	// MaxDuration; a limit says which.
+	var callerBound time.Duration
+	callerDeadline := false
+	if d, ok := ctx.Deadline(); ok {
+		if left := time.Until(d); left < opts.maxDuration() {
+			callerBound, callerDeadline = max(left, 0), true
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, opts.maxDuration())
 	defer cancel()
 
@@ -455,6 +550,13 @@ func Collect(ctx context.Context, t Target, opts Options) (*Report, error) {
 	reg := newRegistry(opts.maxRecordsPerSection())
 	if t.Local() {
 		reg.resolve = localRealPath
+	} else if rep.Platform == hostinventory.PlatformDarwin {
+		// macOS's top-level links, which a local collection resolves
+		// through the filesystem: a path seen as /var/... (a listing, a
+		// command line) and as /private/var/... (lsof) is one file.
+		for _, d := range []string{"/var", "/tmp", "/etc"} {
+			reg.addLink(d, "/private"+d)
+		}
 	}
 	c := &collection{
 		target:   t,
@@ -462,6 +564,10 @@ func Collect(ctx context.Context, t Target, opts Options) (*Report, error) {
 		report:   rep,
 		registry: reg,
 		budget:   newBudget(opts.maxFiles(), deadline, nil),
+
+		runCtx:         ctx,
+		callerBound:    callerBound,
+		callerDeadline: callerDeadline,
 	}
 	for _, p := range passes {
 		p(ctx, c)
@@ -532,12 +638,39 @@ func (r *registry) realPath(p string) string {
 	if r.resolve != nil {
 		return r.resolve(p)
 	}
+	if strings.HasPrefix(p, "/") {
+		// A Unix path as a command line or a listing spelled it: "//" and
+		// "." collapse, and a link on any component (macOS /var is
+		// /private/var) is followed, as the host would.
+		return r.realUnix(path.Clean(p), 0)
+	}
 	for i := 0; i < 8; i++ {
 		t, ok := r.links[p]
 		if !ok {
 			break
 		}
 		p = t
+	}
+	return p
+}
+
+// realUnix follows the known links of a clean Unix path, component by
+// component, at most eight hops in all.
+func (r *registry) realUnix(p string, hops int) string {
+	if hops >= 8 || len(r.links) == 0 {
+		return p
+	}
+	for i := 1; i <= len(p); i++ {
+		if i < len(p) && p[i] != '/' {
+			continue
+		}
+		prefix := p[:i]
+		t, ok := r.links[prefix]
+		if !ok {
+			continue
+		}
+		t = path.Clean(joinLinkTarget(prefix, t))
+		return r.realUnix(path.Clean(t+p[i:]), hops+1)
 	}
 	return p
 }
@@ -668,6 +801,10 @@ func (r *registry) addCertificate(c Certificate) bool {
 	key := r.key(c.Location) + "\x00" + c.FingerprintSHA256
 	if have, ok := r.certs.get(key); ok {
 		mergeInto(&have.Location, c.Location)
+		// An anchor in any sighting is an anchor, whichever came first.
+		if c.TrustAnchor && !have.TrustAnchor {
+			*have = ksTrustAnchor(*have)
+		}
 		return true
 	}
 	if !r.admit(SectionCertificates, len(r.certs.items)) {

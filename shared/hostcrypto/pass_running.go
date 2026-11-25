@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -52,7 +53,8 @@ const platMaxProcesses = 512
 var platCryptoExts = []string{"pem", "crt", "cer", "der", "key", "p12", "pfx", "jks", "jceks", "bcfks", "bks", "keystore", "truststore", "kdb", "p8", "pk8", "keytab", "kt", "ppk"}
 
 // platSecretOption matches an option name that introduces a secret. An
-// argument "<name>=<value>" with such a name is skipped whole.
+// argument "<name>=<value>" with such a name is skipped whole, and so is the
+// argument after a "--<name>" with such a name (host side, both filters).
 var platSecretOption = regexp.MustCompile(`(?i)(pass|secret|pin|token|cred|pwd)`)
 
 // platArgsAwk filters lines "M <path>", "F <path>" and "A <argument>" on the
@@ -67,11 +69,14 @@ function libok(p,  b) { b = p; sub(/.*\//, "", b); b = tolower(b)
 function clean(p) { return p !~ /[ \t"<>|]/ && index(p, "\047") == 0 }
 {
   t = substr($0, 1, 2); v = substr($0, 3)
+  if (t != "A ") skip = 0
   if (t == "M ") { if (substr(v, 1, 1) == "/" && libok(v)) print "M " v; next }
   if (t == "F ") { if (substr(v, 1, 1) == "/" && extok(v)) print "F " v; next }
   if (t == "A ") {
+    if (skip) { skip = 0; next }
     e = index(v, "=")
     if (e > 0 && tolower(substr(v, 1, e - 1)) ~ /(pass|secret|pin|token|cred|pwd)/) next
+    if (e == 0 && substr(v, 1, 1) == "-" && tolower(v) ~ /(pass|secret|pin|token|cred|pwd)/) { skip = 1; next }
     n = split(v, part, /[=,;]/)
     for (i = 1; i <= n; i++) if (substr(part[i], 1, 1) == "/" && extok(part[i]) && clean(part[i])) print "A " part[i]
   }
@@ -300,10 +305,16 @@ func platCryptoPath(p string, windows bool) bool {
 
 // platArgPath is Go's own check of a path the host filter printed from a
 // command line: one absolute crypto path, no '=' (so no "option=value"
-// passed through whole), no quote or blank, and no secret option name
-// anywhere in it.
+// passed through whole), no quote, and no blank (a Windows path, which came
+// from one quoted token, may hold spaces).
+//
+// The secrecy rule is the host filter's and is about option NAMES: an
+// argument "name=value", or the argument after "--name", is skipped when the
+// name says secret, and a value that is not an absolute crypto path never
+// crosses. A PATH may contain those words ("/var/run/secrets/tls/tls.crt",
+// "/srv/shipping/proc.crt") and is kept: a path is not a secret.
 func platArgPath(p string, windows bool) (string, bool) {
-	if !platCryptoPath(p, windows) || strings.ContainsAny(p, "=,;\"'<>| \t") || platSecretOption.MatchString(p) {
+	if !platCryptoPath(p, windows) || strings.ContainsAny(p, "=,;\"'<>|\t") || strings.Contains(p, " ") && !windows {
 		return "", false
 	}
 	return p, true
@@ -365,7 +376,7 @@ try { foreach ($rnC in @(Get-NetUDPEndpoint -ErrorAction Stop)) { [void]$rnL.Add
 $rnLibRx = [regex]::new('^(?:(?:libcrypto|libssl)(?:-[0-9_]+)?(?:-x64|-arm64)?\.dll|libeay32\.dll|ssleay32\.dll|libgnutls(?:-[0-9]+)?\.dll|nss3\.dll|softokn3\.dll|libgcrypt(?:-[0-9]+)?\.dll|wolfssl\.dll|mbedcrypto\.dll|mbedtls\.dll|fips\.dll|schannel\.dll)\z', 'IgnoreCase, CultureInvariant')
 $rnTokRx = [regex]::new('(?:[^\s"]+|"[^"]*")+')
 $rnSecRx = [regex]::new('(pass|secret|pin|token|cred|pwd)', 'IgnoreCase, CultureInvariant')
-$rnPathRx = [regex]::new('^(?:[A-Za-z]:\\|\\\\)[^"<>|*?\r\n\t ]*\.(?:` + strings.Join(platCryptoExts, "|") + `)\z', 'IgnoreCase, CultureInvariant')
+$rnPathRx = [regex]::new('^(?:[A-Za-z]:\\|\\\\)[^"<>|*?\r\n\t]*\.(?:` + strings.Join(platCryptoExts, "|") + `)\z', 'IgnoreCase, CultureInvariant')
 $rnCmd = New-Object 'System.Collections.Generic.Dictionary[int,string]'
 try { foreach ($rnW in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) { if ($null -ne $rnW.CommandLine) { $rnCmd[[int]$rnW.ProcessId] = [string]$rnW.CommandLine } } } catch { $rnCmdErr = (plErr $_.Exception) }
 $rnIds = New-Object 'System.Collections.Generic.List[int]'
@@ -385,10 +396,13 @@ foreach ($rnId in $rnIds) {
   } catch { $rnDenied = $true }
   $rnArgs = New-Object 'System.Collections.Generic.List[string]'
   if ($rnCmd.ContainsKey($rnId)) {
+    $rnSkip = $false
     foreach ($rnT in $rnTokRx.Matches($rnCmd[$rnId])) {
       $rnTok = $rnT.Value.Replace([string][char]34, '')
+      if ($rnSkip) { $rnSkip = $false; continue }
       $rnEq = $rnTok.IndexOf([char]61)
       if ($rnEq -gt 0 -and $rnSecRx.IsMatch($rnTok.Substring(0, $rnEq))) { continue }
+      if ($rnEq -lt 0 -and ($rnTok.StartsWith('-', [StringComparison]::Ordinal) -or $rnTok.StartsWith('/', [StringComparison]::Ordinal)) -and $rnTok.Length -lt 64 -and $rnSecRx.IsMatch($rnTok)) { $rnSkip = $true; continue }
       foreach ($rnPart in $rnTok.Split([char[]]@([char]61, [char]44, [char]59))) { if ($rnPathRx.IsMatch($rnPart) -and $rnArgs.Count -lt 256) { [void]$rnArgs.Add($rnPart) } }
     }
   }
@@ -487,6 +501,9 @@ func platParseWindowsRunning(b []byte) (platRunning, error) {
 
 // platRunningPass is pass 3.
 func platRunningPass(ctx context.Context, c *collection) {
+	if c.stoppedBefore(ctx, SectionProcesses) {
+		return
+	}
 	var r platRunning
 	var err error
 	windows := false
@@ -555,6 +572,15 @@ func platApplyRunning(ctx context.Context, c *collection, r platRunning, windows
 	for _, p := range r.procs {
 		if p.name == "" {
 			continue
+		}
+		if !windows {
+			// "/var/x//y.key" and "/var/x/./y.key" name /var/x/y.key.
+			for i := range p.files {
+				p.files[i] = path.Clean(p.files[i])
+			}
+			for i := range p.args {
+				p.args[i] = path.Clean(p.args[i])
+			}
 		}
 		usages := append([]Usage{{Kind: "process", Process: p.name, Product: p.name}}, p.listeners...)
 		for _, f := range append(append([]string(nil), p.files...), p.args...) {

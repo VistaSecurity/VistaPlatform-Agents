@@ -171,6 +171,9 @@ type locState struct {
 	// remoteNotes are the once-per-run explanations of what remote mode does
 	// not read.
 	remoteNotes map[string]bool
+	// noPerms counts, per section, files visited whose permissions could not
+	// be read.
+	noPerms map[string]int
 }
 
 type locCount struct{ ok, bad int }
@@ -226,6 +229,7 @@ func newLocState(root, platform string) *locState {
 		tally:        map[string]*locCount{},
 		unidentified: map[string]int{},
 		remoteNotes:  map[string]bool{},
+		noPerms:      map[string]int{},
 	}
 }
 
@@ -481,7 +485,7 @@ func (c *collection) locList(ctx context.Context, section, root string, depth in
 	case errors.Is(err, ErrNotExist):
 		return nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(ctx, section)
+		c.locTimeUp(ctx, section)
 	default:
 		st.count(section, false)
 		c.partial(section, fmt.Errorf("%s: %w", root, err))
@@ -594,7 +598,7 @@ func (c *collection) locStatErr(section, p string, err error) {
 	switch {
 	case errors.Is(err, ErrNotExist):
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(context.Background(), section)
+		c.locStoppedAll()
 	default:
 		st.count(section, false)
 		c.partial(section, fmt.Errorf("%s: %w", p, err))
@@ -628,6 +632,9 @@ func (c *collection) locFollow(ctx context.Context, p string, fi FileInfo) (File
 
 // passKnownLocations is pass 1.
 func passKnownLocations(ctx context.Context, c *collection) {
+	if c.stoppedBefore(ctx, locPassSections(c)...) {
+		return
+	}
 	st := c.locSt()
 	if st.platform == "windows" && st.win.Drive == "" {
 		st.win = c.locWindowsRoots(ctx)
@@ -659,9 +666,14 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		}
 	}
 	c.locPrefetch(ctx, plain)
-	for _, e := range system {
-		if c.timeUp(ctx, e.section()) {
-			break
+	for i, e := range system {
+		if c.locTimeUp(ctx, e.section()) {
+			// Every row not visited leaves its section incomplete.
+			c.locRowsNotVisited(system[i:], false)
+			if c.opts.HomeDirectories {
+				c.locRowsNotVisited(home, true)
+			}
+			return
 		}
 		c.locRunEntry(ctx, e)
 	}
@@ -669,13 +681,54 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		c.skip(SectionHomeDirectories)
 		return
 	}
-	for _, e := range home {
+	for i, e := range home {
 		e.Home = true
-		if c.timeUp(ctx, SectionHomeDirectories) {
-			break
+		if c.locTimeUp(ctx, SectionHomeDirectories) {
+			c.locRowsNotVisited(home[i:], true)
+			return
 		}
 		c.locRunEntry(ctx, e)
 	}
+}
+
+// locRowsNotVisited records the time limit on the section of every row the
+// pass did not reach (and on home_directories for home rows), so no section
+// whose rows were not all visited can read ok.
+func (c *collection) locRowsNotVisited(rows []locEntry, home bool) {
+	for _, e := range rows {
+		c.limit(e.section(), "max_duration", c.stopDetail())
+	}
+	if home && len(rows) > 0 {
+		c.limit(SectionHomeDirectories, "max_duration", c.stopDetail())
+	}
+}
+
+// locTimeUp is timeUp for passes 1 and 2: when time is up, what was not
+// visited could have been any kind of file (a row of material, a file a
+// configuration names), so every section of the two passes gets the limit,
+// not only the one being read.
+func (c *collection) locTimeUp(ctx context.Context, section string) bool {
+	if !c.timeUp(ctx, section) {
+		return false
+	}
+	c.locStoppedAll()
+	return true
+}
+
+// locStoppedAll records the time limit on every section of passes 1 and 2.
+func (c *collection) locStoppedAll() {
+	for _, s := range locPassSections(c) {
+		c.limit(s, "max_duration", c.stopDetail())
+	}
+}
+
+// locPassSections are the sections passes 1 and 2 report on in this run.
+func locPassSections(c *collection) []string {
+	s := append([]string(nil), locSections...)
+	if c.opts.HomeDirectories {
+		s = append(s, SectionHomeDirectories)
+	}
+	return s
 }
 
 // locSections are the sections passes 1 and 2 report on.
@@ -712,7 +765,7 @@ func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 		return
 	}
 	for _, fi := range files {
-		if c.timeUp(ctx, e.section()) {
+		if c.locTimeUp(ctx, e.section()) {
 			return
 		}
 		if fi.IsDir {
@@ -840,6 +893,9 @@ type locVisit struct {
 	Section string
 	// Info is the file as a listing saw it; nil means Stat it.
 	Info *FileInfo
+	// Charged: the caller has already charged this file to the run's file
+	// budget (the sweep charges what it lists), so the visit does not again.
+	Charged bool
 }
 
 // locResult is how a visit went.
@@ -862,31 +918,30 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 	if c.locExcluded(v.Path) {
 		return locNotFile, FileInfo{}
 	}
-	if c.timeUp(ctx, v.Section) {
+	if c.locTimeUp(ctx, v.Section) {
 		return locStopped, FileInfo{}
 	}
-	var fi FileInfo
-	if v.Info != nil {
-		fi = *v.Info
-	} else {
-		var err error
-		if fi, err = c.locStat(ctx, v.Path); err != nil {
-			return c.locErrResult(v, err), FileInfo{}
-		}
+	fi, err := c.locInfo(ctx, v)
+	if err != nil {
+		return c.locErrResult(v, err), FileInfo{}
 	}
-	fi, err := c.locFollow(ctx, v.Path, fi)
+	fi, err = c.locFollow(ctx, v.Path, fi)
 	if err != nil {
 		return c.locErrResult(v, err), FileInfo{}
 	}
 	if fi.IsDir {
 		return locIsDir, fi
 	}
+	if fi.WorldReadable == nil && fi.Mode == 0 {
+		// Who can read it is not known: the section says so.
+		st.noPerms[v.Section]++
+	}
 	real := c.registry.realPath(v.Path)
 	if prod, ok := st.visited[real]; ok {
 		locTouch(prod, v)
 		return locRead, fi
 	}
-	if c.files(v.Section, 1) == 0 {
+	if !v.Charged && c.files(v.Section, 1) == 0 {
 		return locStopped, fi
 	}
 	prod := &locProduced{}
@@ -895,6 +950,32 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 	res := c.locDispatch(ctx, v, fi, prod)
 	return res, fi
 }
+
+// locInfo is the fullest description of v's path that is known: the batched
+// Stat answer when it carries permissions (a Windows listing does not: its
+// ACL is in the batch, not the listing), else the caller's (a listing's),
+// else a Stat. A visit never uses a record without permissions while one
+// with them is at hand.
+func (c *collection) locInfo(ctx context.Context, v locVisit) (FileInfo, error) {
+	st := c.locSt()
+	if r, ok := st.pre[v.Path]; ok && r.StatErr == nil && locHasPerms(r.Info) {
+		return r.Info, nil
+	}
+	if v.Info != nil && (locHasPerms(*v.Info) || v.Info.IsSymlink || v.Info.IsDir) {
+		return *v.Info, nil
+	}
+	fi, err := c.locStat(ctx, v.Path)
+	if err != nil {
+		if v.Info != nil && !errors.Is(err, ErrNotExist) {
+			return *v.Info, nil
+		}
+		return FileInfo{}, err
+	}
+	return fi, nil
+}
+
+// locHasPerms reports whether fi says who can read the file.
+func locHasPerms(fi FileInfo) bool { return fi.WorldReadable != nil || fi.Mode != 0 }
 
 // locErrResult turns a Target error into a result, recording what must be.
 func (c *collection) locErrResult(v locVisit, err error) locResult {
@@ -907,16 +988,52 @@ func (c *collection) locErrResult(v locVisit, err error) locResult {
 	case errors.Is(err, errNotRegular):
 		return locNotFile
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(context.Background(), v.Section)
+		c.locStoppedAll()
 		return locStopped
 	}
 	c.partial(v.Section, fmt.Errorf("%s: %w", v.Path, err))
 	return locFailed
 }
 
-// locTouch merges a further sighting into a file's records.
+// locKeyLeaves names the certificates of a keystore's private-key entries
+// (by fingerprint, and by alias): a trust store's trusted entries are
+// anchors, a key's own certificate chain is not.
+func locKeyLeaves(ks Keystore) map[string]bool {
+	m := map[string]bool{}
+	for _, e := range ks.Entries {
+		if e.Kind != "private_key" {
+			continue
+		}
+		if e.CertificateFingerprint != "" {
+			m[e.CertificateFingerprint] = true
+		}
+		if e.Alias != "" {
+			m["alias\x00"+e.Alias] = true
+		}
+	}
+	return m
+}
+
+// locTouch merges a further sighting into a file's records. A sighting as a
+// trust store makes the file's certificates anchors whichever sighting came
+// first (a CA directory a table row saw, then SSLCACertificatePath named).
 func locTouch(p *locProduced, v locVisit) {
 	p.each(func(l *Location) { mergeLocation(l, Location{FoundBy: v.FoundBy, UsedBy: v.UsedBy}) })
+	if v.Trust {
+		leaves := map[string]bool{}
+		for _, ks := range p.stores {
+			for k := range locKeyLeaves(ks) {
+				leaves[k] = true
+			}
+		}
+		for i := range p.certs {
+			c := p.certs[i]
+			if leaves[c.FingerprintSHA256] || (c.Location.Container != "" && leaves["alias\x00"+c.Location.Alias]) {
+				continue
+			}
+			p.certs[i] = ksTrustAnchor(c)
+		}
+	}
 	if v.Role != "" {
 		for i := range p.keys {
 			if p.keys[i].Role == "" {
@@ -1275,11 +1392,12 @@ func (c *collection) locAddKeystore(f *locFile, kc KeystoreContents) {
 	}
 	ks.Location = locCopy(f.loc)
 	f.prod.stores = append(f.prod.stores, ks)
+	leaves := locKeyLeaves(ks)
 	for _, cert := range kc.Certificates {
 		l := locCopy(f.loc)
 		l.Container, l.Alias, l.Path = f.v.Path, cert.Location.Alias, ""
 		cert.Location = l
-		if f.v.Trust {
+		if f.v.Trust && !leaves[cert.FingerprintSHA256] && !leaves["alias\x00"+cert.Location.Alias] {
 			cert = ksTrustAnchor(cert)
 		}
 		f.prod.certs = append(f.prod.certs, cert)
@@ -1436,7 +1554,12 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 		for i := range keys {
 			keys[i].Restricted, keys[i].CertificateAuthority = nil, nil
 		}
-		c.locRemoteNote(SectionSSH, "remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known")
+		// Not an error, but not the whole answer: who may log in is known,
+		// with what restrictions is not.
+		if !c.locSt().remoteNotes[SectionSSH+"\x00authorized_keys"] {
+			c.locSt().remoteNotes[SectionSSH+"\x00authorized_keys"] = true
+			c.partial(SectionSSH, errors.New("remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known"))
+		}
 	}
 	a.Keys = keys
 	if malformed > 0 {
@@ -1450,12 +1573,22 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 }
 
 // locKnownHosts summarises a known_hosts file. Its lines begin with host
-// names, so it is not public and is not read remotely.
+// names, so it is not public and is not read remotely: Identify calls it a
+// public-key file (its lines hold key blobs), but what a remote public read
+// returns is the blobs alone, without the host field that says whether an
+// entry is hashed, and without the lines a marker (@revoked,
+// @cert-authority) leads. Neither the count nor the hashing could be stated
+// soundly from that, so remotely both are nil and the section says why.
 func (c *collection) locKnownHosts(ctx context.Context, f *locFile) locResult {
 	k := KnownHostsFile{Location: locCopy(f.loc)}
 	if f.fi.Size == 0 {
 		k.Entries, k.Hashed = ksIntPtr(0), cfgBoolPtr(false)
 		f.prod.known = append(f.prod.known, k)
+		return locRead
+	}
+	if !c.target.Local() {
+		f.prod.known = append(f.prod.known, k)
+		c.partial(SectionSSH, errors.New("remote: known_hosts files are not read (their lines name other hosts); entries and hashing are not known"))
 		return locRead
 	}
 	if !c.locReadable(f) {
@@ -1503,6 +1636,15 @@ func (c *collection) locFlushRecords() {
 		}
 	}
 	st.visited, st.order = map[string]*locProduced{}, nil
+	secs := make([]string, 0, len(st.noPerms))
+	for s := range st.noPerms {
+		secs = append(secs, s)
+	}
+	sort.Strings(secs)
+	for _, s := range secs {
+		c.partial(s, fmt.Errorf("the permissions of %d files could not be read", st.noPerms[s]))
+	}
+	st.noPerms = map[string]int{}
 }
 
 // locFlush hands every record of passes 1 and 2 to the registry and decides
@@ -1528,7 +1670,7 @@ func (c *collection) locFlush() {
 	}
 	for _, s := range sections {
 		t := st.tally[s]
-		if t != nil && t.bad > 0 && t.ok == 0 {
+		if t != nil && t.bad > 0 && t.ok == 0 && !c.stopping(nil) {
 			c.mark(s, SectionFailed)
 			continue
 		}

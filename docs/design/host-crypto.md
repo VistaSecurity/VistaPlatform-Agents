@@ -197,7 +197,9 @@ rights allow, and pass 4 by file name and size only, on the roots asked for.
 | Private key: encrypted or not | from the file | from its PEM label and, for OpenSSH and PKCS#8, the same commands |
 | Keystore contents | parsed in memory | from `keytool -list` and `openssl pkcs12 -nokeys` where installed; otherwise type and permissions only |
 | Windows stores, macOS keychain | the platform's own commands | the same commands over SSH |
-| Sweep | by content | by name and size |
+| Sweep | by content | by name and size; the section reads `partial` with the limit `remote_by_name` |
+| known_hosts | entries counted, hashing told | recorded with its location; entries and hashing nil, `ssh` partial (its lines name other hosts and are not read) |
+| authorized_keys | keys with their options | keys only; `restricted` and `certificate_authority` nil, `ssh` partial |
 
 ### Bounds
 
@@ -206,6 +208,13 @@ over 10 MiB are not opened; 2,000 records per section; 15 minutes per run; one
 filesystem per root; pseudo-filesystems, network mounts and container layer
 stores are never entered. Reads are sequential and the walk yields, so a
 collection does not compete with the host's own work.
+
+A run stops at the earlier of `MaxDuration` and the caller's deadline, or when
+the caller cancels. Every section a stopped pass had not finished, and every
+section of a pass that never started, reads `partial` with a `max_duration`
+limit whose detail names the bound that applied; none reads `ok` with a list
+it did not finish, and none reads `failed` because it was cut. A file is
+charged to the file budget once, so the sweep visits what it listed.
 
 ### Opt-ins
 
