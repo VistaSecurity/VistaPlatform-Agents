@@ -67,7 +67,7 @@ const (
 )
 
 // Capabilities is what the fake platform offers each agent kind by default.
-var Capabilities = []string{"device_discovery", "identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"}
+var Capabilities = []string{"device_discovery", "host_crypto_v1", "identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"}
 
 // Request is one call an agent made.
 type Request struct {
@@ -282,6 +282,7 @@ var routes = []route{
 	{http.MethodPost, sensorBase, "/certificates/rotate", "rotation.request", false, (*Platform).rotate},
 	{http.MethodGet, agentBase, "/jobs", "", false, (*Platform).nextJob},
 	{http.MethodPost, agentBase, "/results", "job-result.device-agent", false, ok},
+	{http.MethodPost, agentBase, "/host-crypto", "host-crypto.submission", false, ok},
 	{http.MethodPost, agentBase, "/heartbeat", "heartbeat.device-agent.request", false, (*Platform).agentHeartbeat},
 	{http.MethodPost, agentBase, "/certificates/rotate", "rotation.request", false, (*Platform).rotate},
 }

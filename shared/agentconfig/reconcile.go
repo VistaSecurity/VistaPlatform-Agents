@@ -184,7 +184,7 @@ type Change struct {
 
 func (c Change) String() string {
 	from, to := c.From.String(), c.To.String()
-	if f, ok := Registry[c.Key]; ok && f.Kind == KindPortList {
+	if f, ok := Registry[c.Key]; ok && (f.Kind == KindPortList || f.Kind == KindPathList) {
 		// The empty list is a value — "no additional ports" — and an empty
 		// string after the arrow reads as a rendering bug.
 		if c.From.S != nil && *c.From.S == "" {

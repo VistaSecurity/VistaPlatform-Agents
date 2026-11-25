@@ -31,6 +31,16 @@ const (
 	KeyPollInterval          Key = "poll_interval_seconds"
 	KeyHeartbeatInterval     Key = "heartbeat_interval_seconds"
 
+	// Host crypto inventory (docs/host-crypto.md), beside the host inventory
+	// pair and spelled the same way: the switch, its cadence, the two
+	// opt-ins and the paths no collection by the agent enters.
+	KeyHostCryptoEnabled                  Key = "host_crypto_enabled"
+	KeyHostCryptoInterval                 Key = "host_crypto_interval_seconds"
+	KeyHostCryptoHomeDirectories          Key = "host_crypto_home_directories"
+	KeyHostCryptoDefaultKeystorePasswords Key = "host_crypto_default_keystore_passwords"
+	KeyHostCryptoExcludePaths             Key = "host_crypto_exclude_paths"
+	KeyHostCryptoSweepRoots               Key = "host_crypto_sweep_roots"
+
 	// Sensor.
 	KeyActiveProbing         Key = "active_probing"
 	KeyNetworkDiscovery      Key = "network_discovery"
@@ -66,6 +76,10 @@ const (
 	// KindPortList is a list of TCP port numbers, carried as a canonical
 	// comma-separated string (ports.go).
 	KindPortList Kind = "port_list"
+	// KindPathList is a list of absolute file system paths, carried as a
+	// canonical newline-separated string (paths.go). Bounded and checked
+	// like a port list: not free text.
+	KindPathList Kind = "path_list"
 )
 
 // Apply says when a change takes effect on the device.
@@ -159,6 +173,71 @@ var Registry = func() map[Key]Field {
 			Kind: KindInt, Apply: ApplyImmediate, Default: Int(86400),
 			Min: 3600, Max: 2592000, Floor: 3600,
 			Description: "How often the agent re-describes its host. Below one hour is raised to one hour.",
+		},
+		{
+			// Off by default for the reason host inventory is: an agent
+			// installed to interrogate network devices must not start reading
+			// its own host's key files because it was upgraded. A device built
+			// before the setting does not collect at all, which is the default.
+			Key: KeyHostCryptoEnabled, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindBool, Apply: ApplyImmediate, Default: Bool(false),
+			OlderDevicesRunDefault: true,
+			Label:                  "Host crypto inventory",
+			Description: "Describe the cryptographic material and configuration on the host this agent runs on: certificates, " +
+				"private keys (never their contents), keystores, SSH material, TLS and SSH policy, crypto libraries and disk encryption.",
+		},
+		{
+			Key: KeyHostCryptoInterval, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindInt, Apply: ApplyImmediate, Default: Int(86400),
+			Min: 3600, Max: 2592000, Floor: 3600,
+			OlderDevicesRunDefault: true,
+			Description:            "How often the agent re-describes its host's cryptography. Below one hour is raised to one hour.",
+		},
+		{
+			// A consent: it reads what belongs to the host's people, not to
+			// the host. Turning it on is confirmed.
+			Key: KeyHostCryptoHomeDirectories, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindBool, Apply: ApplyImmediate, Default: Bool(false),
+			OlderDevicesRunDefault: true,
+			Label:                  "Include home directories in host crypto inventory",
+			Confirm: "The agent will also describe each user's own keys, keystores and SSH files in their home directories. " +
+				"It records what they are and who can read them, never their contents.",
+			Description: "Off by default. When on, host crypto inventory also covers per-user SSH keys, GnuPG homes, browser key databases and keychains.",
+		},
+		{
+			// A consent too: trying a password against a file is an action on
+			// it, not an observation of it, even when only "it opened" is kept.
+			Key: KeyHostCryptoDefaultKeystorePasswords, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindBool, Apply: ApplyImmediate, Default: Bool(false),
+			OlderDevicesRunDefault: true,
+			Label:                  "Try default keystore passwords",
+			Confirm: "The agent will try well-known default passwords (such as changeit) against Java and PKCS#12 keystores it finds. " +
+				"Only whether one worked is recorded; the password and the contents are not.",
+			Description: "Off by default. When on, host crypto inventory reports keystores that open with a well-known default password.",
+		},
+		{
+			Key: KeyHostCryptoExcludePaths, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindPathList, Apply: ApplyImmediate, Default: Text(""),
+			OlderDevicesRunDefault: true,
+			Label:                  "Paths host crypto inventory never enters",
+			Description: "Absolute paths, one per line, that no host crypto collection by this agent reads or walks into: " +
+				"the scheduled one and every requested one, local or remote (on a remote host they are paths on that host). " +
+				"Pseudo-filesystems, network mounts and container layer stores are always skipped.",
+		},
+		{
+			// The only way pass 4 (the sweep) is reached from the product:
+			// the scheduled collection sweeps these, and every job adds them
+			// to its own sweep_roots, as it adds the excluded paths. A root in
+			// a home directory is swept only with the home-directories
+			// opt-in; a whole filesystem is refused (ParsePathFor).
+			Key: KeyHostCryptoSweepRoots, Runtimes: []Runtime{RuntimeAgent},
+			Kind: KindPathList, Apply: ApplyImmediate, Default: Text(""),
+			Max:                    MaxSweepRoots,
+			OlderDevicesRunDefault: true,
+			Label:                  "Directories host crypto inventory sweeps",
+			Description: "Absolute paths, one per line (at most 16), whose files every host crypto collection by this agent identifies by " +
+				"their content, so a key with an unexpected name is found: an application's directory, say. Not a whole filesystem. " +
+				"A directory in a home directory is swept only with home directories included.",
 		},
 		{
 			Key: KeyPollInterval, Runtimes: []Runtime{RuntimeAgent},

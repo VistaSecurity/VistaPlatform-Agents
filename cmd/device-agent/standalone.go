@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
 	"github.com/vistasecurity/vistaplatform-agents/shared/agentoutput"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/hostcrypto"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
@@ -36,6 +37,7 @@ import (
 const standaloneUsageHint = `Standalone commands (no Vista Platform, nothing uploaded; see docs/standalone.md):
   collect          interrogate one device you name
   host-inventory   inventory this machine
+  host-crypto      describe the certificates, keys and crypto policy of this machine or one over SSH
   kubernetes-inventory
                    inventory the Kubernetes cluster this runs in (in a pod)
 Run "device-agent <command> --help" for a command's flags.
@@ -68,6 +70,11 @@ type standaloneEnv struct {
 	registry *di.Registry
 	// collectHost is the host-inventory collection; nil is the real one.
 	collectHost func(ctx context.Context) (*hostinventory.Report, *di.InterrogateResult, error)
+	// collectHostCrypto is the local host crypto collection; nil is the real one.
+	collectHostCrypto func(ctx context.Context, opts hostcrypto.Options) (*hostcrypto.Report, error)
+	// dialHostCrypto opens host-crypto --remote's SSH connection; nil is the
+	// real one.
+	dialHostCrypto func(cfg hostinventory.SSHConfig) (hostCryptoDial, error)
 	// kubeClient is the client for kubernetes-inventory; nil is the cluster
 	// this process runs in.
 	kubeClient func() (*kubeinventory.Client, error)
@@ -91,6 +98,14 @@ func (e standaloneEnv) withDefaults() standaloneEnv {
 			return devices.CollectLocalHostInventory(ctx, "")
 		}
 	}
+	if e.collectHostCrypto == nil {
+		e.collectHostCrypto = func(ctx context.Context, opts hostcrypto.Options) (*hostcrypto.Report, error) {
+			return devices.CollectLocalHostCrypto(ctx, "", opts)
+		}
+	}
+	if e.dialHostCrypto == nil {
+		e.dialHostCrypto = dialHostCryptoSSH
+	}
 	if e.kubeClient == nil {
 		e.kubeClient = kubeinventory.InCluster
 	}
@@ -108,6 +123,8 @@ func runStandalone(args []string, env standaloneEnv) (code int, ok bool) {
 		return runCollect(args[1:], env.withDefaults()), true
 	case "host-inventory":
 		return runHostInventory(args[1:], env.withDefaults()), true
+	case "host-crypto":
+		return runHostCrypto(args[1:], env.withDefaults()), true
 	case "kubernetes-inventory":
 		return runKubernetesInventory(args[1:], env.withDefaults()), true
 	}
@@ -122,7 +139,7 @@ type outputFlags struct {
 }
 
 func (o *outputFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&o.out, "out", "-", "Write the output to this file (created 0600); - is standard output")
+	fs.StringVar(&o.out, "out", "-", "Write the output to this file (created 0600 on Linux and macOS; an existing file is replaced); - is standard output")
 	fs.StringVar(&o.format, "format", "jsonl", "Output format: jsonl, json or csv")
 	fs.BoolVar(&o.quiet, "quiet", false, "Do not print the human summary on standard error")
 }

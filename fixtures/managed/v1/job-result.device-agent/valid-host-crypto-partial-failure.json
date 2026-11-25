@@ -1,0 +1,29 @@
+{
+  "job_id": "6e1d8f3b-4c52-4a7f-8b9e-2d3c4b5e6f70",
+  "success": false,
+  "error": "the agent stopped before the collection finished",
+  "completed_at": "2026-01-02T03:20:05Z",
+  "host_crypto": {
+    "collected": "2026-01-02T03:04:05Z",
+    "mode": "local",
+    "platform": "linux",
+    "agent_id": "7f2e9a4c-5d63-4b80-9caf-3e4d5c6f7a81",
+    "access": {},
+    "scope": {
+      "home_directories": false,
+      "default_keystore_passwords": false
+    },
+    "ssh": {},
+    "sections": {
+      "platform": "ok",
+      "certificates": "partial"
+    },
+    "limits": [
+      {
+        "section": "certificates",
+        "limit": "max_duration",
+        "detail": "stopped after 15m0s"
+      }
+    ]
+  }
+}

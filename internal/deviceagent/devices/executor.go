@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
@@ -56,6 +58,22 @@ type JobExecutor struct {
 	// jobTimeout is the per-job bound when the job names none; zero means
 	// DefaultJobTimeout.
 	jobTimeout time.Duration
+	// shutdown is the agent's lifetime (SetShutdown). Nil: nothing cancels a
+	// host crypto collection but its own bounds.
+	shutdown context.Context
+	// dialRemote opens a remote collection's transport; nil is
+	// buildRemoteRunner. A field only so a test can hand the REAL job path a
+	// runner without an SSH server, and see what it was asked to dial.
+	dialRemote func(transport hostinventory.Transport, params, creds map[string]interface{}) (hostinventory.Runner, error)
+	// hostCryptoExcludes is the agent's host_crypto_exclude_paths setting as
+	// it is now (SetHostCryptoExcludes); nil: none.
+	hostCryptoExcludes func() []string
+	// hostCryptoConsents is the agent's confirmed opt-ins (home directories,
+	// default keystore passwords); nil: none confirmed.
+	hostCryptoConsents func() (bool, bool)
+	// hostCryptoSweepRoots is the agent's host_crypto_sweep_roots setting;
+	// nil: none.
+	hostCryptoSweepRoots func() []string
 	// kube is where a kubernetes_inventory job gets its client and its
 	// settings; the zero value is the cluster this process runs in.
 	kube kubernetesSource
@@ -64,7 +82,7 @@ type JobExecutor struct {
 // NewJobExecutor creates a new job executor.
 func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecutor {
 	return &JobExecutor{
-		submitter:  retryingSubmitter(apiClient),
+		submitter:  &outcomeSubmitter{inner: retryingSubmitter(apiClient)},
 		negotiated: negotiatedBy(apiClient),
 		config:     cfg,
 		registry:   di.NewRegistry(),
@@ -82,12 +100,47 @@ func negotiatedBy(c *api.OutboundClient) func(string) bool {
 // NewJobExecutorWithAudit creates a new job executor with audit logging enabled.
 func NewJobExecutorWithAudit(apiClient *api.OutboundClient, cfg *config.Config, auditLogger *audit.AuditLogger) *JobExecutor {
 	return &JobExecutor{
-		submitter:   retryingSubmitter(apiClient),
+		submitter:   &outcomeSubmitter{inner: retryingSubmitter(apiClient)},
 		negotiated:  negotiatedBy(apiClient),
 		config:      cfg,
 		registry:    di.NewRegistry(),
 		auditLogger: auditLogger,
 	}
+}
+
+// outcomeSubmitter records whether the last result for each job said
+// success, so the agent's log line says what the platform was told.
+type outcomeSubmitter struct {
+	inner resultSubmitter
+	mu    sync.Mutex
+	last  map[uuid.UUID]bool
+}
+
+func (o *outcomeSubmitter) SubmitResult(r *models.JobResult) error {
+	err := o.inner.SubmitResult(r)
+	o.mu.Lock()
+	if o.last == nil {
+		o.last = map[uuid.UUID]bool{}
+	}
+	if len(o.last) > 256 {
+		o.last = map[uuid.UUID]bool{}
+	}
+	o.last[r.JobID] = r.Success
+	o.mu.Unlock()
+	return err
+}
+
+// Outcome reports whether the last result submitted for job said success;
+// ok is false when none was submitted through this executor's recorder.
+func (e *JobExecutor) Outcome(job uuid.UUID) (ok, succeeded bool) {
+	o, is := e.submitter.(*outcomeSubmitter)
+	if !is {
+		return false, false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	succeeded, ok = o.last[job]
+	return ok, succeeded
 }
 
 // retryingSubmitter wraps the client so a network blip on a finished job's
@@ -106,6 +159,9 @@ func (e *JobExecutor) timeoutFor(job *models.Job) time.Duration {
 			d = maxJobTimeout
 		}
 		return d
+	}
+	if job.Type == JobTypeHostCrypto {
+		return hostCryptoJobTimeout(job.Parameters)
 	}
 	if e.jobTimeout > 0 {
 		return e.jobTimeout
@@ -139,6 +195,8 @@ func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) 
 		return e.executeDeviceInterrogation(ctx, job, timeout)
 	case JobTypeHostInventory:
 		return e.executeHostInventory(ctx, job)
+	case JobTypeHostCrypto:
+		return e.executeHostCrypto(ctx, job)
 	case kubeinventory.JobType:
 		return e.executeKubernetesInventory(ctx, job)
 	case di.JobTypeDeviceDiscovery:

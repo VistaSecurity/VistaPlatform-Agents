@@ -93,6 +93,10 @@ type JobResult struct {
 	Identification *di.IdentificationReport `json:"identification,omitempty"`
 	FailureCode    string                   `json:"failure_code,omitempty"`
 
+	// HostCrypto is a host_crypto job's report, already serialized, bounded
+	// and checked by hostcrypto.ResultPayload: raw bytes rather than the
+	// struct so what was checked is exactly what is sent.
+	HostCrypto json.RawMessage `json:"host_crypto,omitempty"`
 	// KubernetesInventory is one part of a kubernetes_inventory job's
 	// collection (docs/design/kubernetes-inventory.md). A collection is sent
 	// as one result per part, all with the job's id; no other job sets it.

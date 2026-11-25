@@ -201,6 +201,14 @@ described in [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md))
 It has no CSV rows. It never carries a private key, the content of a Secret
 other than certificates, environment variables, commands or annotations.
 
+### `host_crypto` (`device-agent host-crypto`)
+
+| Field | Meaning |
+|---|---|
+| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `coverage` (the directories seen completely, and the files in them that were not read, with why), `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
+
+An empty list means "none found" only when its section says `ok`.
+
 ### `error`
 
 Something that did not work. The run goes on where it can.
@@ -208,7 +216,7 @@ Something that did not work. The run goes on where it can.
 | Field | Meaning |
 |---|---|
 | `target` | What failed: an address, a device, a file, or empty for the run as a whole. |
-| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`, `kubernetes_inventory`. |
+| `stage` | Where it failed: `resolve`, `scan`, `capture`, `interrogate`, `host_inventory`, `kubernetes_inventory`, `connect`, `host_crypto`. |
 | `reason` | Why, in words. Secrets are scrubbed from it. |
 
 ### `summary`
@@ -223,6 +231,8 @@ Always last.
 | `warnings` | The warnings, as text, when there are any: packets dropped, an interrupted run, a collector section that did not complete, the SSH host key accepted without a pin. |
 | `partial` | `true` when some part failed; the exit status is then 2. |
 | `scope` | How much was looked at, in words: "3 addresses in 1 target, depth standard, pace polite", or the packet count of a capture. |
+| `step_errors` | `host-crypto` only: how many step errors the report holds (its `errors`); `errors` above counts error records. |
+| `partial_sections` | `host-crypto` only: the report's sections that did not complete (`partial`, or `failed` marked so). |
 | `duration_seconds`, `finished_at` | How long the run took and when it ended. |
 
 ## The CSV

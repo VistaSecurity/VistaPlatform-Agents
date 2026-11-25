@@ -1,0 +1,30 @@
+{
+  "id": "6e1d8f3b-4c52-4a7f-8b9e-2d3c4b5e6f70",
+  "type": "host_crypto",
+  "asset_id": "3c0f2a51-6d7e-4f80-9bac-1d2e3f4a5b6c",
+  "credentials": {
+    "encrypted_data": "AAAAAAAAAAAAAAAAU1lOVEhFVElDLUVOVkVMT1BFLU5PVC1BLVJFQUwtU0VBTEVELUNSRURFTlRJQUxT"
+  },
+  "parameters": {
+    "mode": "remote",
+    "transport": "ssh",
+    "ssh_port": 22,
+    "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "options": {
+      "home_directories": true,
+      "exclude_paths": [
+        "C:\\Windows\\WinSxS"
+      ],
+      "max_records_per_section": 2000
+    }
+  },
+  "created_at": "2026-01-02T03:04:05Z",
+  "expires_at": null,
+  "protocol": {
+    "version": 1,
+    "capabilities": [
+      "device_discovery",
+      "host_crypto_v1"
+    ]
+  }
+}

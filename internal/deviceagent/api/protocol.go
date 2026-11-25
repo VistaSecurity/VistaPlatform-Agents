@@ -18,6 +18,7 @@ import (
 	"time"
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/hostcrypto"
 	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
@@ -35,14 +36,18 @@ const maxJobBytes = 8 << 20
 const hostInventoryNegotiationWait = 2 * time.Minute
 
 // AgentCapabilities is what this build of the device agent can do; the names
-// are the ones the platform has always read from X-Agent-Capabilities.
+// are the ones the platform has always read from X-Agent-Capabilities. It is
+// the one list: the registration offer, the gate and the job poll's header
+// all read it, so a capability cannot be offered in one and missing from
+// another.
 //
-// kubernetes_inventory_v1 is offered only by an agent that runs in a cluster
-// (a mounted service account), because only such an agent can run the job: a
-// platform that sees the capability may queue it, and one that does not never
-// hands this agent a job it would have to refuse.
+// host_crypto_v1 is always offered. kubernetes_inventory_v1 is offered only
+// by an agent that runs in a cluster (a mounted service account), because only
+// such an agent can run the job: a platform that sees the capability may queue
+// it, and one that does not never hands this agent a job it would have to
+// refuse.
 func AgentCapabilities() []string {
-	caps := di.AgentCapabilities()
+	caps := append(di.AgentCapabilities(), hostcrypto.CapabilityHostCrypto)
 	if kubeinventory.InClusterAvailable() {
 		caps = append(caps, kubeinventory.Capability)
 	}

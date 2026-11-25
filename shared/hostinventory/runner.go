@@ -1,6 +1,7 @@
 package hostinventory
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -37,6 +38,16 @@ type Runner interface {
 	// A missing or unreadable file is an error, which the caller records as a
 	// step failure and never as an empty value.
 	ReadFile(ctx context.Context, path string) ([]byte, error)
+}
+
+// InputRunner is an optional extension of [Runner]: a command that also takes
+// bytes on its standard input. It exists for Windows targets, whose OpenSSH
+// default shell is cmd.exe with an 8,191-character command line: a long
+// PowerShell script cannot go as an argument there, but it can go on stdin
+// with nothing but a short fixed argv on the command line. Same bounds,
+// timeout and exit-code rules as Run.
+type InputRunner interface {
+	RunInput(ctx context.Context, argv []string, stdin []byte) (stdout, stderr []byte, exit int, err error)
 }
 
 // maxOutputBytes bounds what any single command or file may contribute. A host
@@ -76,6 +87,11 @@ func NewLocalRunner() *LocalRunner { return &LocalRunner{} }
 // argument that happens to contain a metacharacter an argument rather than a
 // second command.
 func (LocalRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	return LocalRunner{}.RunInput(ctx, argv, nil)
+}
+
+// RunInput is Run with stdin. A nil stdin is no input, as for Run.
+func (LocalRunner) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, int, error) {
 	if len(argv) == 0 {
 		return nil, nil, -1, errors.New("hostinventory: empty argv")
 	}
@@ -87,6 +103,9 @@ func (LocalRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, int,
 	errBuf := &boundedBuffer{limit: maxOutputBytes}
 	cmd.Stdout = outBuf
 	cmd.Stderr = errBuf
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 
 	err := cmd.Run()
 	if outBuf.truncated {
@@ -276,6 +295,13 @@ func sshAuthMethods(cfg SSHConfig) ([]ssh.AuthMethod, error) {
 // (windows.go): base64 and bare flags are the one form that survives both
 // shells untouched, so the question never arises.
 func (r *SSHRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	return r.RunInput(ctx, argv, nil)
+}
+
+// RunInput is Run with stdin: the bytes are written to the remote command's
+// standard input and the channel is closed for writing after them, so the far
+// side sees end of file. A nil stdin is no input, as for Run.
+func (r *SSHRunner) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, int, error) {
 	if len(argv) == 0 {
 		return nil, nil, -1, errors.New("hostinventory: empty argv")
 	}
@@ -309,6 +335,9 @@ func (r *SSHRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, int
 	errBuf := &boundedBuffer{limit: maxOutputBytes}
 	session.Stdout = outBuf
 	session.Stderr = errBuf
+	if stdin != nil {
+		session.Stdin = bytes.NewReader(stdin)
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- session.Run(command) }()

@@ -28,6 +28,9 @@ Linked into the released binaries:
   into either agent binary). Apache-2.0; its LICENSE carries the licence text
   with no copyright line, and the module names Santhosh Kumar Tekuri as its
   author.
+- software.sslmate.com/src/go-pkcs12 (test support only; not linked into
+  either agent binary). Copyright (c) 2015, 2018, 2019 Opsmate, Inc. and
+  Copyright (c) 2009 The Go Authors. BSD-3-Clause.
 - github.com/gopacket/gopacket (sensor). Copyright (c) 2012 Google, Inc. and
   Copyright (c) 2009-2011 Andreas Krennmair. BSD-3-Clause.
 - github.com/google/uuid. Copyright (c) 2009,2014 Google Inc. BSD-3-Clause.
