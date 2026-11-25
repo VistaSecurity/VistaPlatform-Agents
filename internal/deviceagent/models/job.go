@@ -91,6 +91,11 @@ type JobResult struct {
 	// the typed reason a discovery failed. An interrogation sets neither.
 	Identification *di.IdentificationReport `json:"identification,omitempty"`
 	FailureCode    string                   `json:"failure_code,omitempty"`
+
+	// HostCrypto is a host_crypto job's report, already serialized, bounded
+	// and checked by hostcrypto.ResultPayload: raw bytes rather than the
+	// struct so what was checked is exactly what is sent.
+	HostCrypto json.RawMessage `json:"host_crypto,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
@@ -55,6 +56,13 @@ type JobExecutor struct {
 	// jobTimeout is the per-job bound when the job names none; zero means
 	// DefaultJobTimeout.
 	jobTimeout time.Duration
+	// shutdown is the agent's lifetime (SetShutdown). Nil: nothing cancels a
+	// host crypto collection but its own bounds.
+	shutdown context.Context
+	// dialRemote opens a remote collection's transport; nil is
+	// buildRemoteRunner. A field only so a test can hand the REAL job path a
+	// runner without an SSH server, and see what it was asked to dial.
+	dialRemote func(transport hostinventory.Transport, params, creds map[string]interface{}) (hostinventory.Runner, error)
 }
 
 // NewJobExecutor creates a new job executor.
@@ -103,6 +111,9 @@ func (e *JobExecutor) timeoutFor(job *models.Job) time.Duration {
 		}
 		return d
 	}
+	if job.Type == JobTypeHostCrypto {
+		return hostCryptoJobTimeout(job.Parameters)
+	}
 	if e.jobTimeout > 0 {
 		return e.jobTimeout
 	}
@@ -131,6 +142,8 @@ func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) 
 		return e.executeDeviceInterrogation(ctx, job, timeout)
 	case JobTypeHostInventory:
 		return e.executeHostInventory(ctx, job)
+	case JobTypeHostCrypto:
+		return e.executeHostCrypto(ctx, job)
 	case di.JobTypeDeviceDiscovery:
 		if e.negotiated != nil && !e.negotiated(di.CapabilityDeviceDiscovery) {
 			return e.submitUnsupported(job, "the platform did not negotiate "+di.CapabilityDeviceDiscovery+" with this agent")

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/hostcrypto"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 )
 
@@ -34,8 +35,13 @@ const maxJobBytes = 8 << 20
 const hostInventoryNegotiationWait = 2 * time.Minute
 
 // AgentCapabilities is what this build of the device agent can do; the names
-// are the ones the platform has always read from X-Agent-Capabilities.
-func AgentCapabilities() []string { return di.AgentCapabilities() }
+// are the ones the platform has always read from X-Agent-Capabilities. It is
+// the one list: the registration offer, the gate and the job poll's header
+// all read it, so a capability cannot be offered in one and missing from
+// another.
+func AgentCapabilities() []string {
+	return append(di.AgentCapabilities(), hostcrypto.CapabilityHostCrypto)
+}
 
 // Gate is the client's view of the platform's protocol.
 func (c *OutboundClient) Gate() *managedprotocol.Gate { return c.gate }

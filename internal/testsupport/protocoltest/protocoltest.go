@@ -18,7 +18,7 @@ import (
 )
 
 // AllCapabilities is every capability either agent of this build knows.
-var AllCapabilities = []string{"device_discovery", "identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"}
+var AllCapabilities = []string{"device_discovery", "host_crypto_v1", "identity_dns_v1", "scan_plan_v1", "verify_certificate_v1"}
 
 // V1 is a protocol-1 object naming every capability.
 func V1() *managedprotocol.Protocol {

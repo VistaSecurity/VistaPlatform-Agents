@@ -83,7 +83,9 @@ func TestProtocol1_DeviceAgentFlowAgainstTheFakePlatform(t *testing.T) {
 			t.Errorf("%s %s: %s = %q", r.Method, r.Path, managedprotocol.Header, r.Header.Get(managedprotocol.Header))
 		}
 	}
-	if caps := p.Requests("")[2].Header.Get(di.AgentCapabilitiesHeader); caps != "device_discovery" {
+	// The poll declares every job type this build runs beyond
+	// device_interrogation: device_discovery and host_crypto (host_crypto_v1).
+	if caps := p.Requests("")[2].Header.Get(di.AgentCapabilitiesHeader); caps != "device_discovery,host_crypto_v1" {
 		t.Errorf("job poll %s = %q", di.AgentCapabilitiesHeader, caps)
 	}
 
