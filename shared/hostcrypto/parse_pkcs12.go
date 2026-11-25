@@ -359,6 +359,7 @@ const (
 	ksNotTriedSigned      = "integrity is by signature"
 	ksNotTriedUnprotected = "nothing in the file is protected by a password"
 	ksNotTriedCost        = "iteration count above the limit"
+	ksNotTriedScheme      = "a part uses protection the collector does not try"
 	ksNotTriedNoCheck     = "nothing in the file can verify a password"
 )
 
@@ -897,6 +898,10 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 			openers = append(openers, opener{idx: i, cost: cost, open: open, key: ksP12KeyMaterial(p.alg)})
 		}
 	}
+	openerIdx := map[int]bool{}
+	for _, o := range openers {
+		openerIdx[o.idx] = true
+	}
 
 	// The check: the MAC when the file has one this code computes; otherwise
 	// the cheapest part to decrypt.
@@ -946,12 +951,13 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 	}
 	left := ksMaxTrialWork - total
 
-	// open walks a part the password opens into st.bags. Under the password
-	// that passed the store's check, a decryption whose plaintext is not
-	// SafeContents marks the part unreadable; under any other candidate it
-	// is that candidate not opening the part (a wrong password yields valid
-	// padding about once in 256 tries).
-	open := func(o opener, pw ksP12Password, passed bool) bool {
+	// open walks a part the password opens into st.bags. proved says the
+	// password is proved for THIS part (it is the verifier part of a store
+	// without a MAC); only then does a decryption whose plaintext is not
+	// SafeContents mark the part unreadable. Otherwise it is the candidate
+	// not opening the part: a wrong password, the MAC's included when the
+	// part has another, yields valid padding about once in 256 tries.
+	open := func(o opener, pw ksP12Password, proved bool) bool {
 		pt, ok := o.open(pw)
 		if !ok {
 			return false
@@ -959,7 +965,7 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		before := len(st.bags)
 		if st.walkSafeContents(pt, maxEntries, 1) != nil {
 			st.bags = st.bags[:before]
-			if passed {
+			if proved {
 				st.parts[o.idx].unreadable = true
 			}
 			return false
@@ -977,8 +983,8 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		// even when the empty password passed the check, and a store whose
 		// MAC is a default but a part is empty is listed in full.
 		byDefault, cut := !pw.empty, false
-		for _, o := range openers {
-			if open(o, pw, true) {
+		for j, o := range openers {
+			if open(o, pw, j == verifier) {
 				continue
 			}
 			tried := map[string]bool{o.key(pw): true}
@@ -1005,9 +1011,20 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 				st.parts[o.idx].refused = true
 			}
 		}
+		// A password-based part that no candidate could be tried on (a
+		// scheme this code does not decrypt) leaves the answer open too. A
+		// public-key encrypted part does not: no password applies to it.
+		untriedPassword := false
+		for i, p := range st.parts {
+			if p.encrypted && p.content != nil && !p.opened && !openerIdx[i] {
+				untriedPassword = true
+			}
+		}
 		switch {
 		case byDefault:
 			return ksP12OpenedByDefault, ""
+		case untriedPassword:
+			return ksP12OpenedByEmpty, ksNotTriedScheme
 		case cut:
 			// A default was not tried on every part: "does a default open
 			// this?" has no answer, which is said as for an untried store.

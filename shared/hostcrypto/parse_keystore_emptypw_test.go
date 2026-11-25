@@ -152,6 +152,16 @@ func ksEmptyPwUnsupportedPart(t *testing.T) ksContentInfo {
 	return ksContentInfo{ContentType: ksOIDEncryptedData, Content: ksExplicit0(ed)}
 }
 
+// ksEmptyPwMalformedBag is a safeContentsBag whose value is not SafeContents:
+// a list of bags that parses, and a walk that cannot read it.
+func ksEmptyPwMalformedBag(t *testing.T) ksSafeBag {
+	inner, err := asn1.Marshal([]byte("not a SafeContents"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ksSafeBag{ID: ksOIDSafeContBag, Value: ksExplicit0(inner)}
+}
+
 // ksEmptyPwEnvelopedPart is a public-key encrypted part: no password opens
 // it, and none is tried.
 func ksEmptyPwEnvelopedPart(t *testing.T) ksContentInfo {
@@ -170,27 +180,38 @@ func TestPKCS12HiddenPartReasons(t *testing.T) {
 		unreadable = "decrypted to contents that are not a list of entries"
 		untried    = "protected in a way the collector does not try"
 	)
+	// A no-MAC store whose cheapest part (the verifier, proved by the
+	// empty password) holds a bag the walk cannot read.
+	malformed := ksEncryptedPart(t, "", 1, ksEmptyPwMalformedBag(t))
+	listedCostlier := ksEncryptedPart(t, "", 2, ksCertSafeBag(t, a.Raw))
 	for _, tc := range []struct {
 		name     string
 		pfx      []byte
 		want     []string
 		wantNot  []string
 		wantCert int
+		// notTried is the DefaultsNotTried a store gives when a default was
+		// not tried on a password-based part; DefaultPassword is then nil.
+		notTried string
 	}{
-		{"(a) public-key encrypted part", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwEnvelopedPart(t)), []string{untried}, []string{refused, unreadable}, 1},
-		{"(b) an algorithm not decrypted here", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwUnsupportedPart(t)), []string{untried}, []string{refused, unreadable}, 1},
-		{"(c) decrypts to something that is not entries", ksBuildPFX(t, ksStr(""), listed, ksEncryptedBytes(t, "", 1, []byte("not a SafeContents at all"))), []string{unreadable}, []string{refused, untried}, 1},
-		{"MAC empty, a part under a real password", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1},
-		{"no MAC, cheap part empty, costlier part real", ksBuildPFX(t, nil, listed, ksEncryptedPart(t, "Real-Pass-7", 50, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1},
-		{"both kinds", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw)), ksEmptyPwEnvelopedPart(t)), []string{refused, untried}, []string{unreadable}, 1},
+		{"(a) public-key encrypted part", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwEnvelopedPart(t)), []string{untried}, []string{refused, unreadable}, 1, ""},
+		{"(b) a password scheme not decrypted here", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwUnsupportedPart(t)), []string{untried}, []string{refused, unreadable}, 1, ksNotTriedScheme},
+		{"(c) the verifier part decrypts to something that is not entries", ksBuildPFX(t, nil, malformed, listedCostlier), []string{unreadable}, []string{refused, untried}, 1, ""},
+		{"MAC empty, a part under a real password", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1, ""},
+		{"no MAC, cheap part empty, costlier part real", ksBuildPFX(t, nil, listed, ksEncryptedPart(t, "Real-Pass-7", 50, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1, ""},
+		{"both kinds", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw)), ksEmptyPwEnvelopedPart(t)), []string{refused, untried}, []string{unreadable}, 1, ""},
 	} {
 		got, err := ParsePKCS12(tc.pfx, true)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		ks := got.Keystore
-		if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || ks.EntryCount != nil || len(got.Certificates) != tc.wantCert {
-			t.Errorf("%s: %+v, %d certificates", tc.name, ks, len(got.Certificates))
+		answered := ks.DefaultPassword != nil && !*ks.DefaultPassword
+		if tc.notTried != "" {
+			answered = ks.DefaultPassword == nil && got.DefaultsNotTried == tc.notTried
+		}
+		if ks.Opened != OpenedWithoutPassword || !answered || ks.EntryCount != nil || len(got.Certificates) != tc.wantCert {
+			t.Errorf("%s: %+v (not tried %q), %d certificates", tc.name, ks, got.DefaultsNotTried, len(got.Certificates))
 		}
 		for _, w := range tc.want {
 			if !strings.Contains(ks.Unknown, w) {
@@ -247,22 +268,12 @@ func TestPKCS12RetryBudget(t *testing.T) {
 	}
 }
 
-// TestPKCS12WrongPasswordPaddingIsNotUnreadable: a wrong candidate that
-// happens to give valid padding (about once in 256) decrypts to garbage; that
-// is the candidate not opening the part, not the part being unreadable. The
-// case is built directly: the part is encrypted under "changeit" around bytes
-// that are not SafeContents, the MAC takes the empty password, and the part
-// is rebuilt until the empty password's key gives invalid padding, so only
-// the retry with "changeit" decrypts it.
-func TestPKCS12WrongPasswordPaddingIsNotUnreadable(t *testing.T) {
-	a := ksTestCert(t, ksTestECDSA(t), "listed", false)
-	listed := ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))
-	var part ksContentInfo
-	for i := 0; ; i++ {
-		if i > 64 {
-			t.Fatal("could not build a part the empty password does not decrypt")
-		}
-		part = ksEncryptedBytes(t, "changeit", 1, []byte("decrypts with valid padding, but is no SafeContents"))
+// ksEmptyPwPart builds an encryptedData part under password around plain,
+// rebuilt until the empty password's key gives valid padding (wantValid) or
+// invalid padding (!wantValid), so a test does not rest on chance.
+func ksEmptyPwPart(t *testing.T, password string, plain []byte, wantValid bool) ksContentInfo {
+	for i := 0; i < 4096; i++ {
+		part := ksEncryptedBytes(t, password, 1, plain)
 		var ed ksEncryptedData
 		if err := ksUnmarshalAll(part.Content.Bytes, &ed); err != nil {
 			t.Fatal(err)
@@ -271,23 +282,76 @@ func TestPKCS12WrongPasswordPaddingIsNotUnreadable(t *testing.T) {
 		if !ok {
 			t.Fatal("the part's scheme is not decrypted here")
 		}
-		if _, ok := open(ksP12Password{bmp: []byte{0, 0}, utf8: []byte{}, empty: true}); !ok {
-			break
+		if _, valid := open(ksP12Password{bmp: []byte{0, 0}, utf8: []byte{}, empty: true}); valid == wantValid {
+			return part
 		}
 	}
-	got, err := ParsePKCS12(ksBuildPFX(t, ksStr(""), listed, part), true)
+	t.Fatal("could not build the part")
+	return ksContentInfo{}
+}
+
+// TestPKCS12WrongPasswordPaddingIsNotUnreadable: a password that is not
+// proved for a part, and happens to give valid padding (about once in 256),
+// decrypts it to garbage; that is the password not opening the part, not the
+// part being unreadable. Built directly, not left to chance.
+func TestPKCS12WrongPasswordPaddingIsNotUnreadable(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "listed", false)
+	b := ksTestCert(t, ksTestECDSA(t), "hidden", false)
+	listed := ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))
+	notEntries := []byte("decrypts with valid padding, but is no SafeContents")
+	const refused, unreadable = "neither empty nor a well-known default", "not a list of entries"
+	check := func(name string, pfx []byte) {
+		t.Helper()
+		got, err := ParsePKCS12(pfx, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ks := got.Keystore
+		if strings.Contains(ks.Unknown, unreadable) || !strings.Contains(ks.Unknown, refused) || ks.DefaultPassword == nil || *ks.DefaultPassword {
+			t.Fatalf("%s: %+v", name, ks)
+		}
+	}
+	// A retried candidate ("changeit") with valid padding over garbage.
+	check("a retry's accident", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwPart(t, "changeit", notEntries, false)))
+	// The MAC's own password (empty), proved for the MAC but not for this
+	// part, with valid padding over the part's real contents.
+	inner, err := asn1.Marshal([]ksSafeBag{ksCertSafeBag(t, b.Raw)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ks := got.Keystore
-	if strings.Contains(ks.Unknown, "not a list of entries") || !strings.Contains(ks.Unknown, "neither empty nor a well-known default") ||
-		ks.DefaultPassword == nil || *ks.DefaultPassword {
-		t.Fatalf("a wrong password's garbage was called unreadable: %+v", ks)
-	}
-	// Under the password that passed the check, the same garbage is
-	// unreadable: that password is the store's.
-	got, err = ParsePKCS12(ksBuildPFX(t, ksStr("changeit"), part), true)
-	if err != nil || !strings.Contains(got.Keystore.Unknown, "not a list of entries") {
-		t.Fatalf("under the store's password: %v %+v", err, got.Keystore)
+	check("the MAC password's accident", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwPart(t, "Real-Pass-7", inner, true)))
+	// Proved for the part (the verifier of a store without a MAC), the same
+	// kind of failure is unreadable.
+	got, err := ParsePKCS12(ksBuildPFX(t, nil, ksEncryptedPart(t, "", 1, ksEmptyPwMalformedBag(t)), ksEncryptedPart(t, "", 2, ksCertSafeBag(t, a.Raw))), true)
+	if err != nil || !strings.Contains(got.Keystore.Unknown, unreadable) {
+		t.Fatalf("proved for the part: %v %+v", err, got.Keystore)
 	}
 }
+
+// TestPKCS12UntriedPasswordScheme: a password-based part under a scheme not
+// decrypted here leaves "does a default open this?" unanswered; a
+// public-key encrypted part does not; a default found still answers true.
+func TestPKCS12UntriedPasswordScheme(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "listed", false)
+	for _, tc := range []struct {
+		name     string
+		pfx      []byte
+		deflt    *bool
+		notTried string
+	}{
+		{"an unsupported password scheme", ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw)), ksEmptyPwUnsupportedPart(t)), nil, ksNotTriedScheme},
+		{"a public-key encrypted part", ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw)), ksEmptyPwEnvelopedPart(t)), boolPtrEmptyPw(false), ""},
+		{"a default found beside an unsupported scheme", ksBuildPFX(t, ksStr("changeit"), ksEncryptedPart(t, "changeit", 1, ksCertSafeBag(t, a.Raw)), ksEmptyPwUnsupportedPart(t)), boolPtrEmptyPw(true), ""},
+	} {
+		got, err := ParsePKCS12(tc.pfx, true)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		d := got.Keystore.DefaultPassword
+		if (d == nil) != (tc.deflt == nil) || (d != nil && *d != *tc.deflt) || got.DefaultsNotTried != tc.notTried {
+			t.Errorf("%s: default %v, not tried %q", tc.name, d, got.DefaultsNotTried)
+		}
+	}
+}
+
+func boolPtrEmptyPw(b bool) *bool { return &b }
