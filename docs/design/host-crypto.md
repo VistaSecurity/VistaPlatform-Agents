@@ -134,6 +134,17 @@ certificate or SSH key file. Go checks everything that arrives.
 - A kept configuration line's value crosses as written (only 40-character
   runs are redacted): which directives a parser lists is the parser's
   responsibility.
+- A path-shaped part of a 40-character run is not redacted, so that file
+  paths such as `-Djavax.net.ssl.trustStore=/etc/elasticsearch/certs/truststore`
+  cross whole: it starts at a `/` at the start of the run or right after
+  `=`, holds at least two `/`, and every segment between slashes is 1 to 39
+  characters; what precedes it and what follows its first longer or empty
+  segment are judged as runs of their own. The same rule runs in Go, awk and
+  PowerShell. A base64 secret on a kept line crosses, whole or in part, when
+  its value begins with `/` and has another `/` within the next 39
+  characters: for a random 32-byte key (44 characters) that is 1/64 ×
+  (1 − (63/64)^39) ≈ 0.7 per cent. Hex never escapes (it has no `/`), and
+  neither does a secret whose value does not begin with `/`.
 
 ### The four passes
 
