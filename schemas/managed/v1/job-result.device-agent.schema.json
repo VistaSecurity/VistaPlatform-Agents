@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.vistasecurity.io/agents/managed/v1/job-result.device-agent.schema.json",
   "title": "Device agent job result",
-  "description": "POST /api/v1/device-interrogation-service/agents/{id}/results, at most 32 MiB. Everything a collector returns has passed the agent's projection allowlists and Sanitize, and error text passes redaction, before it is sent (collect posture, never key material). facts, relationships, network and warnings are typed by the collectors (shared/deviceinterrogation); their vocabularies are under enums/.",
+  "description": "POST /api/v1/device-interrogation-service/agents/{id}/results, at most 32 MiB (a host_crypto report at most 16 MiB of it, cut honestly to fit). Everything a collector returns has passed the agent's projection allowlists and Sanitize, and error text passes redaction, before it is sent (collect posture, never key material). facts, relationships, network and warnings are typed by the collectors (shared/deviceinterrogation); their vocabularies are under enums/.",
   "type": "object",
   "required": [
     "job_id",
@@ -221,6 +221,10 @@
         "object",
         "null"
       ]
+    },
+    "host_crypto": {
+      "$ref": "defs/host-crypto-report.json",
+      "description": "A host_crypto job's report (capability host_crypto_v1). Present on success, and on a failure that has a partial report: its sections say what was read."
     }
   },
   "if": {

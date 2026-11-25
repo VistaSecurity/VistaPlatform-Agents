@@ -9,7 +9,7 @@
   "properties": {
     "schema": { "const": "vista.agent-output/v1" },
     "kind": {
-      "enum": ["run", "passive_observation", "scan_host", "device_interrogation", "host_inventory", "error", "summary"]
+      "enum": ["run", "passive_observation", "scan_host", "device_interrogation", "host_inventory", "host_crypto", "error", "summary"]
     },
     "agent": { "enum": ["crypto-sensor", "device-agent"] },
     "agent_version": { "type": "string", "minLength": 1 },
@@ -33,9 +33,28 @@
     {
       "if": { "properties": { "kind": { "enum": ["passive_observation", "scan_host", "device_interrogation", "host_inventory"] } } },
       "then": { "properties": { "data": { "type": "object" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "host_crypto" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/host_crypto" } } }
     }
   ],
   "$defs": {
+    "host_crypto": {
+      "type": "object",
+      "required": ["report"],
+      "additionalProperties": false,
+      "description": "report is the managed protocol's host crypto report, schemas/managed/v1/defs/host-crypto-report.json, byte for byte what a managed result would carry.",
+      "properties": {
+        "report": {
+          "type": "object",
+          "required": ["collected", "mode", "platform", "sections"],
+          "properties": {
+            "certificates": { "type": "array", "items": { "type": "object", "properties": { "certificate_pem": { "type": "string", "not": { "pattern": "PRIVATE KEY" } } } } }
+          }
+        }
+      }
+    },
     "run": {
       "type": "object",
       "required": ["command", "started_at"],

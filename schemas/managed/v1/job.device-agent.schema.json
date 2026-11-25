@@ -22,7 +22,7 @@
     "type": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$",
-      "description": "device_interrogation, device_discovery (capability device_discovery), host_inventory; anything else is refused."
+      "description": "device_interrogation, device_discovery (capability device_discovery), host_inventory, host_crypto (capability host_crypto_v1; parameters in defs/host-crypto-job.json); anything else is refused."
     },
     "asset_id": {
       "type": [
@@ -74,5 +74,17 @@
       ],
       "format": "date-time"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["type"],
+        "properties": { "type": { "const": "host_crypto" } }
+      },
+      "then": {
+        "required": ["parameters"],
+        "properties": { "parameters": { "$ref": "defs/host-crypto-job.json" } }
+      }
+    }
+  ]
 }
