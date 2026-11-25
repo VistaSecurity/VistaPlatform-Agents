@@ -160,20 +160,21 @@ function redact(s,   o) {
   while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) "` + RedactedMarker + `"; s = substr(s, RSTART + RLENGTH); NRED++ }
   return o s
 }
-function b64dec(s,   n, i, c, v, acc, bits, nb, pad) {
-  split("", DB); nb = 0; acc = 0; bits = 0; pad = 0
-  n = length(s)
-  if (n % 4) return -1
-  for (i = 1; i <= n; i++) {
-    c = substr(s, i, 1)
-    if (c == "=") { pad++; continue }
-    if (pad) return -1
-    v = index(B64, c) - 1
-    if (v < 0) return -1
-    acc = acc * 64 + v; bits += 6
-    if (bits >= 8) { bits -= 8; DB[nb++] = int(acc / POW2[bits]); acc = acc % POW2[bits] }
+function b64dec(f, e,   j, n, i, c, v, acc, bits, nb, pad, line, tot) {
+  split("", DB); nb = 0; acc = 0; bits = 0; pad = 0; tot = 0
+  for (j = f; j <= e; j++) {
+    line = PL[j]; n = length(line); tot += n
+    for (i = 1; i <= n; i++) {
+      c = substr(line, i, 1)
+      if (c == "=") { pad++; continue }
+      if (pad) return -1
+      v = index(B64, c) - 1
+      if (v < 0) return -1
+      acc = acc * 64 + v; bits += 6
+      if (bits >= 8) { bits -= 8; DB[nb++] = int(acc / POW2[bits]); acc = acc % POW2[bits] }
+    }
   }
-  if (pad > 2) return -1
+  if (tot % 4 || pad > 2) return -1
   return nb
 }
 function derend(p, e,   l, h, k, m) {
@@ -215,8 +216,8 @@ function derok(n,   p, k, t) {
   }
   return p == n
 }
-function certok(lab, b,   n) {
-  n = b64dec(b)
+function certok(lab, f, e,   n) {
+  n = b64dec(f, e)
   if (n < 0) return 0
   if (lab == "TRUSTED CERTIFICATE") { n = derfirst(n); if (n < 0) return 0 }
   return derok(n)
@@ -269,11 +270,12 @@ function lline(s,   t, tr, w, nm, hdr) {
     return
   }
   tr = t; sub(/[ \t]+$/, "", tr)
-  hdr = (OPTSEC || OPTANYSEC) && hdrlike(tr) && !index(s, "\r")
+  w = s; sub(/^[ \t\r\014\013]+/, "", w)
+  hdr = (OPTSEC || OPTANYSEC) && substr(w, 1, 1) == "["
   if (DROPSEC && !hdr) return
   if (index(s, "\r")) {
     BSC = 0; DROPC = 0; PREVK = 0; HAVEL = 1; LKEPT = 0; CONTN = 0
-    if ((OPTSEC || OPTANYSEC) && substr(tr, 1, 1) == "[") { DROPSEC = 1; return }
+    if (hdr) { DROPSEC = 1; return }
     if (tr != "" && substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
     else if ((nm = opentag(tr)) != "" && OPTTAGS) { DROPT = nm; DDEPTH = 1 }
     return
@@ -416,27 +418,26 @@ mode == "text" {
 }
 mode == "public" {
   if (isbegin(s)) {
+    if (INB) PLN = BSTART - 1
     INB = 0
     if (!parsebegin(s) || !(LAB in ALLOW)) { POISON = 1; next }
-    INB = 1; BOK = 1; BN = 0; BB[++BN] = s
+    INB = 1; BOK = 1; BLEN = 0; BSTART = PLN + 1; PL[++PLN] = s
     if (substr(s, 1, 5) == "-----") BE = "-----END " LAB "-----"; else BE = "---- END " LAB " ----"
     next
   }
   if (INB) {
     if (s == BE) {
       INB = 0
-      if (!BOK || !(LAB in CERTL) || substr(s, 1, 5) != "-----") next
-      b = ""
-      for (i = 2; i <= BN; i++) b = b BB[i]
-      if (!certok(LAB, b)) { NDROP++; next }
-      BB[++BN] = s; c = ""
-      for (i = 1; i <= BN; i++) c = c BB[i] "\n"
-      PUB[++NP] = c; PKIND[NP] = "C"; NCERT++
+      if (!BOK || !(LAB in CERTL) || substr(s, 1, 5) != "-----") { PLN = BSTART - 1; next }
+      if (BLEN > ` + strconv.Itoa(maxCertBody) + ` || !certok(LAB, BSTART + 1, PLN)) { NDROP++; PLN = BSTART - 1; next }
+      PL[++PLN] = s
+      PS[++NP] = BSTART; PE[NP] = PLN; PKIND[NP] = "C"; NCERT++
       next
     }
-    if (isend(s)) { INB = 0; next }
+    if (isend(s)) { INB = 0; PLN = BSTART - 1; next }
     if (!bodyline(s)) BOK = 0
-    BB[++BN] = s
+    BLEN += length(s)
+    if (BLEN <= ` + strconv.Itoa(maxCertBody) + `) PL[++PLN] = s
     next
   }
   k = sshkey(s)
@@ -475,7 +476,7 @@ END {
     for (i = 1; i <= NP; i++) {
       if (PKIND[i] == "S") { print PUB[i]; continue }
       fflush()
-      printf "%s", PUB[i] | OSSL
+      for (j = PS[i]; j <= PE[i]; j++) print PL[j] | OSSL
       if (close(OSSL) != 0) NDROP++
     }
     print "vista-refused:" (NDROP + 0) > "/dev/stderr"

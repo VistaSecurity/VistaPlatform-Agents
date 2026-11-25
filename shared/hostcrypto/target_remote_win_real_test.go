@@ -36,6 +36,43 @@ import (
 // That is PowerShell 7 on .NET, not Windows PowerShell 5.1 on .NET Framework:
 // it does not stand in for a Windows run.
 
+// fxFull reports HOSTCRYPTO_FULL=1: the per-file real-PowerShell tests then
+// run the whole corpus. By default they run a sample (each PowerShell call
+// costs about 1.5 s on Windows PowerShell 5.1, and the package must finish
+// inside go test's 10-minute default), while the batch tests run every rule
+// over the whole corpus in one PowerShell process either way.
+func fxFull() bool { return os.Getenv("HOSTCRYPTO_FULL") == "1" }
+
+// fxSample is names, or under the default run every k-th of them (k chosen
+// for about n) plus the named ones that exist, in order.
+func fxSample(t *testing.T, names []string, n int, always ...string) []string {
+	t.Helper()
+	keep := map[string]bool{}
+	for _, a := range always {
+		keep[a] = true
+	}
+	for _, name := range names {
+		delete(keep, name)
+	}
+	for a := range keep {
+		t.Fatalf("sample: %q is not in the corpus", a)
+	}
+	for _, a := range always {
+		keep[a] = true
+	}
+	if fxFull() || len(names) <= n {
+		return names
+	}
+	k := len(names) / n
+	var out []string
+	for i, name := range names {
+		if i%k == 0 || keep[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // fxPSRunner is the runner the real tests drive.
 func fxPSRunner(t *testing.T) hostinventory.Runner {
 	t.Helper()
@@ -222,11 +259,13 @@ psOut ([pscustomobject]@{ R = $bpOut.ToArray() })`
 // corpus, file by file, as the collector does.
 func TestRemoteWindowsRealReadText(t *testing.T) {
 	r := fxPSRunner(t)
-	gen := 30
-	if testing.Short() {
-		gen = 5
+	gen := 5
+	if fxFull() {
+		gen = 30
 	}
 	corpus := fxTextCorpus(t, gen)
+	names := fxSample(t, fxSorted(corpus), 16, "review3/lonecr.conf", "review3/krb5.conf", "review3/nginx_semi.conf",
+		"review3/nul.conf", "review3/props.properties", "review3/lines_200001.conf")
 	dir := t.TempDir()
 	fxWriteCorpus(t, dir, corpus)
 	fxSettle()
@@ -235,11 +274,14 @@ func TestRemoteWindowsRealReadText(t *testing.T) {
 	rt := NewRemoteWindowsTarget(r)
 	ctx := context.Background()
 	fails := 0
-	for i, name := range fxSorted(corpus) {
+	for i, name := range names {
 		b := corpus[name]
-		sets := []string{"realistic", "gen+statements", kn[i%len(kn)]}
+		sets := []string{kn[i%len(kn)]}
+		if fxFull() {
+			sets = []string{"realistic", "gen+statements", kn[i%len(kn)]}
+		}
 		if len(b) > 1<<20 {
-			sets = sets[:2]
+			sets = sets[:1]
 		}
 		for _, k := range sets {
 			start := time.Now()
@@ -303,7 +345,9 @@ func TestRemoteWindowsRealReadFile(t *testing.T) {
 	fxSettle()
 	rt := NewRemoteWindowsTarget(r)
 	ctx := context.Background()
-	for _, name := range fxSorted(corpus) {
+	names := fxSample(t, fxSorted(corpus), 14, "cert/certificate_just_under_the_body_bound", "cert/key_between_certificates",
+		"cert/envelope_certificate_EC_P-256_fourth_element_raw_under_CERTIFICATE", "cert/trusted_certificate", "ssh/options", "cert/bundle")
+	for _, name := range names {
 		b := corpus[name]
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		want, ok := publicContent(b)
@@ -400,9 +444,9 @@ func TestRemoteWindowsRealStatListIdentify(t *testing.T) {
 // read.
 func TestRemoteWindowsRealTornReads(t *testing.T) {
 	r := fxPSRunner(t)
-	cycles := 3
-	if testing.Short() {
-		cycles = 1
+	cycles := 1
+	if fxFull() {
+		cycles = 3
 	}
 	text := fxReview3Text()
 	a, b := text["race_a.conf"], text["race_b.conf"]
@@ -506,9 +550,9 @@ func TestRemoteWindowsRealPathForms(t *testing.T) {
 // of one handle that differ refuse the read.
 func TestRemoteWindowsRealTornReadsTimeReset(t *testing.T) {
 	r := fxPSRunner(t)
-	reads := 200
-	if testing.Short() {
-		reads = 40
+	reads := 60
+	if fxFull() {
+		reads = 200
 	}
 	text := fxReview3Text()
 	a, b := text["race_a.conf"], text["race_b.conf"]

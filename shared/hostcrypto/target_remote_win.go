@@ -211,6 +211,7 @@ $vU16PrivRx = [regex]::new('BEGIN[^\n]*PRIVATE|PRIVATE[^\n]*BEGIN', 'IgnoreCase,
 $vTokRx = [regex]::new('` + psStatementToken + `')
 $vStop = [char[]]@([char]32, [char]9, [char]61, [char]58, [char]59, [char]123, [char]125)
 $vBlanks = [char[]]@([char]32, [char]9)
+$vWhite = [char[]]@([char]32, [char]9, [char]13, [char]12, [char]11)
 function psErr($peX) {
   while ($peX -is [System.Management.Automation.MethodInvocationException] -and $peX.InnerException) { $peX = $peX.InnerException }
   if ($peX -is [System.Management.Automation.ItemNotFoundException] -or $peX -is [System.IO.FileNotFoundException] -or $peX -is [System.IO.DirectoryNotFoundException]) { return 'not_found' }
@@ -370,21 +371,22 @@ function vPublic([byte[]]$pcB, [int]$pcN) {
       $pcIn = $false
       $pcLab = vParse $pcS
       if ($null -eq $pcLab -or -not $vAllowSet.Contains($pcLab)) { return $null }
-      $pcIn = $true; $pcOk = $true; $pcBlock.Clear(); $pcBlock.Add($pcS)
+      $pcIn = $true; $pcOk = $true; $pcBlock.Clear(); $pcBlock.Add($pcS); $pcLen = 0
       if ($pcS.StartsWith('-----', [StringComparison]::Ordinal)) { $pcEnd = '-----END ' + $pcLab + '-----' } else { $pcEnd = '---- END ' + $pcLab + ' ----' }
       continue
     }
     if ($pcIn) {
       if ([string]::Equals($pcS, $pcEnd, [StringComparison]::Ordinal)) {
         $pcIn = $false
-        if (-not $pcOk -or -not $vCertSet.Contains($pcLab) -or -not $pcS.StartsWith('-----', [StringComparison]::Ordinal)) { continue }
+        if (-not $pcOk -or -not $vCertSet.Contains($pcLab) -or -not $pcS.StartsWith('-----', [StringComparison]::Ordinal) -or $pcLen -gt ` + strconv.Itoa(maxCertBody) + `) { continue }
         $pcPem = vCert $pcLab ([string]::Join('', $pcBlock.ToArray(), 1, $pcBlock.Count - 1))
         if ($pcPem.Length -gt 0) { [void]$pcOut.Append($pcPem); $pcAny = $true }
         continue
       }
       if ($pcS.Contains('----END') -or $pcS.Contains('---- END')) { $pcIn = $false; continue }
       if ($pcS.Length -lt 1 -or $pcS.Length -gt ` + strconv.Itoa(maxPEMBodyLine) + ` -or -not $vBodyRx.IsMatch($pcS)) { $pcOk = $false }
-      $pcBlock.Add($pcS)
+      $pcLen += $pcS.Length
+      if ($pcLen -le ` + strconv.Itoa(maxCertBody) + `) { $pcBlock.Add($pcS) }
       continue
     }
     if ($pcS.Contains('ssh-') -or $pcS.Contains('ecdsa-')) {
@@ -574,11 +576,11 @@ function vFilter([byte[]]$fB, [int]$fN, [string[]]$fKeep) {
     }
     $fTr = $fT.TrimEnd($vBlanks)
     $fHasCR = ($fS.IndexOf([char]13) -ge 0)
-    $fHdr = ($fWithSec -and -not $fHasCR -and $fTr.Length -ge 2 -and $fTr[0] -ceq [char]91 -and $fTr[$fTr.Length - 1] -ceq [char]93)
+    $fHdr = ($fWithSec -and $fS.TrimStart($vWhite).StartsWith('[', [StringComparison]::Ordinal))
     if ($fDropSec -and -not $fHdr) { continue }
     if ($fHasCR) {
       $fBsc = $false; $fDropC = $false; $fPrevK = $false; $fHaveL = $true; $fLKept = $false; $fContN = 0
-      if ($fWithSec -and $fTr.StartsWith('[', [StringComparison]::Ordinal)) { $fDropSec = $true; continue }
+      if ($fHdr) { $fDropSec = $true; continue }
       if ($fTr.Length -gt 0 -and $fTr[$fTr.Length - 1] -ceq [char]123) { $fDropB = $true; $fDepth = 1 }
       elseif ($fTags) {
         $fOm = $vOpenRx.Match($fTr)

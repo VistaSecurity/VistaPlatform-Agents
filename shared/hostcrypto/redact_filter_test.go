@@ -111,6 +111,10 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"no headers or tags without an option", "[Interface]\n\n  \n};\n</VirtualHost>\n}\nPrivateKey = x\n", []string{"address", "interface", "virtualhost"}, "\n  \n};\n}\n", 0, true},
 		{"reviewer: @sections crosses only listed names", "a = 0\n[libdefaults]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[pass:word/x]\na = S3cr3t2\n[realms]\na = S3cr3t3\n[ LibDefaults ]\na = 2\n",
 			[]string{"a", "libdefaults", sec}, "a = 0\n[libdefaults]\na = 1\n[ LibDefaults ]\na = 2\n", 0, true},
+		{"sixth review: a CR before [ is still a header to krb5", "[libdefaults]\ndefault_tkt_enctypes = aes256\n\r[realms]\npermitted_enctypes = hunter2\n",
+			ConfigKeepWords("krb5"), "[libdefaults]\ndefault_tkt_enctypes = aes256\n", 0, true},
+		{"FF, VT and blanks before [ make a header", "[libdefaults]\na = 1\n\f[realms]\na = S1\n[libdefaults]\na = 2\n\v[x]\na = S2\n[libdefaults]\n \t[realms]\na = S3\n \t[libdefaults] \na = 3\n",
+			[]string{"a", "libdefaults", sec}, "[libdefaults]\na = 1\n[libdefaults]\na = 2\n[libdefaults]\n \t[libdefaults] \na = 3\n", 0, true},
 		{"reviewer: a [ line dropped for a lone CR drops its section", "[libdefaults]\na = 1\n[x\r]\na = S3cr3t\n[libdefaults]\na = 2\n", []string{"a", "libdefaults", sec}, "[libdefaults]\na = 1\n[libdefaults]\na = 2\n", 0, true},
 		{"@anysections crosses any name of the shape", "[ ssl_sect ]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[S3cr3t-section!]\na = S3cr3t2\n[ \"S3cr3t\", \"tok\" ]\na = S3\n[x.y-z_1]\na = 2\n[" + strings.Repeat("a", 65) + "]\na = S4\n",
 			[]string{"a", anysec}, "[ ssl_sect ]\na = 1\n[x.y-z_1]\na = 2\n", 0, true},
@@ -421,6 +425,11 @@ func fxCertCases(t *testing.T) map[string]fxCertCase {
 			}
 		}
 	}
+	// The body bound: a real certificate just under it crosses, one just
+	// over it does not.
+	under, over := fxBoundCerts(t)
+	cases["certificate just under the body bound"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: under}), want: []byte(certificatePEM(under))}
+	cases["certificate just over the body bound"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: over})}
 	// Public blocks that are not certificates do not cross.
 	for _, n := range []string{"SPKI RSA 2048", "RSA PUBLIC KEY 2048", "DH PARAMETERS 256", "CSR RSA", "CRL"} {
 		label := map[string]string{"SPKI RSA 2048": "PUBLIC KEY", "RSA PUBLIC KEY 2048": "RSA PUBLIC KEY", "DH PARAMETERS 256": "DH PARAMETERS", "CSR RSA": "CERTIFICATE REQUEST", "CRL": "X509 CRL"}[n]
@@ -826,7 +835,8 @@ func fxGenerated(n int) [][]byte {
 		"\xe9\xff", "=", ":", "ssl_ciphers", "\\", "\"", "'", "{x}", "<", ">", "</", "kept", "KEPT=1", "secret", "if ($a) {", "} else {",
 		"ssl_ciphers \"a\nb\";", "\xef\xbb\xbf", "[ok]", "  [ok]  ", "<IfModule x>", "</IfModule>",
 		"\\;", "\\}", "\\{", "\\\\", "x\\\r", "[libdefaults]", "[ libdefaults ]", "[hunter2 STRUCT]", "[pass:word/x]", "[ ssl_sect ]",
-		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {", "${x;}", "${a b}", "$${y}", "\\${z}", "${ok_1}"}
+		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {", "${x;}", "${a b}", "$${y}", "\\${z}", "${ok_1}",
+		"\f[libdefaults]", "\v[x]", "\r[realms]", " \f [ ssl_sect ]"}
 	seps := []string{" ", "", "\t", ";", "{", "}", " # ", "\"", "\\"}
 	ends := []string{"\n", "\n", "\n", "\n", "\r\n", "\r", "\r\r\n", "\\\n", "\\\\\n"}
 	rnd := mrand.New(mrand.NewPCG(2026, 11))
@@ -1035,6 +1045,66 @@ func TestReadTextLongLinesAnswerQuickly(t *testing.T) {
 		t.Logf("%s: %s", impl, d)
 		if _, _, err := rt.ReadText(context.Background(), filepath.Join(dir, "over.conf"), keep); !errors.Is(err, ErrFileTooLarge) {
 			t.Errorf("%s: a line past the bound: %v", impl, err)
+		}
+	}
+}
+
+var (
+	fxBoundOnce        sync.Once
+	fxUnder, fxOverDER []byte
+)
+
+// fxBoundCerts are two real certificates (an Ed25519 key, many DNS names)
+// whose base64 bodies fall within 4 KiB under and over maxCertBody.
+func fxBoundCerts(t *testing.T) (under, over []byte) {
+	t.Helper()
+	fxBoundOnce.Do(func() {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		bodyLen := func(der []byte) int { return base64.StdEncoding.EncodedLen(len(der)) }
+		for n := 4000; n < 6000 && (fxUnder == nil || fxOverDER == nil); n += 20 {
+			der := fxSelfSigned(t, priv, pub, n)
+			switch l := bodyLen(der); {
+			case l <= maxCertBody && l > maxCertBody-4096:
+				fxUnder = der
+			case l > maxCertBody && l <= maxCertBody+4096 && fxOverDER == nil:
+				fxOverDER = der
+			}
+		}
+	})
+	if fxUnder == nil || fxOverDER == nil {
+		t.Fatal("could not build certificates at the body bound")
+	}
+	return fxUnder, fxOverDER
+}
+
+// TestReadFileHugeCertificateBlockAnswersQuickly is the sixth review's 7 MB
+// block (a real certificate with a 5 MiB OCTET STRING as a fourth element,
+// under CERTIFICATE), which kept busybox and macOS awk past the 90-second
+// command timeout: the body bound refuses it before any join or decode.
+func TestReadFileHugeCertificateBlockAnswersQuickly(t *testing.T) {
+	if !tgtRealToolsAvailable() {
+		t.Skip("POSIX tools not available")
+	}
+	_, public := fxDenyObjects(t)
+	cert := public["certificate EC P-256"]
+	in := cryptobyte.String(cert)
+	var outer cryptobyte.String
+	in.ReadASN1(&outer, cbasn1.SEQUENCE)
+	huge := fxTLV(0x30, bytes.Join([][]byte{outer, fxTLV(0x04, make([]byte, 5<<20), 0, false)}, nil), 0, false)
+	dir := t.TempDir()
+	tgtWrite(t, dir, "huge.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: huge}), 0o644)
+	fxSettle()
+	for impl, runner := range tgtAwks(t) {
+		rt := NewRemoteUnixTarget(runner, runtime.GOOS)
+		start := time.Now()
+		out, err := rt.ReadFile(context.Background(), filepath.Join(dir, "huge.pem"))
+		d := time.Since(start)
+		t.Logf("%s: %s", impl, d)
+		if !errors.Is(err, ErrNotPublic) || len(out) != 0 {
+			t.Errorf("%s: %v, %d bytes", impl, err, len(out))
+		}
+		if d > 2*time.Second {
+			t.Errorf("%s: took %s", impl, d)
 		}
 	}
 }

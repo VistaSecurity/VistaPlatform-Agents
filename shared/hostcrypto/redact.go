@@ -381,6 +381,12 @@ func sshKeyLine(s string) (string, bool) {
 // crosses.
 var certificateLabels = []string{"CERTIFICATE", "X509 CERTIFICATE", "TRUSTED CERTIFICATE"}
 
+// maxCertBody bounds the base64 body of one certificate block (line ends
+// not counted). A real certificate is far under 64 KiB of DER; a longer body
+// is refused before it is joined or decoded, the same on every host, so a
+// 7 MB block cannot keep a host's awk busy past the command timeout.
+const maxCertBody = 128 << 10
+
 func isCertificateLabel(l string) bool {
 	for _, c := range certificateLabels {
 		if l == c {
@@ -555,6 +561,7 @@ func publicContentCount(b []byte) ([]byte, int, bool) {
 	}
 	var out strings.Builder
 	var body []string
+	bodyLen := 0
 	inBlock, blockOK := false, false
 	var endLine, label string
 	refused := 0
@@ -565,7 +572,7 @@ func publicContentCount(b []byte) ([]byte, int, bool) {
 			if !ok || !isPublicLabel(l) {
 				return nil, 0, false
 			}
-			inBlock, blockOK, body, label = true, true, nil, l
+			inBlock, blockOK, body, label, bodyLen = true, true, nil, l, 0
 			if strings.HasPrefix(s, "-----") {
 				endLine = "-----END " + l + "-----"
 			} else {
@@ -577,6 +584,10 @@ func publicContentCount(b []byte) ([]byte, int, bool) {
 			if s == endLine {
 				inBlock = false
 				if !blockOK || !isCertificateLabel(label) || !strings.HasPrefix(endLine, "-----") {
+					continue
+				}
+				if bodyLen > maxCertBody {
+					refused++
 					continue
 				}
 				if der, ok := certificateDER(label, body); ok {
@@ -593,7 +604,10 @@ func publicContentCount(b []byte) ([]byte, int, bool) {
 			if !isPEMBodyLine(s) {
 				blockOK = false
 			}
-			body = append(body, s)
+			bodyLen += len(s)
+			if bodyLen <= maxCertBody {
+				body = append(body, s)
+			}
 			continue
 		}
 		if k, ok := sshKeyLine(s); ok {
@@ -828,12 +842,6 @@ func sectionName(tr string) (string, bool) {
 	return asciiLower(name), true
 }
 
-// isHeaderLike is a trimmed line that a section syntax would read as a
-// header: "[" ... "]".
-func isHeaderLike(tr string) bool {
-	return len(tr) >= 2 && tr[0] == '[' && tr[len(tr)-1] == ']'
-}
-
 func isASCIIAlnum(c byte) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
 }
@@ -907,9 +915,11 @@ func openingTag(tr string) (string, bool) {
 //     (blank and comment lines between do not count); with @sections a
 //     header "[name]" (name [A-Za-z0-9_.-]{1,64}, blanks around it) whose
 //     name is in keep, with @anysections any such header; with @tags a
-//     closing tag "</Name>" whose Name is in keep. A header-like line ("["
-//     ... "]") under a section option that does not cross drops its whole
-//     section, to the next header that does. Any other line is KEPT when
+//     closing tag "</Name>" whose Name is in keep. Under a section option a
+//     line whose first non-blank byte (space, tab, CR, FF and VT counted as
+//     blanks, as krb5's profile parser does) is "[" is a header to section
+//     tracking; one that is not a clean listed header drops its whole
+//     section, to the next header that crosses. Any other line is KEPT when
 //     its first word (firstWord) is in keep, else DROPPED. A dropped line
 //     that ends in "{" drops everything to its matching "}" (a line starting
 //     with "}" closes one level, one ending in "{" opens one, comment lines
@@ -1037,7 +1047,11 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			continue
 		}
 		tr := strings.TrimRight(t, " \t")
-		header := withSections && isHeaderLike(tr) && !strings.Contains(s, "\r")
+		// krb5's profile parser skips any white space before "[": a line
+		// whose first non-blank byte, CR, FF and VT counted as blanks, is "["
+		// is a header to section tracking, and one that is not a clean
+		// listed header drops its section.
+		header := withSections && strings.HasPrefix(strings.TrimLeft(s, " \t\r\f\v"), "[")
 		if dropSection && !header {
 			continue
 		}
@@ -1046,7 +1060,7 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			// starts none; it is a dropped logical line.
 			bsCont, dropCont, prevKept = false, false, false
 			haveLogical, logicalKept, contN = true, false, 0
-			if withSections && strings.HasPrefix(tr, "[") {
+			if header {
 				dropSection = true // an unlisted header: drop its section
 				continue
 			}
