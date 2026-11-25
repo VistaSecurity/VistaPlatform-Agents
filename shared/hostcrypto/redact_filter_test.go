@@ -726,6 +726,12 @@ func fxTextCorpus(t *testing.T, generated int) map[string][]byte {
 	for i, v := range fxGenerated(generated) {
 		out[fmt.Sprintf("gen/%03d", i)] = v
 	}
+	var sp, eq strings.Builder
+	for _, r := range fxPathRuns() {
+		sp.WriteString("kept " + r + "\n")
+		eq.WriteString("kept=" + r + "\n")
+	}
+	out["paths/space"], out["paths/equals"] = []byte(sp.String()), []byte(eq.String())
 	return out
 }
 
@@ -837,6 +843,7 @@ func fxGenerated(n int) [][]byte {
 		"\\;", "\\}", "\\{", "\\\\", "x\\\r", "[libdefaults]", "[ libdefaults ]", "[hunter2 STRUCT]", "[pass:word/x]", "[ ssl_sect ]",
 		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {", "${x;}", "${a b}", "$${y}", "\\${z}", "${ok_1}",
 		"\f[libdefaults]", "\v[x]", "\r[realms]", " \f [ ssl_sect ]"}
+	frags = append(frags, fxPathRuns()...)
 	seps := []string{" ", "", "\t", ";", "{", "}", " # ", "\"", "\\"}
 	ends := []string{"\n", "\n", "\n", "\n", "\r\n", "\r", "\r\r\n", "\\\n", "\\\\\n"}
 	rnd := mrand.New(mrand.NewPCG(2026, 11))

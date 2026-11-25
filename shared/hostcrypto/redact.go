@@ -81,8 +81,16 @@ func hasLongRun(s string) bool {
 	return false
 }
 
+// maxPathSegment is the longest segment between two slashes that a
+// path-shaped part may have and stay exempt from redaction.
+const maxPathSegment = RedactRunLength - 1
+
 // redactRuns replaces every maximal run of RedactRunLength or more
-// redactClass bytes with RedactedMarker and counts them.
+// redactClass bytes with RedactedMarker and counts them, except the
+// path-shaped parts of a run (judgeRun), so a kept file reference such as
+// "-Djavax.net.ssl.trustStore=/etc/elasticsearch/certs/truststore.jks"
+// survives: "/" and "=" are base64 bytes, and a long dotless path is one
+// run.
 func redactRuns(s string) (string, int) {
 	if !hasLongRun(s) {
 		return s, 0
@@ -100,14 +108,72 @@ func redactRuns(s string) (string, int) {
 			j++
 		}
 		if j-i >= RedactRunLength {
-			b.WriteString(RedactedMarker)
-			n++
+			n += judgeRun(&b, s[i:j])
 		} else {
 			b.WriteString(s[i:j])
 		}
 		i = j
 	}
 	return b.String(), n
+}
+
+// judgeRun writes run, a maximal run of RedactRunLength or more base64
+// bytes, with its path-shaped parts kept and every other part judged as a
+// run of its own (redacted when it is RedactRunLength or longer), and
+// returns how many parts it redacted.
+//
+// A path-shaped part starts at a "/" that is at the start of the run (or of
+// the remainder after an earlier path-shaped part) or directly after "=",
+// and runs while each "/" is followed by a segment of 1 to 39 bytes up to
+// the next "/" or the end of the run; it is exempt only if it holds at least
+// two such slash-and-segment units. What comes before it (an "=" and the
+// name before that) and what is left after it (from the "/" whose segment
+// broke the rule) are judged on their own.
+//
+// What this lets through: a secret crosses, whole or in part, only if it is
+// base64 (hex has no "/"), begins with "/" right at the start of its value,
+// and has another "/" within its next 39 characters (and every 39 after
+// that for more of it to cross), on a line whose first word a parser's
+// allowlist names. For a random 32-byte key (44 base64 characters) that is
+// a "/" first (1 in 64) and another within the next 39 characters
+// (1 - (63/64)^39, about 0.46): about 0.7 per cent of such keys. A secret
+// that does not begin with "/" at the start of its value never escapes.
+func judgeRun(b *strings.Builder, run string) int {
+	n := 0
+	plain := 0
+	plainOut := func(end int) {
+		if end-plain >= RedactRunLength {
+			b.WriteString(RedactedMarker)
+			n++
+		} else {
+			b.WriteString(run[plain:end])
+		}
+	}
+	for i := 0; i < len(run); {
+		if run[i] == '/' && (i == plain || run[i-1] == '=') {
+			k, units := i, 0
+			for k < len(run) && run[k] == '/' {
+				j := k + 1
+				for j < len(run) && run[j] != '/' {
+					j++
+				}
+				if seg := j - k - 1; seg < 1 || seg > maxPathSegment {
+					break
+				}
+				k = j
+				units++
+			}
+			if units >= 2 {
+				plainOut(i)
+				b.WriteString(run[i:k])
+				plain, i = k, k
+				continue
+			}
+		}
+		i++
+	}
+	plainOut(len(run))
+	return n
 }
 
 func isBeginLine(s string) bool {
@@ -949,7 +1015,9 @@ func openingTag(tr string) (string, bool) {
 //     closer as "}".
 //  5. Of what is kept, every PEM block is dropped and every run of
 //     [RedactRunLength] or more [A-Za-z0-9+/=] is replaced by
-//     [RedactedMarker]; each counts one redaction. Every returned line ends
+//     [RedactedMarker], except its path-shaped parts (judgeRun: "/a/b/..."
+//     with every segment 1 to 39 bytes, at the start of the run or after
+//     "="); each counts one redaction. Every returned line ends
 //     in "\n".
 //
 // What this does NOT do, stated plainly: a KEPT line's value crosses as

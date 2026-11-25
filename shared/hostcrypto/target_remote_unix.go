@@ -157,8 +157,30 @@ function sshkey(s,   r, t, b, n, i, c, q) {
 }
 function redact(s,   o) {
   o = ""
-  while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) "` + RedactedMarker + `"; s = substr(s, RSTART + RLENGTH); NRED++ }
+  while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) judge(substr(s, RSTART, RLENGTH)); s = substr(s, RSTART + RLENGTH) }
   return o s
+}
+function plainpart(r, f, e) {
+  if (e - f >= ` + strconv.Itoa(RedactRunLength) + `) { NRED++; return "` + RedactedMarker + `" }
+  return substr(r, f + 1, e - f)
+}
+function judge(r,   n, o, p, i, k, u, j, sg) {
+  n = length(r); o = ""; p = 0; i = 0
+  while (i < n) {
+    if (substr(r, i + 1, 1) == "/" && (i == p || substr(r, i, 1) == "=")) {
+      k = i; u = 0
+      while (k < n && substr(r, k + 1, 1) == "/") {
+        j = k + 1
+        while (j < n && substr(r, j + 1, 1) != "/") j++
+        sg = j - k - 1
+        if (sg < 1 || sg > ` + strconv.Itoa(maxPathSegment) + `) break
+        k = j; u++
+      }
+      if (u >= 2) { o = o plainpart(r, p, i) substr(r, i + 1, k - i); p = k; i = k; continue }
+    }
+    i++
+  }
+  return o plainpart(r, p, n)
 }
 function b64dec(f, e,   j, n, i, c, v, acc, bits, nb, pad, line, tot) {
   split("", DB); nb = 0; acc = 0; bits = 0; pad = 0; tot = 0
@@ -876,14 +898,18 @@ func keepArg(keep []string) (string, error) {
 // checkFiltered is the backstop for a host's filtering. It cannot re-derive
 // which lines the host kept (a continuation line is kept for its
 // predecessor's sake), so it checks the properties that matter: no NUL or
-// 0x01, no PEM BEGIN line, no run of RedactRunLength base64 characters, no
+// 0x01, no PEM BEGIN line, no line the redaction rule would still change
+// (a run of RedactRunLength base64 characters that is not path-shaped), no
 // more lines than the bound. Anything else is cleared and refused.
 func checkFiltered(path string, out []byte, n int) ([]byte, int, error) {
 	bad := bytes.IndexByte(out, 0) >= 0 || bytes.IndexByte(out, 1) >= 0
 	lines := 0
 	for _, s := range configLines(out) {
 		lines++
-		if isBeginLine(s) || hasLongRun(s) {
+		if isBeginLine(s) {
+			bad = true
+		}
+		if red, _ := redactRuns(s); red != s {
 			bad = true
 		}
 	}
