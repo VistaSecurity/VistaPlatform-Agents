@@ -147,7 +147,7 @@ MinProtocol = SSLv3
 
 func TestOpenSSLRHELBackendFragment(t *testing.T) {
 	// RHEL's generated back-ends/opensslcnf.config has no sections at all.
-	cfgs := ParseCryptoPolicyBackend("/etc/crypto-policies/back-ends/opensslcnf.config", []byte(`CipherString = @SECLEVEL=2:kEECDH:kRSA:kEDH:-aDSS:-3DES:!DES:!RC4:!RC2:!IDEA:-SEED:!eNULL:!aNULL:!MD5:-SHA384:-CAMELLIA:-ARIA:-AESCCM8
+	cfgs := keepCPBackend("/etc/crypto-policies/back-ends/opensslcnf.config", []byte(`CipherString = @SECLEVEL=2:kEECDH:kRSA:kEDH:-aDSS:-3DES:!DES:!RC4:!RC2:!IDEA:-SEED:!eNULL:!aNULL:!MD5:-SHA384:-CAMELLIA:-ARIA:-AESCCM8
 Ciphersuites = TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
 TLS.MinProtocol = TLSv1.2
 TLS.MaxProtocol = TLSv1.3

@@ -15,9 +15,10 @@ import (
 // The parsers take bytes and nothing else, exactly as host inventory's do.
 // What differs between the modes is which bytes the collector may ask for.
 // On a remote target [Target.ReadFile] does not return a file: it returns the
-// public PEM blocks in it (or its SSH public key lines) and nothing around
-// them, decided and printed on the host from one read of the file. A file
-// with no such content is refused with ErrNotPublic. Configuration is read
+// certificates in it, each re-encoded by a certificate parser on the host
+// (openssl, or .NET on Windows), and its SSH public key lines, and nothing
+// around them, decided and printed on the host from one read of the file. A
+// file with no such content is refused with ErrNotPublic. Configuration is read
 // through [Target.ReadText], which narrows on the host to the lines a parser
 // asked for.
 type Target interface {
@@ -45,25 +46,35 @@ type Target interface {
 	// [MagicBytes] bytes from the start of the file and the label lines.
 	Identify(ctx context.Context, path string) (Identity, error)
 
-	// ReadText returns the lines of a configuration file that a parser has
+	// ReadText returns the parts of a configuration file that a parser has
 	// asked for, and nothing else. It is the only way configuration text is
 	// read, in both modes, and the narrowing happens ON THE HOST before any
-	// byte leaves it:
+	// byte leaves it ([FilterConfigText] is the rule, word for word):
 	//
-	//   1. A line is kept only when its first word is in keep (compared
-	//      without regard to case), or it is structure (a section header, a
-	//      brace, an opening or closing tag), or it continues a kept line.
-	//      Every other line is dropped. keep is the directive allowlist of
-	//      the parser that will read the result ([ConfigKeepWords]), so a
-	//      line such as "password = ..." never crosses, whatever its length
-	//      or alphabet.
-	//   2. Of what is kept, every PEM block is dropped and every run of
+	//   1. keep holds the parser's directive names ([ConfigKeepWords]) and
+	//      its syntax OPTIONS, entries beginning with "@": "@statements"
+	//      (brace-and-semicolon syntax read as statements), "@backslash"
+	//      (a kept line ending in an odd number of backslashes continues),
+	//      "@indent" (a line beginning with a blank continues the previous
+	//      one) and "@cr" (a lone carriage return ends a line), and the structure it
+	//      has: "@sections" and "@anysections" ("[name]" headers) and "@tags"
+	//      (closing tags). There is no continuation without an option, and a
+	//      line holding a lone carriage return is dropped whole.
+	//   2. A line (or statement) is kept only when its first word is in keep
+	//      (compared without regard to ASCII case), when it is strict
+	//      structure (a section header, a lone brace, a closing tag), or
+	//      when it continues a kept line under an option. Every other line
+	//      is dropped, and a dropped block opener drops its whole block, so
+	//      a line such as "password = ..." never crosses, whatever its
+	//      length or alphabet.
+	//   3. Of what is kept, every PEM block is dropped and every run of
 	//      [RedactRunLength] or more base64 or hexadecimal characters is
 	//      replaced by [RedactedMarker]. redactions counts those.
 	//
-	// An empty keep is refused with ErrNotPublic, and so is a file that is
-	// not text. Local and remote targets apply the SAME rules through
-	// [FilterConfigText], so a parser sees the same bytes in both modes.
+	// A keep with no directive name, or with an unknown option, is refused
+	// with ErrNotPublic, and so is a file that is not text. Local and remote
+	// targets apply the SAME rule, so a parser sees the same bytes in both
+	// modes.
 	ReadText(ctx context.Context, path string, keep []string) (text []byte, redactions int, err error)
 }
 
@@ -173,17 +184,24 @@ type Identity struct {
 	KeystoreType string
 }
 
-// Public reports whether a file of this identity holds nothing private, so
-// its bytes may cross a remote connection whole: a certificate, a public key,
-// a request, a revocation list or parameters. A file holding a private key in
-// any form is not public, and neither is a keystore, a PGP keyring, anything
-// unidentified, or plain text. Text is not public because a secret needs no
-// marker: a WireGuard key, a kubeconfig and a Tor service key are all
-// printable. A configuration file is read with [Target.ReadText] instead.
+// Public reports whether a file of this identity may be read over a remote
+// connection with [Target.ReadFile]: a certificate file, or an OpenSSH
+// public key file (key lines, no PEM label). Even then what crosses is not
+// the file: each certificate crosses only as a host parser's re-encoding of
+// it, and each key line as "type blob". A public key, request, revocation
+// list or parameters file is harmless but not readable remotely (no record
+// of the Report needs it from a remote host); a private key in any form, a
+// keystore, a PGP keyring, anything unidentified, and plain text are not
+// public at all. Text is not public because a secret needs no marker: a
+// WireGuard key, a kubeconfig and a Tor service key are all printable. A
+// configuration file is read with [Target.ReadText] instead. A local target
+// reads every file whole and does not consult Public.
 func (i Identity) Public() bool {
 	switch i.Class {
-	case ClassCertificate, ClassPublicKey, ClassCSR, ClassCRL, ClassDHParams:
+	case ClassCertificate:
 		return true
+	case ClassPublicKey:
+		return len(i.PEMLabels) == 0
 	default:
 		return false
 	}

@@ -37,6 +37,12 @@ var cfgJavaSettingProps = []string{
 	"fips.keystore.type",
 }
 
+// The numbered provider families: a prefix followed by 1 to 3 digits.
+const (
+	cfgJavaProviderPrefix     = "security.provider."
+	cfgJavaFIPSProviderPrefix = "fips.provider."
+)
+
 // cfgNumbered reports whether name is prefix followed by 1 to 3 digits and
 // nothing else: the strict anchored form of a numbered family
 // ("security.provider.12").
@@ -200,10 +206,10 @@ func cfgParseJava(b []byte, include IncludeResolver) []CryptoConfig {
 	}
 	var provs, fipsProvs []prov
 	for k, v := range props {
-		if n, ok := cfgNumbered(k, "security.provider."); ok {
+		if n, ok := cfgNumbered(k, cfgJavaProviderPrefix); ok {
 			provs = append(provs, prov{n, v})
 		}
-		if n, ok := cfgNumbered(k, "fips.provider."); ok {
+		if n, ok := cfgNumbered(k, cfgJavaFIPSProviderPrefix); ok {
 			fipsProvs = append(fipsProvs, prov{n, v})
 		}
 	}

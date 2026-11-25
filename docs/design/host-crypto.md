@@ -39,31 +39,101 @@ Everything is in `shared/hostcrypto`, pure Go, no CGO.
 |---|---|
 | `report.go` | The record: `Report` and every type in it. **The contract**; change it only with the managing reviewer's agreement. |
 | `target.go` | `Target`: how the collector reaches a host, and `Identity`: what a file is from its markers. |
-| `target_local.go`, `target_remote_unix.go`, `target_remote_windows.go` | The three targets. |
+| `target_local.go`, `target_remote_unix.go`, `target_remote_win.go` | The three targets. (`target_remote_win.go`, not `_windows.go`: a `_windows` suffix is a build constraint, and a Linux agent collects Windows hosts.) |
+| `redact.go` | The text rules every target applies: what a remote `ReadFile` returns (`publicContent`) and what `ReadText` returns (`FilterConfigText`). The remote targets carry the same rules as an awk program and as PowerShell, held byte for byte to the Go by parity tests that run the real tools. |
+| `config_keep.go` | Each configuration parser's keep list: the directive names it reads and its syntax options. |
 | `identify.go` | Magic numbers and PEM labels to a `Class`. |
 | `parse_*.go` | Parsers. Bytes in, record types out. No I/O, no `runtime.GOOS`. |
 | `config_*.go` | One configuration parser per product. Bytes in, `CryptoConfig` out. |
 | `collect.go`, `pass_*.go` | The four passes and the bounds. |
-| `os_linux.go`, `os_darwin.go`, `os_windows.go` | Where each platform keeps things, and its platform stores and protection. These are tables and command parsers, **not** build-tagged files: a Linux agent must be able to collect a Windows host remotely. |
+| `oslinux.go`, `osdarwin.go`, `oswindows.go` | Where each platform keeps things, and its platform stores and protection. These are tables and command parsers, **not** build-tagged files: a Linux agent must be able to collect a Windows host remotely, so the names carry no `_linux`, `_darwin` or `_windows` suffix (Go reads one as a build constraint). |
 | `observations.go` | The report as the managed protocol's observation. |
 
 ### Target
 
 `Target` is host inventory's `Runner` (run a command, read a file) plus
-`Local`, `Stat`, `List` and `Identify`.
+`Local`, `Stat`, `List`, `Identify` and `ReadText`.
 
 - The **local** target uses the Go standard library directly: `os`,
   `filepath.WalkDir`, and per-platform permission reads.
-- The **remote Unix** target runs `find`, `stat`, `head -c 8 | od` and
-  `grep -a -o` for PEM labels over the SSH runner.
-- The **remote Windows** target runs PowerShell over the SSH runner, as host
-  inventory does.
+- The **remote Unix** target runs fixed `sh -c` scripts over the SSH runner
+  (`find`, `stat`, `head`, `tr`, an awk program, `openssl x509`); a path is
+  always a positional argument, never script text.
+- The **remote Windows** target runs PowerShell over the SSH runner, the
+  script on stdin and its arguments as base64 JSON; every absolute path is
+  sent in the `\\?\` form, so a name such as `nul.conf`, `COM1.conf` or one
+  ending in a dot or a space is the file, not a device or a rewritten name,
+  and a path past 260 characters is reachable.
 
-A remote target's `ReadFile` first identifies the path and returns
-`ErrNotPublic` unless `Identity.Public()`. That refusal is the single place
-the "no private key byte crosses the connection" rule is enforced, and a test
-drives every collector against a recording fake target and fails if a
-non-public path was read.
+**What crosses a remote connection.** Two calls return content, and each
+decides on the host, from ONE read of the file, before anything is printed:
+
+- `ReadFile` returns only **certificates** and **SSH public key lines**. A
+  block labelled `CERTIFICATE`, `X509 CERTIFICATE` or `TRUSTED CERTIFICATE`
+  is given, alone, to a certificate parser on the host (`openssl x509
+  -outform PEM` on Unix; on Windows `X509Certificate2.GetCertContentType`
+  must say `Cert` before anything is constructed, then `RawData`), and what
+  crosses is the parser's re-encoding of the certificate, never the file's
+  bytes. Before any parser sees it, the block must pass a strict DER
+  envelope check, the same on every host and again in Go: one SEQUENCE with
+  a definite, minimal length equal to the rest of the block, holding exactly
+  the TBS SEQUENCE, the algorithm SEQUENCE and the signature BIT STRING, each
+  with a minimal definite length, and nothing after them (a TRUSTED
+  CERTIFICATE's trust settings are cut off first). .NET hands back its input
+  as `RawData` and Go's parser takes the outer element as the certificate,
+  so without the envelope check a key appended inside the SEQUENCE would
+  cross. A block the check or the parser refuses is dropped. No pattern over a block's
+  bytes can tell a certificate from a private key written under a
+  certificate's label; a parser can. Public keys, requests, revocation
+  lists and parameters do not cross (no record needs them from a remote
+  host); a private key label anywhere refuses the file. A Unix host without
+  `openssl` answers `ErrNoHostParser` and nothing crosses, so the section can
+  say partial with the reason. A key line crosses as `type blob` only
+  (options and comment never), within tight length bounds per key type.
+- `ReadText` returns the lines (or, for nginx, the statements) of a
+  configuration file whose first word is on the parser's keep list, plus
+  strict structure, under per-product syntax options (`@statements`,
+  `@backslash`, `@indent`, `@cr`, `@sections`, `@anysections`, `@tags`): see
+  `FilterConfigText` and `config_keep.go`. A line holding a lone carriage
+  return is dropped whole; a dropped line's continuation is dropped with it;
+  a dropped block opener drops its block; a section the parser does not read
+  crosses nothing. PEM blocks and runs of 40 base64 characters are removed
+  from what is kept.
+
+Both refuse a file whose modification or change time is within 3 seconds of
+the host's clock or later than it, and both take the file's identity (device, inode, size,
+times) before and after the read and print nothing if it changed: a file
+rewritten in place while it is read could otherwise join a kept word of one
+version to a secret of the other. Windows also reads the file twice through
+one handle and refuses the read when the two differ: it has no change time
+that .NET Framework reads, and a writer can set the last-write time back. `Identify` returns only markers (size, the
+first eight bytes, PEM labels, rule flags), and a remote `ReadFile` is
+refused before any content command is sent unless the identity is a
+certificate or SSH key file. Go checks everything that arrives.
+
+**Limits, stated.** These cross on purpose or are left alone:
+
+- An SSH certificate line can carry about a kilobyte of free text in its key
+  ID and principals (`*-cert-v01@openssh.com`, bounded at 4,096 characters).
+- An RFC 4716 (`---- BEGIN SSH2 PUBLIC KEY ----`) file is not read remotely.
+- A certificate is a certificate: a deliberately crafted one can carry any
+  bytes inside its TBS (an extension), and they cross with it. The guarantee
+  is for honest files, for mislabelled files (a key under a certificate's
+  label), and for anything the strict envelope rejects.
+- An SSH key line is checked on the host by its type, the encoded type
+  prefix of its blob, the blob's length bound and the base64 alphabet, not
+  by decoding it: a crafted line can carry up to the bound of bytes that are
+  not a key. Go refuses such a line after it has crossed.
+- On Windows a writer who controls the file and resets its times can still
+  race a read: the double read narrows the window to a rewrite that changes
+  nothing between two reads microseconds apart, but does not close it.
+- A physical configuration line over 256 KiB makes the whole read too large.
+- OpenSSL 3 takes the first certificate of a `CERTIFICATE` block that has
+  bytes after it; LibreSSL, .NET and Go refuse such a block. What crosses is
+  still only that certificate's encoding.
+- A kept configuration line's value crosses as written (only 40-character
+  runs are redacted): which directives a parser lists is the parser's
+  responsibility.
 
 ### The four passes
 
