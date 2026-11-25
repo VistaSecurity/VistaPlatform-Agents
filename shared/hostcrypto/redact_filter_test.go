@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -621,6 +622,7 @@ func fxSelfSigned(t *testing.T, priv, pub any, sans int) []byte {
 
 // TestSSHPublicKeyLines: section E of the third review.
 func TestSSHPublicKeyLines(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	line := func(k any) string {
 		p, err := ssh.NewPublicKey(k)
 		if err != nil {
@@ -980,6 +982,7 @@ func fxCheckText(b []byte, keep []string, got []byte, n int, err error) string {
 // under every awk installed, with every option set, and requires the host's
 // answer to equal filterConfig's byte for byte.
 func TestFilterAwkParity(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -997,11 +1000,15 @@ func TestFilterAwkParity(t *testing.T) {
 		t.Run(impl, func(t *testing.T) {
 			t.Parallel()
 			rt := NewRemoteUnixTarget(runner, runtime.GOOS)
-			fails := 0
-			for _, name := range fxSorted(corpus) {
+			var fails atomic.Int64
+			// Every file, eight at a time (each is a host command).
+			fxEach(fxSorted(corpus), func(name string) {
 				b := corpus[name]
 				// The big files once, with one option set each, under the slow awks.
 				for _, kn := range fxSorted(keeps) {
+					if fails.Load() > 20 {
+						return // too many differences: reported once below
+					}
 					if len(b) > 1<<20 && kn != "gen" && kn != "gen+statements" {
 						continue
 					}
@@ -1011,11 +1018,12 @@ func TestFilterAwkParity(t *testing.T) {
 					got, n, err := rt.ReadText(ctx, filepath.Join(dir, filepath.FromSlash(name)), keeps[kn])
 					if msg := fxCheckText(b, keeps[kn], got, n, err); msg != "" {
 						t.Errorf("%s with %s: %s", name, kn, msg)
-						if fails++; fails > 20 {
-							t.Fatal("too many differences")
-						}
+						fails.Add(1)
 					}
 				}
+			})
+			if fails.Load() > 20 {
+				t.Fatal("too many differences")
 			}
 		})
 	}
@@ -1152,6 +1160,7 @@ func fxFileCorpus(t *testing.T) map[string][]byte {
 // TestPublicAwkParity runs the file corpus through the real readScript and
 // identifyScript under every awk installed.
 func TestPublicAwkParity(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -1166,8 +1175,9 @@ func TestPublicAwkParity(t *testing.T) {
 	ctx := context.Background()
 	for impl, runner := range tgtAwks(t) {
 		t.Run(impl, func(t *testing.T) {
+			t.Parallel()
 			rt := NewRemoteUnixTarget(runner, runtime.GOOS)
-			for _, name := range fxSorted(corpus) {
+			fxEach(fxSorted(corpus), func(name string) {
 				b := corpus[name]
 				p := filepath.Join(dir, filepath.FromSlash(name))
 				want, ok := publicContent(b)
@@ -1191,7 +1201,7 @@ func TestPublicAwkParity(t *testing.T) {
 				if wantIn := inspect(b, int64(len(b))); err != nil || (!wantIn.nul && !reflect.DeepEqual(in, wantIn)) {
 					t.Errorf("%s: inspection differs (%v):\nhost %+v\n  go %+v", name, err, in, wantIn)
 				}
-			}
+			})
 		})
 	}
 }
@@ -1199,6 +1209,7 @@ func TestPublicAwkParity(t *testing.T) {
 // TestRemoteUnixNoHostParser: a host with no openssl reads no certificate
 // and says why (ErrNoHostParser); a file of SSH key lines needs no parser.
 func TestRemoteUnixNoHostParser(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -1244,6 +1255,7 @@ func TestRemoteUnixNoHostParser(t *testing.T) {
 // (the macOS fallback, coarse file systems), where only the quiescence rule
 // stands between a rewrite and a torn read.
 func TestRemoteUnixTornReads(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -1278,6 +1290,7 @@ func TestRemoteUnixTornReads(t *testing.T) {
 				func(rt *RemoteUnixTarget, p string) ([]byte, error) { return rt.ReadFile(context.Background(), p) }},
 		} {
 			t.Run(fmt.Sprintf("%s/coarse=%v", c.name, coarse), func(t *testing.T) {
+				t.Parallel()
 				ok, changed, other, torn, reads := fxTornRun(t, c.x, c.y, cycles, func(p string) ([]byte, error) {
 					rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
 					rt.coarse = coarse
@@ -1356,6 +1369,7 @@ func fxTornRun(t *testing.T, x, y []byte, cycles int, read func(string) ([]byte,
 // TestRemoteUnixFutureTime: a file stamped ahead of the host's clock is a
 // file still being written as far as the quiescence rule is concerned.
 func TestRemoteUnixFutureTime(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}

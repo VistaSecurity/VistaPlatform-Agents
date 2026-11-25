@@ -433,6 +433,7 @@ func tgtShort(b []byte) string {
 // answers to equal the Go rules byte for byte: ReadText (two keep lists),
 // the public read, and the inspection.
 func TestRemoteParity(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -450,7 +451,9 @@ func TestRemoteParity(t *testing.T) {
 	for impl, runner := range tgtAwks(t) {
 		rt := NewRemoteUnixTarget(runner, runtime.GOOS)
 		t.Run(impl, func(t *testing.T) {
-			for name, b := range r.text {
+			t.Parallel()
+			fxEach(fxSorted(r.text), func(name string) {
+				b := r.text[name]
 				p := filepath.Join(dir, "text", name)
 				for kname, keep := range map[string][]string{"realistic": tgtRealisticKeep, "broad": tgtBroadKeep} {
 					got, n, err := rt.ReadText(ctx, p, keep)
@@ -467,8 +470,9 @@ func TestRemoteParity(t *testing.T) {
 						}
 					}
 				}
-			}
-			for name, b := range r.files {
+			})
+			fxEach(fxSorted(r.files), func(name string) {
+				b := r.files[name]
 				p := filepath.Join(dir, "files", name)
 				want, ok := publicContent(b)
 				out, _, exit, _ := runner.Run(ctx, rt.scriptArgv(readScript, p, remoteUnixReadMax))
@@ -490,7 +494,7 @@ func TestRemoteParity(t *testing.T) {
 				if wantIn := inspect(b, int64(len(b))); err != nil || (!wantIn.nul && !reflect.DeepEqual(in, wantIn)) {
 					t.Errorf("%s: inspection differs (%v):\nremote %+v\n    go %+v", name, err, in, wantIn)
 				}
-			}
+			})
 		})
 	}
 }
@@ -533,6 +537,7 @@ func TestRemoteReadStructure(t *testing.T) {
 // No read may be refused AFTER its bytes crossed (Go's recheck), and nothing
 // but the certificate may ever be returned.
 func TestRemoteUnixSwapRace(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -542,6 +547,7 @@ func TestRemoteUnixSwapRace(t *testing.T) {
 	certPEM, keyPEM, _, _ := tgtMaterial(t)
 	for _, mode := range []string{"rename", "inplace", "grow"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			swap := filepath.Join(dir, "swap.pem")
 			tgtWrite(t, dir, "swap.pem", certPEM, 0o644)
@@ -719,4 +725,26 @@ func TestUTF16AndBOM(t *testing.T) {
 	if id := tgtID("/x/c.pem", append([]byte("\xef\xbb\xbf"), certPEM...)); id.Class != ClassCertificate || !id.Public() {
 		t.Errorf("UTF-8 BOM certificate: %q", id.Class)
 	}
+}
+
+// fxEach runs fn on every name, eight at a time. It is for loops of host
+// commands whose checks only report (t.Errorf, t.Logf), which are safe from
+// several goroutines: every name is still checked, in a fraction of the time.
+func fxEach(names []string, fn func(string)) {
+	work := make(chan string)
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range work {
+				fn(n)
+			}
+		}()
+	}
+	for _, n := range names {
+		work <- n
+	}
+	close(work)
+	wg.Wait()
 }

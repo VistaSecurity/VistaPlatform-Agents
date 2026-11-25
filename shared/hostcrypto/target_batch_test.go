@@ -76,6 +76,7 @@ func fxLooseEnvelope(t *testing.T, certDER []byte) []byte {
 // refuses is dropped and counted, the rest of the file crosses; anything
 // that is not what the host rule prints refuses the whole answer.
 func TestRecheckPublicPerBlock(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	_, _, certDER, _ := tgtMaterial(t)
 	good := certificatePEM(certDER)
 	neg := certificatePEM(fxNegativeSerial(t, certDER))
@@ -157,6 +158,7 @@ func fxCheckCounts(t *testing.T, pr PublicReader, p string) {
 }
 
 func TestRemoteUnixRealReadPublicCounts(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -240,6 +242,7 @@ func fxCheckBundle(t *testing.T, pr PublicReader, path string) {
 // through the remote Unix target's real host programs (sh, awk, openssl):
 // most of it must cross, the rest counted.
 func TestRemoteUnixRealSystemBundle(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -342,6 +345,7 @@ func fxBatchParity(t *testing.T, tg interface {
 }
 
 func TestStatIdentifyManyRealUnix(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}
@@ -379,6 +383,7 @@ func TestStatIdentifyManyRealWindows(t *testing.T) {
 }
 
 func TestStatIdentifyManyLocal(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	fxBatchParity(t, NewLocalTarget(), fxBatchTree(t, runtime.GOOS != "windows"))
 }
 
@@ -419,6 +424,7 @@ func fxNoSecret(t *testing.T, where, s string) {
 // the host's raw answer, decoded, holds no secret the files hold past their
 // first MagicBytes bytes.
 func TestStatIdentifyManySecrecyUnix(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("POSIX tools not available")
 	}

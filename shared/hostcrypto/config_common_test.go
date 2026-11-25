@@ -256,6 +256,7 @@ func cfgHostile() map[string][]byte {
 }
 
 func TestConfigHostileInputs(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	inputs := cfgHostile()
 	for _, product := range ConfigProducts() {
 		parse := ConfigParserFor(product)
