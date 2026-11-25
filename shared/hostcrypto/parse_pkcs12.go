@@ -419,6 +419,12 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	case empty, len(entries) > 0 || len(certs) > 0:
 		out.Keystore.Opened = OpenedWithoutPassword
 	}
+	// A part that neither the empty password nor a default opened keeps what
+	// it holds: Opened says how the rest was read, EntryCount stays nil, and
+	// Unknown says why the listing is short.
+	if (found || empty) && hidden {
+		out.Keystore.Unknown = "part of the store needs a password that is neither empty nor a well-known default; its entries are not listed"
+	}
 	return out, nil
 }
 
@@ -873,37 +879,62 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		return ksP12NotOpened, ksNotTriedNoCheck
 	}
 
+	// The budget covers the worst case: the check under every candidate,
+	// and every other part under every candidate too (a part the first
+	// password does not open is tried with the others).
 	cands := ksP12Candidates()
 	total := ksMulCost(check.cost, len(cands))
 	for j, o := range openers {
 		if j != verifier {
-			total = ksAddCost(total, o.cost)
+			total = ksAddCost(total, ksMulCost(o.cost, len(cands)))
 		}
 	}
 	if total > ksMaxTrialWork {
 		return ksP12NotOpened, ksNotTriedCost
 	}
 
+	// open walks a part the password opens into st.bags.
+	open := func(o opener, pw ksP12Password) bool {
+		pt, ok := o.open(pw)
+		if !ok {
+			return false
+		}
+		before := len(st.bags)
+		if st.walkSafeContents(pt, maxEntries, 1) != nil {
+			st.bags = st.bags[:before]
+			return false
+		}
+		st.parts[o.idx].opened = true
+		return true
+	}
 	for _, pw := range cands {
 		if !check.test(pw) {
 			continue
 		}
+		// pw passes the check (the MAC, or the cheapest part). A part it
+		// does not open may take another candidate: each is tried on it, so
+		// a well-known default that opens any part of the store is found
+		// even when the empty password passed the check, and a store whose
+		// MAC is a default but a part is empty is listed in full.
+		byDefault := !pw.empty
 		for _, o := range openers {
-			pt, ok := o.open(pw)
-			if !ok {
-				continue // another password protects this part
-			}
-			before := len(st.bags)
-			if st.walkSafeContents(pt, maxEntries, 1) != nil {
-				st.bags = st.bags[:before]
+			if open(o, pw) {
 				continue
 			}
-			st.parts[o.idx].opened = true
+			for _, other := range cands {
+				if other.empty == pw.empty && bytes.Equal(other.bmp, pw.bmp) {
+					continue
+				}
+				if open(o, other) {
+					byDefault = byDefault || !other.empty
+					break
+				}
+			}
 		}
-		if pw.empty {
-			return ksP12OpenedByEmpty, ""
+		if byDefault {
+			return ksP12OpenedByDefault, ""
 		}
-		return ksP12OpenedByDefault, ""
+		return ksP12OpenedByEmpty, ""
 	}
 	return ksP12NotOpened, ""
 }
