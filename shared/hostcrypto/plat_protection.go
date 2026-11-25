@@ -20,17 +20,15 @@ import (
 // name; nothing here reads a volume key, a recovery key, a key slot or a
 // PIN.
 //
-// The FIPS switch has no section of its own in the Report: Protection.FIPSMode
-// is nil when it could not be read, and the reason is a StepError named
-// platStepFIPS.
-
-const platStepFIPS = "fips_mode"
+// On macOS the Secure Enclave is reported as itself
+// (Protection.SecureEnclave), never as a TPM: a Mac has no TPM.
 
 // platProtection collects one platform's protection facts before they are
 // written to the Report under the lock.
 type platProtection struct {
 	volumes    []VolumeEncryption
 	tpm        *TPM
+	enclave    *SecureEnclave
 	secureBoot *bool
 	fips       *bool
 	tokens     []Token
@@ -54,6 +52,9 @@ func (p platProtection) apply(c *collection) {
 	pr.Volumes = append(pr.Volumes, vols...)
 	if p.tpm != nil {
 		pr.TPM = p.tpm
+	}
+	if p.enclave != nil {
+		pr.SecureEnclave = p.enclave
 	}
 	if p.secureBoot != nil {
 		pr.SecureBoot = p.secureBoot
@@ -496,15 +497,18 @@ func platLinuxProtection(ctx context.Context, c *collection) {
 	}
 
 	// FIPS.
-	if out, _, exit, err := platRun(ctx, c.target, platSh(platFIPSScript)); err == nil && exit == 0 {
+	out, stderr, exit, err = platRun(ctx, c.target, platSh(platFIPSScript))
+	if err == nil && exit != 0 {
+		err = platStderr("fips", stderr, exit)
+	}
+	if err == nil {
 		if on, ok := platParseLinuxFIPS(out); ok {
 			p.fips = platBoolPtr(on)
 		} else {
-			c.note(platStepFIPS, errors.New("unreadable FIPS switch"))
+			err = errors.New("fips: unreadable switch")
 		}
-	} else if err != nil {
-		c.note(platStepFIPS, err)
 	}
+	platOutcome(c, SectionFIPSMode, err)
 
 	// Tokens.
 	if out, stderr, exit, err := platRun(ctx, c.target, platP11Argv); err == nil && exit == 0 {
@@ -881,20 +885,24 @@ func platDarwinProtection(ctx context.Context, c *collection) {
 	if ierr == nil && iexit != 0 {
 		ierr = platStderr("system_profiler", istderr, iexit)
 	}
+	// A Mac has no TPM.
+	p.tpm = &TPM{Present: false}
+	c.mark(SectionTPM, SectionOK)
 	if ierr != nil {
-		platOutcome(c, SectionTPM, ierr)
+		if arm {
+			p.enclave = &SecureEnclave{Present: platBoolPtr(true), Kind: "apple-silicon"}
+		}
 		platOutcome(c, SectionSecureBoot, ierr)
 	} else {
 		t2, controller, sb := platParseIBridge(iout)
 		switch {
 		case arm:
-			p.tpm = &TPM{Present: true, Manufacturer: "Apple", Version: "secure-enclave"}
+			p.enclave = &SecureEnclave{Present: platBoolPtr(true), Kind: "apple-silicon"}
 		case t2:
-			p.tpm = &TPM{Present: true, Manufacturer: "Apple", Version: "secure-enclave (T2)"}
+			p.enclave = &SecureEnclave{Present: platBoolPtr(true), Kind: "t2"}
 		default:
-			p.tpm = &TPM{Present: false}
+			p.enclave = &SecureEnclave{Present: platBoolPtr(false)}
 		}
-		c.mark(SectionTPM, SectionOK)
 		switch {
 		case sb != nil:
 			p.secureBoot = sb
@@ -909,6 +917,7 @@ func platDarwinProtection(ctx context.Context, c *collection) {
 	}
 
 	// macOS has no system-wide FIPS switch: FIPSMode stays nil.
+	c.mark(SectionFIPSMode, SectionUnsupported)
 
 	tout, tstderr, texit, terr := platRun(ctx, c.target, platCTKTokensArgv)
 	if terr == nil && texit != 0 {
@@ -1201,14 +1210,14 @@ func platWindowsProtection(ctx context.Context, c *collection) {
 		V int `json:"V"`
 	}{1})
 	if err != nil {
-		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens} {
+		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens, SectionFIPSMode} {
 			c.fail(s, fmt.Errorf("protection: %w", err))
 		}
 		return
 	}
 	r, err := platParseWindowsProtection(b)
 	if err != nil {
-		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens} {
+		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens, SectionFIPSMode} {
 			c.fail(s, err)
 		}
 		return
@@ -1218,8 +1227,6 @@ func platWindowsProtection(ctx context.Context, c *collection) {
 	platOutcome(c, SectionTPM, r.tpmErr)
 	platOutcome(c, SectionSecureBoot, r.sbErr)
 	platOutcome(c, SectionTokens, r.tokErr)
-	if r.fipsErr != nil {
-		c.note(platStepFIPS, r.fipsErr)
-	}
+	platOutcome(c, SectionFIPSMode, r.fipsErr)
 	r.prot.apply(c)
 }

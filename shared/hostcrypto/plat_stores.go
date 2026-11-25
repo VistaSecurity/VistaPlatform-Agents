@@ -87,7 +87,7 @@ foreach ($stLoc in $stLocs) {
         if ($stCerts.Count -ge [int]$a.Max) { $stTrunc = $true; break }
         $stKey = $null
         if ($stC.HasPrivateKey) { $stKey = stKey $stC }
-        [void]$stCerts.Add([pscustomobject]@{ Thumb = [string]$stC.Thumbprint; Der = [Convert]::ToBase64String($stC.RawData); HasKey = [bool]$stC.HasPrivateKey; Key = $stKey })
+        [void]$stCerts.Add([pscustomobject]@{ Der = [Convert]::ToBase64String($stC.RawData); HasKey = [bool]$stC.HasPrivateKey; Key = $stKey })
       }
     } catch { $stE = (plErr $_.Exception) }
     finally { if ($null -ne $stStore) { $stStore.Close() } }
@@ -114,7 +114,6 @@ type platWinKey struct {
 }
 
 type platWinCert struct {
-	Thumb  string      `json:"Thumb"`
 	Der    string      `json:"Der"`
 	HasKey bool        `json:"HasKey"`
 	Key    *platWinKey `json:"Key"`
@@ -151,8 +150,6 @@ var platWinAnchorStores = map[string]bool{
 	"Root": true, "AuthRoot": true, "SmartCardRoot": true, "TrustedAppRoot": true,
 	"FlightRoot": true, "TestSignRoot": true, "PasspointTrustedRoots": true,
 }
-
-var platThumbRE = regexp.MustCompile(`^[0-9A-Fa-f]{40}$`)
 
 // platParseWindowsStores parses the stores program's answer. Each certificate is
 // re-parsed from its DER with [ParseCertificateDER], so what is kept is a
@@ -212,40 +209,39 @@ func platParseWindowsStores(b []byte) (platWinStoreResult, error) {
 			if !has {
 				continue
 			}
-			thumb := strings.ToUpper(wc.Thumb)
-			if !platThumbRE.MatchString(thumb) {
-				thumb = ""
-			}
-			res.Keys = append(res.Keys, platWinPrivateKey(st.Store, thumb, cert, wc.Key))
+			res.Keys = append(res.Keys, platWinPrivateKey(st.Store, cert, wc.Key))
 		}
 	}
 	return res, nil
 }
 
-// platWinPrivateKey describes the key behind a store certificate. The
-// algorithm and curve are the certificate's (the key is its pair); the size
-// is the provider's where it said one.
-func platWinPrivateKey(store, thumb string, cert Certificate, k *platWinKey) PrivateKey {
+// platWinPrivateKey describes the key behind a store certificate. It sits in
+// the certificate's store and pairs with the certificate by
+// PublicKeySHA256; the algorithm and curve are the certificate's (the key is
+// its pair), the size the provider's where it said one.
+func platWinPrivateKey(store string, cert Certificate, k *platWinKey) PrivateKey {
 	pk := PrivateKey{
-		Location:        Location{Container: store, Alias: thumb, FoundBy: FoundByPlatformStore},
+		Location:        Location{Store: store, FoundBy: FoundByPlatformStore},
 		Format:          KeyFormatPlatformStore,
 		Algorithm:       cert.KeyAlgorithm,
 		SizeBits:        cert.KeySize,
 		Curve:           cert.Curve,
 		PublicKeySHA256: cert.PublicKeySHA256,
+		ProviderKind:    ProviderKindUnknown,
 	}
-	if k == nil || k.Error != "" {
-		pk.Unknown = "the key's provider could not be read by this account"
-		if k != nil && k.Error != "denied" {
-			pk.Unknown = "the key's provider could not be read"
+	if k == nil || k.Error != "" || k.Provider == "" {
+		pk.Unknown = "the key's provider could not be read"
+		if k != nil && k.Error == "denied" {
+			pk.Unknown = "the key's provider could not be read by this account"
 		}
 		return pk
 	}
-	pk.Location.Store = platCap(k.Provider, 128)
+	pk.Provider = platCap(k.Provider, 128)
+	pk.ProviderKind = platWinProviderKind(k.Provider, k.Hardware)
+	pk.Protection = map[string]string{ProviderKindTPM: KeyProtectionTPM, ProviderKindSmartCard: KeyProtectionHSM, ProviderKindSoftware: KeyProtectionSoftware}[pk.ProviderKind]
 	if k.Size > 0 && k.Size <= 65536 {
 		pk.SizeBits = k.Size
 	}
-	pk.Protection = platWinProtection(k.Provider, k.Hardware)
 	if k.Export != "" {
 		e := strings.Contains(k.Export, "AllowExport") || strings.Contains(k.Export, "AllowPlaintextExport")
 		pk.Exportable = &e
@@ -253,18 +249,18 @@ func platWinPrivateKey(store, thumb string, cert Certificate, k *platWinKey) Pri
 	return pk
 }
 
-// platWinProtection maps a provider to where the key's bytes live.
-func platWinProtection(provider string, hardware *bool) string {
+// platWinProviderKind says what a provider keeps its keys in.
+func platWinProviderKind(provider string, hardware *bool) string {
 	p := strings.ToLower(provider)
 	switch {
 	case p == "microsoft platform crypto provider":
-		return KeyProtectionTPM
+		return ProviderKindTPM
 	case strings.Contains(p, "smart card"), hardware != nil && *hardware:
-		return KeyProtectionHSM
+		return ProviderKindSmartCard
 	case p == "":
-		return ""
+		return ProviderKindUnknown
 	}
-	return KeyProtectionSoftware
+	return ProviderKindSoftware
 }
 
 func platCap(s string, n int) string {
@@ -398,8 +394,12 @@ func platParseKeychainIdentities(out []byte) []string {
 }
 
 // platKeychainKeys pairs identity hashes with the keychain's certificates:
-// each pair is a certificate with HasPrivateKey and a platform-store key.
-func platKeychainKeys(keychain string, certs []Certificate, identities []string) []PrivateKey {
+// each pair is a certificate with HasPrivateKey and a platform-store key in
+// the keychain, paired with the certificate by PublicKeySHA256. It also
+// returns how many identities named a certificate the keychain did not list
+// (they are counted, not recorded: without the certificate nothing would
+// tell one such key from another).
+func platKeychainKeys(keychain string, certs []Certificate, identities []string) ([]PrivateKey, int) {
 	have := map[string]bool{}
 	for _, h := range identities {
 		have[h] = true
@@ -415,25 +415,24 @@ func platKeychainKeys(keychain string, certs []Certificate, identities []string)
 		}
 		matched[h] = true
 		keys = append(keys, PrivateKey{
-			Location:        Location{Store: keychain, Alias: h, FoundBy: FoundByPlatformStore},
+			Location:        Location{Store: keychain, FoundBy: FoundByPlatformStore},
 			Format:          KeyFormatPlatformStore,
 			Algorithm:       certs[i].KeyAlgorithm,
 			SizeBits:        certs[i].KeySize,
 			Curve:           certs[i].Curve,
 			Protection:      KeyProtectionSoftware,
+			Provider:        "macOS keychain",
+			ProviderKind:    ProviderKindSoftware,
 			PublicKeySHA256: certs[i].PublicKeySHA256,
 		})
 	}
+	unmatched := 0
 	for _, h := range identities {
 		if !matched[h] {
-			keys = append(keys, PrivateKey{
-				Location: Location{Store: keychain, Alias: h, FoundBy: FoundByPlatformStore},
-				Format:   KeyFormatPlatformStore, Protection: KeyProtectionSoftware,
-				Unknown: "the identity's certificate was not listed",
-			})
+			unmatched++
 		}
 	}
-	return keys
+	return keys, unmatched
 }
 
 // platCertSHA1 is a certificate's SHA-1 hash, from its re-encoding, as the
@@ -523,7 +522,11 @@ func platDarwinKeychains(ctx context.Context, c *collection) {
 		if !k.anchors {
 			idOut, idErr, idExit, err := platRun(ctx, c.target, platKeychainIdentitiesArgv(k.path))
 			if err == nil && idExit == 0 {
-				keys = append(keys, platKeychainKeys(k.path, kcCerts, platParseKeychainIdentities(idOut))...)
+				kk, unmatched := platKeychainKeys(k.path, kcCerts, platParseKeychainIdentities(idOut))
+				keys = append(keys, kk...)
+				if unmatched > 0 {
+					c.partial(SectionPrivateKeys, fmt.Errorf("%s: %d identities name a certificate the keychain did not list; their keys are not described", k.path, unmatched))
+				}
 			} else if err == nil {
 				problems = append(problems, platStderr("security find-identity "+k.path, idErr, idExit))
 			} else {

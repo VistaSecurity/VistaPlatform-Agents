@@ -21,19 +21,19 @@ func platThumb(der []byte) string {
 func platStoresAnswer(t *testing.T, my, root platKey, users bool) string {
 	stores := []map[string]any{
 		{"Store": `Cert:\LocalMachine\My`, "Error": "", "Truncated": false, "Certs": []map[string]any{{
-			"Thumb": platThumb(my.certDER), "Der": base64.StdEncoding.EncodeToString(my.certDER), "HasKey": true,
+			"Der": base64.StdEncoding.EncodeToString(my.certDER), "HasKey": true,
 			"Key": map[string]any{"Provider": "Microsoft Platform Crypto Provider", "Algorithm": "ECDSA_P256", "Size": 256, "Export": "None", "Hardware": nil, "Error": ""},
 		}}},
 		// A single certificate arrives as an object, not an array (PowerShell
 		// 5.1 unrolls); psArray reads both.
 		{"Store": `Cert:\LocalMachine\Root`, "Error": "", "Truncated": true, "Certs": map[string]any{
-			"Thumb": platThumb(root.certDER), "Der": base64.StdEncoding.EncodeToString(root.certDER), "HasKey": false, "Key": nil,
+			"Der": base64.StdEncoding.EncodeToString(root.certDER), "HasKey": false, "Key": nil,
 		}},
 		{"Store": `Cert:\LocalMachine\Remote Desktop`, "Error": "denied", "Truncated": false, "Certs": []any{}},
 	}
 	if users {
 		stores = append(stores, map[string]any{"Store": `Cert:\CurrentUser\My`, "Error": "", "Truncated": false, "Certs": []map[string]any{{
-			"Thumb": platThumb(root.certDER), "Der": base64.StdEncoding.EncodeToString(root.certDER), "HasKey": true,
+			"Der": base64.StdEncoding.EncodeToString(root.certDER), "HasKey": true,
 			"Key": map[string]any{"Provider": "Microsoft Software Key Storage Provider", "Algorithm": "ECDSA_P256", "Size": 256, "Export": "AllowExport, AllowPlaintextExport", "Error": ""},
 		}}})
 	}
@@ -63,12 +63,12 @@ func TestPlatParseWindowsStores(t *testing.T) {
 		t.Fatalf("a user's store is not an anchor store: %+v", c2)
 	}
 	k := res.Keys[0]
-	if k.Format != KeyFormatPlatformStore || k.Protection != KeyProtectionTPM || k.Location.Store != "Microsoft Platform Crypto Provider" ||
-		k.Location.Container != `Cert:\LocalMachine\My` || k.Location.Alias != platThumb(my.certDER) || k.Algorithm != "ECDSA" || k.SizeBits != 256 ||
+	if k.Format != KeyFormatPlatformStore || k.Protection != KeyProtectionTPM || k.Provider != "Microsoft Platform Crypto Provider" || k.ProviderKind != ProviderKindTPM ||
+		k.Location.Store != `Cert:\LocalMachine\My` || k.Location.Container != "" || k.Location.Alias != "" || k.Algorithm != "ECDSA" || k.SizeBits != 256 ||
 		k.Curve != "P-256" || k.PublicKeySHA256 != c0.PublicKeySHA256 || k.Exportable == nil || *k.Exportable {
 		t.Fatalf("tpm key: %+v", k)
 	}
-	if k := res.Keys[1]; k.Protection != KeyProtectionSoftware || k.Exportable == nil || !*k.Exportable {
+	if k := res.Keys[1]; k.Protection != KeyProtectionSoftware || k.ProviderKind != ProviderKindSoftware || k.Exportable == nil || !*k.Exportable {
 		t.Fatalf("software key: %+v", k)
 	}
 	if len(res.Problems) != 1 || !strings.Contains(res.Problems[0].Error(), "Remote Desktop") || len(res.Truncated) != 1 || !res.UserStores {
@@ -84,8 +84,8 @@ func TestPlatWindowsStoresSecrecy(t *testing.T) {
 	k := platNewKey(t, "leak")
 	ans := platJSON(t, map[string]any{"Elevated": true, "Stores": []map[string]any{{
 		"Store": `Cert:\LocalMachine\My`, "Error": "", "Truncated": false, "Certs": []map[string]any{
-			{"Thumb": "ab", "Der": base64.StdEncoding.EncodeToString(k.keyDER), "HasKey": true, "Key": nil},
-			{"Thumb": platThumb(k.certDER), "Der": base64.StdEncoding.EncodeToString(k.certDER), "HasKey": true,
+			{"Der": base64.StdEncoding.EncodeToString(k.keyDER), "HasKey": true, "Key": nil},
+			{"Der": base64.StdEncoding.EncodeToString(k.certDER), "HasKey": true,
 				"PrivateKeyBlob": base64.StdEncoding.EncodeToString(k.keyDER),
 				"Key": map[string]any{"Provider": "Microsoft Software Key Storage Provider", "UniqueName": hex.EncodeToString(k.secret()),
 					"Blob": base64.StdEncoding.EncodeToString(k.secret()), "Size": 256, "Export": "None"}},
@@ -108,22 +108,22 @@ func TestPlatWindowsStoresSecrecy(t *testing.T) {
 	}
 }
 
-func TestPlatWinProtection(t *testing.T) {
+func TestPlatWinProviderKind(t *testing.T) {
 	yes, no := true, false
 	for _, tc := range []struct {
 		provider string
 		hw       *bool
 		want     string
 	}{
-		{"Microsoft Platform Crypto Provider", nil, KeyProtectionTPM},
-		{"Microsoft Smart Card Key Storage Provider", nil, KeyProtectionHSM},
-		{"Microsoft Base Smart Card Crypto Provider", nil, KeyProtectionHSM},
-		{"Vendor CSP", &yes, KeyProtectionHSM},
-		{"Microsoft Enhanced Cryptographic Provider v1.0", &no, KeyProtectionSoftware},
-		{"Microsoft Software Key Storage Provider", nil, KeyProtectionSoftware},
-		{"", nil, ""},
+		{"Microsoft Platform Crypto Provider", nil, ProviderKindTPM},
+		{"Microsoft Smart Card Key Storage Provider", nil, ProviderKindSmartCard},
+		{"Microsoft Base Smart Card Crypto Provider", nil, ProviderKindSmartCard},
+		{"Vendor CSP", &yes, ProviderKindSmartCard},
+		{"Microsoft Enhanced Cryptographic Provider v1.0", &no, ProviderKindSoftware},
+		{"Microsoft Software Key Storage Provider", nil, ProviderKindSoftware},
+		{"", nil, ProviderKindUnknown},
 	} {
-		if got := platWinProtection(tc.provider, tc.hw); got != tc.want {
+		if got := platWinProviderKind(tc.provider, tc.hw); got != tc.want {
 			t.Errorf("%q: %q, want %q", tc.provider, got, tc.want)
 		}
 	}
@@ -137,8 +137,8 @@ func TestPlatWindowsKeyRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pk := platWinPrivateKey(`Cert:\LocalMachine\My`, "", cert, &platWinKey{Error: "denied"})
-	if pk.Algorithm != "ECDSA" || pk.Unknown == "" || pk.Location.Store != "" || pk.Exportable != nil {
+	pk := platWinPrivateKey(`Cert:\LocalMachine\My`, cert, &platWinKey{Error: "denied"})
+	if pk.Algorithm != "ECDSA" || pk.Unknown == "" || pk.Provider != "" || pk.ProviderKind != ProviderKindUnknown || pk.Location.Store != `Cert:\LocalMachine\My` || pk.Exportable != nil {
 		t.Fatalf("%+v", pk)
 	}
 }
@@ -215,8 +215,9 @@ func TestPlatKeychainIdentities(t *testing.T) {
 		t.Fatal("a name was kept")
 	}
 	certs, _ := platParseKeychainCertificates(a.certPEM, "/k", false)
-	keys := platKeychainKeys("/k", certs, []string{ha, "0000000000000000000000000000000000000000"})
-	if len(keys) != 2 || *certs[0].HasPrivateKey != true || keys[0].Algorithm != "ECDSA" || keys[0].PublicKeySHA256 != certs[0].PublicKeySHA256 || keys[1].Unknown == "" {
+	keys, unmatched := platKeychainKeys("/k", certs, []string{ha, "0000000000000000000000000000000000000000"})
+	if len(keys) != 1 || unmatched != 1 || *certs[0].HasPrivateKey != true || keys[0].Algorithm != "ECDSA" || keys[0].PublicKeySHA256 != certs[0].PublicKeySHA256 ||
+		keys[0].Location.Store != "/k" || keys[0].Location.Alias != "" || keys[0].Provider != "macOS keychain" || keys[0].ProviderKind != ProviderKindSoftware {
 		t.Fatalf("keys: %+v", keys)
 	}
 	if got := platParseKeychainIdentities([]byte("  Matching identities\n     0 identities found\n")); len(got) != 0 {

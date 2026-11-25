@@ -181,7 +181,7 @@ func TestPlatLinuxProtection(t *testing.T) {
 		platElevatedUnix(t.Context(), c)
 		platLinuxProtection(t.Context(), c)
 		rep := c.report
-		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens} {
+		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens, SectionFIPSMode} {
 			if rep.Sections[s] != SectionOK {
 				t.Fatalf("local=%v root: %s = %q (%+v)", local, s, rep.Sections[s], rep.Errors)
 			}
@@ -216,7 +216,7 @@ func TestPlatLinuxProtection(t *testing.T) {
 		// No tools at all: unsupported, never an empty "ok".
 		c = tgtCollection(newTgtFakeTarget(local), Options{Platform: hostinventory.PlatformLinux})
 		platLinuxProtection(t.Context(), c)
-		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionTokens} {
+		for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionTokens, SectionFIPSMode} {
 			if c.report.Sections[s] != SectionUnsupported {
 				t.Fatalf("no tools: %s = %q", s, c.report.Sections[s])
 			}
@@ -358,7 +358,8 @@ func TestPlatDarwinProtection(t *testing.T) {
 			}
 		}
 		pr := rep.Protection
-		if pr.TPM == nil || !pr.TPM.Present || pr.TPM.Version != "secure-enclave" || pr.SecureBoot == nil || !*pr.SecureBoot || pr.FIPSMode != nil {
+		if pr.TPM == nil || pr.TPM.Present || pr.SecureEnclave == nil || pr.SecureEnclave.Present == nil || !*pr.SecureEnclave.Present ||
+			pr.SecureEnclave.Kind != "apple-silicon" || pr.SecureBoot == nil || !*pr.SecureBoot || pr.FIPSMode != nil || rep.Sections[SectionFIPSMode] != SectionUnsupported {
 			t.Fatalf("%+v", pr)
 		}
 		if pr.Volumes[0].MountPoint != "/" || pr.Volumes[0].Status != "On" {
@@ -371,7 +372,8 @@ func TestPlatDarwinProtection(t *testing.T) {
 		ft.script(platIBridgeArgv, tgtResult{stdout: ""})
 		c = tgtCollection(ft, Options{Platform: hostinventory.PlatformDarwin})
 		platDarwinProtection(t.Context(), c)
-		if c.report.Protection.TPM == nil || c.report.Protection.TPM.Present || c.report.Protection.SecureBoot == nil || *c.report.Protection.SecureBoot {
+		if c.report.Protection.TPM == nil || c.report.Protection.TPM.Present || c.report.Protection.SecureEnclave == nil || *c.report.Protection.SecureEnclave.Present ||
+			c.report.Protection.SecureBoot == nil || *c.report.Protection.SecureBoot {
 			t.Fatalf("intel: %+v", c.report.Protection)
 		}
 		if c.report.Sections[SectionDiskEncryption] != SectionUnsupported {
@@ -448,7 +450,7 @@ func TestPlatWindowsProtectionThroughCollect(t *testing.T) {
 		c := tgtCollection(ft, Options{Platform: hostinventory.PlatformWindows})
 		platWindowsProtection(t.Context(), c)
 		s := c.report.Sections
-		if s[SectionDiskEncryption] != SectionPartial || s[SectionTPM] != SectionPartial || s[SectionSecureBoot] != SectionOK || s[SectionTokens] != SectionOK {
+		if s[SectionDiskEncryption] != SectionPartial || s[SectionTPM] != SectionPartial || s[SectionSecureBoot] != SectionOK || s[SectionTokens] != SectionOK || s[SectionFIPSMode] != SectionOK {
 			t.Fatalf("%v", s)
 		}
 
@@ -456,7 +458,7 @@ func TestPlatWindowsProtectionThroughCollect(t *testing.T) {
 		ft = newPlatFakeWin(t, local)
 		c = tgtCollection(ft, Options{Platform: hostinventory.PlatformWindows})
 		platWindowsProtection(t.Context(), c)
-		if c.report.Sections[SectionTPM] != SectionFailed {
+		if c.report.Sections[SectionTPM] != SectionFailed || c.report.Sections[SectionFIPSMode] != SectionFailed {
 			t.Fatalf("%v", c.report.Sections)
 		}
 	}
@@ -483,7 +485,7 @@ func TestPlatRealLinuxProtection(t *testing.T) {
 	if rep.Sections[SectionTPM] != SectionOK || rep.Protection.TPM == nil {
 		t.Fatalf("tpm: %v", rep.Sections)
 	}
-	if rep.Protection.FIPSMode == nil {
+	if rep.Protection.FIPSMode == nil || rep.Sections[SectionFIPSMode] != SectionOK {
 		t.Fatalf("fips: %+v", rep.Errors)
 	}
 	b, _ := json.Marshal(rep.Protection)

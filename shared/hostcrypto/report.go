@@ -76,6 +76,9 @@ const (
 	SectionTPM            = "tpm"
 	SectionSecureBoot     = "secure_boot"
 	SectionTokens         = "tokens"
+	// SectionFIPSMode is the operating system's FIPS switch
+	// ([Protection.FIPSMode]): unsupported where the platform has none.
+	SectionFIPSMode = "fips_mode"
 	// SectionProcesses is pass 3: which running process holds which library,
 	// keystore or key file open, and which socket it listens on.
 	SectionProcesses = "processes"
@@ -119,7 +122,9 @@ type Report struct {
 	SSH          SSH             `json:"ssh"`
 	Configs      []CryptoConfig  `json:"configs,omitempty"`
 	Libraries    []CryptoLibrary `json:"libraries,omitempty"`
-	Protection   Protection      `json:"protection"`
+	// Protection is absent when no protection fact was read (omitzero):
+	// an empty object never stands for "nothing to report".
+	Protection Protection `json:"protection,omitzero"`
 
 	// Sections is the outcome of every section, by name. See the Section
 	// constants.
@@ -156,7 +161,7 @@ type Location struct {
 	// is empty and Store is set.
 	Path string `json:"path,omitempty"`
 	// Store names a platform store: `Cert:\LocalMachine\My`, a macOS keychain
-	// path, a CNG key storage provider.
+	// path. A store key's provider is in [PrivateKey.Provider].
 	Store string `json:"store,omitempty"`
 	// Container is the keystore file an entry lives in, with Alias its name
 	// there. Empty for a file that is the item itself.
@@ -267,6 +272,15 @@ const (
 	KeyProtectionEnclave  = "enclave" // Secure Enclave
 )
 
+// What a platform-store key's provider keeps it in.
+const (
+	ProviderKindSoftware      = "software"
+	ProviderKindTPM           = "tpm"
+	ProviderKindSmartCard     = "smartcard"
+	ProviderKindSecureEnclave = "secure-enclave"
+	ProviderKindUnknown       = "unknown" // the provider could not be read
+)
+
 // PrivateKey describes one private key. It never holds the key.
 type PrivateKey struct {
 	Location Location `json:"location"`
@@ -292,6 +306,13 @@ type PrivateKey struct {
 	// Exportable is Windows and keychain only: whether the store lets the key
 	// be exported. Nil elsewhere.
 	Exportable *bool `json:"exportable,omitempty"`
+	// Provider is a platform-store key's provider, as the platform names it:
+	// "Microsoft Software Key Storage Provider", "Microsoft Platform Crypto
+	// Provider", "Microsoft Enhanced Cryptographic Provider v1.0", "macOS
+	// keychain". Empty for a file.
+	Provider string `json:"provider,omitempty"`
+	// ProviderKind is one of the ProviderKind constants. Empty for a file.
+	ProviderKind string `json:"provider_kind,omitempty"`
 	// PublicKeySHA256 is the SHA-256 of the key's SubjectPublicKeyInfo, in
 	// hex: the same value a matching [Certificate] carries. Empty when the
 	// public half could not be derived without the passphrase.
@@ -510,9 +531,12 @@ type CryptoLibrary struct {
 
 // Protection is what the platform itself provides.
 type Protection struct {
-	Volumes    []VolumeEncryption `json:"volumes,omitempty"`
-	TPM        *TPM               `json:"tpm,omitempty"`
-	SecureBoot *bool              `json:"secure_boot,omitempty"`
+	Volumes []VolumeEncryption `json:"volumes,omitempty"`
+	TPM     *TPM               `json:"tpm,omitempty"`
+	// SecureEnclave is Apple's Secure Enclave, macOS only. It is not a TPM
+	// and is not reported as one. Nil where it was not read.
+	SecureEnclave *SecureEnclave `json:"secure_enclave,omitempty"`
+	SecureBoot    *bool          `json:"secure_boot,omitempty"`
 	// FIPSMode is the operating system's FIPS switch. Nil when the platform
 	// has none or it could not be read.
 	FIPSMode *bool `json:"fips_mode,omitempty"`
@@ -536,6 +560,14 @@ type VolumeEncryption struct {
 	// Status is the platform's own word where it has one: "FullyEncrypted",
 	// "EncryptionInProgress".
 	Status string `json:"status,omitempty"`
+}
+
+// SecureEnclave describes a Mac's Secure Enclave.
+type SecureEnclave struct {
+	// Present is nil when it could not be told.
+	Present *bool `json:"present,omitempty"`
+	// Kind is "apple-silicon" or "t2".
+	Kind string `json:"kind,omitempty"`
 }
 
 // TPM describes the host's Trusted Platform Module.
