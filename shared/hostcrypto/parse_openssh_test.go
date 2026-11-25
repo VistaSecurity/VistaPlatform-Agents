@@ -250,7 +250,7 @@ func TestParseAuthorizedKeys(t *testing.T) {
 	}
 	for i, w := range want {
 		g := got[i]
-		if g.Algorithm != w.alg || g.SizeBits != w.bits || g.Restricted == nil || *g.Restricted != w.restricted || g.CertificateAuthority != w.ca {
+		if g.Algorithm != w.alg || g.SizeBits != w.bits || g.Restricted == nil || *g.Restricted != w.restricted || g.CertificateAuthority == nil || *g.CertificateAuthority != w.ca {
 			t.Errorf("line %d: got %+v (restricted %v), want %+v", i, g, g.Restricted, w)
 		}
 		if !strings.HasPrefix(g.Fingerprint, "SHA256:") {

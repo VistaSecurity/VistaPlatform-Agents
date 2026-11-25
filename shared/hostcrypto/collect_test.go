@@ -302,11 +302,11 @@ func TestRegistryDeterministic(t *testing.T) {
 }
 
 func TestCollectEmpty(t *testing.T) {
-	// The passes register in their own files; this is the collector with
-	// none.
+	// The header and scope, with no pass registered (the passes register in
+	// their own files and are tested there).
 	saved := passes
+	t.Cleanup(func() { passes = saved })
 	passes = nil
-	defer func() { passes = saved }()
 	ft := newTgtFakeTarget(true)
 	rep, err := Collect(context.Background(), ft, Options{
 		Platform: "linux", AgentID: "agent-1", Now: tgtNow,
