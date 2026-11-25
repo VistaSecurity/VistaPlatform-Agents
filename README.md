@@ -13,8 +13,8 @@ they do not score or judge.
 ## Quick start
 
 Standalone mode is in
-[`v6.1.0-rc.1`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0-rc.1)
-and later (not in v6.0.0, which GitHub labels "Latest" until v6.1.0 ships).
+[`v6.1.0`](https://github.com/VistaSecurity/VistaPlatform-Agents/releases/tag/v6.1.0)
+and later (not in v6.0.0 or earlier).
 Download the archive for your system ("[Which file do I need](#which-file-do-i-need)"),
 verify it ([`docs/verify-release.md`](docs/verify-release.md)), unpack it, then:
 
