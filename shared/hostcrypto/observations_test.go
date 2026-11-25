@@ -63,6 +63,8 @@ var jobDefOf = map[reflect.Type]string{
 	reflect.TypeOf(Token{}):              "token",
 	reflect.TypeOf(StepError{}):          "step_error",
 	reflect.TypeOf(LimitHit{}):           "limit_hit",
+	reflect.TypeOf(Coverage{}):           "coverage",
+	reflect.TypeOf(SkippedFile{}):        "skipped_file",
 }
 
 type jobSchemaObject struct {
@@ -149,19 +151,11 @@ func jobStructsOf(t reflect.Type, seen map[reflect.Type]bool) {
 // property is a field, and required is exactly the fields that are always
 // written. This is the test that fails when report.go gains a field the
 // schema lacks (or loses one it has).
-// jobSchemaPending names the Report fields (and their types) added on the
-// coverage branch whose schema the job builder adds when merging it: the
-// schema files are theirs. Remove these entries with that change.
-var jobSchemaPending = map[string]bool{"coverage": true, "Coverage": true, "SkippedFile": true}
-
 func TestJobSchemaNamesEveryReportField(t *testing.T) {
 	doc := jobLoadSchemaDoc(t)
 	seen := map[reflect.Type]bool{}
 	jobStructsOf(reflect.TypeOf(Report{}), seen)
 	for typ := range seen {
-		if jobSchemaPending[typ.Name()] {
-			continue
-		}
 		def, ok := jobDefOf[typ]
 		if !ok {
 			t.Errorf("%s is reachable from Report but has no schema definition (add one, and a jobDefOf entry)", typ.Name())
@@ -175,15 +169,6 @@ func TestJobSchemaNamesEveryReportField(t *testing.T) {
 			}
 		}
 		names, optional := jobFields(typ)
-		if typ == reflect.TypeOf(Report{}) {
-			var kept []string
-			for _, n := range names {
-				if !jobSchemaPending[n] {
-					kept = append(kept, n)
-				}
-			}
-			names = kept
-		}
 		var props []string
 		for p := range obj.Properties {
 			props = append(props, p)
@@ -242,7 +227,7 @@ func TestJobSchemaDocumentsEveryConstant(t *testing.T) {
 	}{
 		{"", "mode", []string{string(hostinventory.ModeLocal), string(hostinventory.ModeRemote)}},
 		{"", "sections", []string{SectionOK, SectionPartial, SectionFailed, SectionUnsupported, SectionSkipped}},
-		{"location", "found_by", []string{FoundByProcess, FoundByConfig, FoundByKnownLocation, FoundBySweep, FoundByPlatformStore}},
+		{"location", "found_by", []string{FoundByProcess, FoundByConfig, FoundByKnownLocation, FoundBySweep, FoundByPlatformStore, FoundByNeighbour}},
 		{"private_key", "format", []string{KeyFormatPKCS1, KeyFormatSEC1, KeyFormatPKCS8, KeyFormatDSA, KeyFormatOpenSSH, KeyFormatPuTTY, KeyFormatPGP, KeyFormatSSH1, KeyFormatPlatformStore}},
 		{"private_key", "protection", []string{KeyProtectionFile, KeyProtectionSoftware, KeyProtectionTPM, KeyProtectionHSM, KeyProtectionEnclave}},
 		{"private_key", "provider_kind", []string{ProviderKindSoftware, ProviderKindTPM, ProviderKindSmartCard, ProviderKindSecureEnclave, ProviderKindUnknown}},
@@ -911,4 +896,62 @@ func TestJobBoundCutsToFitAndMarksThePasses(t *testing.T) {
 		t.Errorf("an uncut section was marked: %v", sent.Sections)
 	}
 	t.Logf("kept %d of %d keys in %d bytes", len(sent.PrivateKeys), len(r.PrivateKeys), len(b))
+}
+
+// Coverage never survives a cut: a report too large for the bound loses its
+// coverage before any item, says so, and when items are then cut there is no
+// covered directory left to make the platform retire them. A report that
+// fits keeps its coverage.
+func TestJobBoundDropsCoverageBeforeAnyItem(t *testing.T) {
+	s := jobCompile(t, "defs/host-crypto-report.json")
+	mk := func(keys int) *Report {
+		r := &Report{Collected: time.Now().UTC(), Mode: hostinventory.ModeLocal, Platform: "linux",
+			Sections: map[string]string{SectionPlatform: SectionOK, SectionPrivateKeys: SectionOK}}
+		for i := 0; i < keys; i++ {
+			r.PrivateKeys = append(r.PrivateKeys, PrivateKey{Location: Location{Path: fmt.Sprintf("/etc/app/k%05d.key", i), FoundBy: FoundByKnownLocation},
+				Format: KeyFormatPKCS8, Protection: KeyProtectionFile})
+		}
+		r.Coverage = Coverage{Directories: []string{"/etc/app"}, SkippedFiles: []SkippedFile{{Path: "/etc/app/big.p12", Reason: "larger than the read bound"}}}
+		return r
+	}
+	// Fits: coverage kept.
+	b, sent, err := ResultPayload(mk(10), DefaultMaxResultBytes)
+	if err != nil || len(sent.Coverage.Directories) != 1 {
+		t.Fatalf("a report that fits lost its coverage: %v %+v", err, sent.Coverage)
+	}
+	if err := jobValidate(s, b); err != nil {
+		t.Fatal(err)
+	}
+	// Items cut: coverage gone, and the limit says why.
+	r := mk(20000)
+	full, _ := json.Marshal(r)
+	b, sent, err = ResultPayload(r, len(full)/2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.PrivateKeys) >= 20000 {
+		t.Fatal("no item was cut; the test proves nothing")
+	}
+	if len(sent.Coverage.Directories) != 0 || len(sent.Coverage.SkippedFiles) != 0 || strings.Contains(string(b), `"coverage":{`) {
+		t.Fatalf("items were cut and coverage survived: %+v", sent.Coverage)
+	}
+	if !jobHasLimit(sent, "coverage") {
+		t.Fatalf("the coverage drop is not recorded: %v", sent.Limits)
+	}
+	if len(r.Coverage.Directories) != 1 {
+		t.Fatal("the caller's report was changed")
+	}
+	if err := jobValidate(s, b); err != nil {
+		t.Fatal(err)
+	}
+	// Just over the bound with coverage the largest part: coverage alone goes.
+	r = mk(10)
+	for i := 0; i < 2000; i++ {
+		r.Coverage.Directories = append(r.Coverage.Directories, fmt.Sprintf("/srv/d%05d/%s", i, strings.Repeat("x", 100)))
+	}
+	full, _ = json.Marshal(r)
+	_, sent, err = ResultPayload(r, len(full)-100)
+	if err != nil || len(sent.PrivateKeys) != 10 || len(sent.Coverage.Directories) != 0 || !jobHasLimit(sent, "coverage") {
+		t.Fatalf("coverage was not dropped first: keys %d, coverage %d, %v", len(sent.PrivateKeys), len(sent.Coverage.Directories), err)
+	}
 }

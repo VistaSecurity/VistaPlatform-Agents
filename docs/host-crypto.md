@@ -78,6 +78,18 @@ something says so in its error, with what it needs: "(needs root)", "(needs
 root and Full Disk Access)" or "(needs SYSTEM or an elevated administrator)".
 The same error from several places is listed once, with a count.
 
+A report also says which directories it saw completely (`coverage`): a
+directory is listed only when every file directly in it was listed and
+identified, and is in the report or among `coverage.skipped_files` with the
+reason it was not read. For a listed directory, a file-based item an earlier
+report had there and this one lacks is gone; a directory not listed means
+nothing either way. A file found because it sits in a covered directory
+beside one a configuration or a running process named is recorded with
+`found_by` `neighbour`.
+Coverage is bounded (`limits` with section `coverage`), and a report cut to
+fit the 16 MiB bound carries no coverage at all, so a cut can never make an
+item read as gone.
+
 Every part of a report says whether it was read completely (`ok`), in part
 (`partial`), not at all (`failed`), cannot be on this system (`unsupported`)
 or was not asked for (`skipped`). An empty list means "none found" only when
@@ -147,8 +159,9 @@ A collection visits at most 200,000 files, opens no file over 10 MiB, keeps at
 most 2,000 items per section and stops after 15 minutes; a collection you ask
 for may raise these to 1,000,000 files, 64 MiB, 10,000 items and an hour. A
 report sent to the platform is at most 16 MiB: past that, certificates are
-sent without their PEM first and then the longest lists are shortened, and
-each section shortened says so. One collection runs at a time, and stopping
+sent without their PEM first, then the coverage is left out, and then the
+longest lists are shortened; each section shortened, and the coverage, says
+so. One collection runs at a time, and stopping
 the agent stops a collection in flight (a collection you asked for then sends
 what it had, marked as not finished).
 

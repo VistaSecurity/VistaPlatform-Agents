@@ -205,7 +205,7 @@ other than certificates, environment variables, commands or annotations.
 
 | Field | Meaning |
 |---|---|
-| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
+| `report` | The host's cryptography, exactly as a managed `host_crypto` job reports it ([`schemas/managed/v1/defs/host-crypto-report.json`](../schemas/managed/v1/defs/host-crypto-report.json)): `mode` (`local` or `remote`), `platform`, `access` (whether the run was elevated and, on macOS, had Full Disk Access), `scope` (what was asked for), `certificates`, `private_keys` (never a key: algorithm, size, format, encryption, who can read it, a SHA-256 of its public half), `keystores`, `ssh`, `configs`, `libraries`, `protection`, `coverage` (the directories seen completely, and the files in them that were not read, with why), `sections` (each `ok`, `partial`, `failed`, `unsupported` or `skipped`), `errors` and `limits`. See [`host-crypto.md`](host-crypto.md). |
 
 An empty list means "none found" only when its section says `ok`.
 

@@ -71,6 +71,9 @@
     "protection": {
       "$ref": "#/$defs/protection"
     },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    },
     "sections": {
       "type": "object",
       "propertyNames": {
@@ -175,7 +178,7 @@
         },
         "found_by": {
           "type": "string",
-          "description": "Values today: process, config, known_location, sweep, platform_store. A reader must accept others (a newer agent may add one)."
+          "description": "Values today: process, config, known_location, sweep, platform_store, neighbour (in the directory of a file a configuration or a process named, found because that directory was covered). A reader must accept others (a newer agent may add one)."
         },
         "used_by": {
           "type": "array",
@@ -823,6 +826,43 @@
           "type": "string"
         },
         "detail": {
+          "type": "string"
+        }
+      },
+      "description": "A bound that cut a section short. section is a section name or coverage (limits max_directories and max_records: covered directories or skipped files beyond the bound were not listed, so those directories are not covered); limit includes max_result_bytes when the result bound cut the report."
+    },
+    "coverage": {
+      "type": "object",
+      "description": "The directories this collection saw completely (Report.Coverage). A directory is listed only when its direct entries were all listed and every regular file directly in it is in the report or in skipped_files: for a listed directory, a file-based item directly in it that an earlier collection reported and this one does not is gone. Not listed means not known, never gone. Absent when the collection covered nothing or the report was cut to fit (a limit with section coverage and limit max_result_bytes then says so).",
+      "properties": {
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Absolute paths of the directories seen completely; each covers only its direct entries."
+        },
+        "skipped_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/skipped_file"
+          }
+        }
+      }
+    },
+    "skipped_file": {
+      "type": "object",
+      "required": [
+        "path",
+        "reason"
+      ],
+      "description": "A file in a covered directory that was not read, and why; an item at its path is not gone.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
           "type": "string"
         }
       }
