@@ -72,7 +72,7 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 		for _, pw := range []struct {
 			password string
 			isDef    bool
-		}{{"changeit", true}, {"password", true}, {"", true}, {"Not-A-Default-9", false}} {
+		}{{"changeit", true}, {"password", true}, {"", false}, {"Not-A-Default-9", false}} {
 			p12, err := tc.enc.Encode(fx.key, fx.leaf, []*x509.Certificate{fx.ca}, pw.password)
 			if err != nil {
 				t.Fatal(err)
@@ -102,15 +102,20 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 			if ks.DefaultPassword == nil || *ks.DefaultPassword != pw.isDef || on.DefaultsNotTried != "" {
 				t.Errorf("%s: DefaultPassword %v (%q), want %v", label, ks.DefaultPassword, on.DefaultsNotTried, pw.isDef)
 			}
-			if !pw.isDef {
+			if !pw.isDef && pw.password != "" {
 				if ks.Opened != OpenedWithoutPassword || len(on.Certificates) != 0 || ks.EntryCount != nil {
 					t.Errorf("%s: listed with a wrong password: %+v", label, ks)
 				}
 				continue
 			}
 			// The key, with its own certificate, is one entry; the unrelated
-			// root is the other.
-			if ks.Opened != OpenedDefaultPassword || len(on.Certificates) != 2 || ks.EntryCount == nil || *ks.EntryCount != 2 {
+			// root is the other. An empty password opens the store too, and
+			// says it needs none.
+			wantOpened := OpenedDefaultPassword
+			if pw.password == "" {
+				wantOpened = OpenedWithoutPassword
+			}
+			if ks.Opened != wantOpened || len(on.Certificates) != 2 || ks.EntryCount == nil || *ks.EntryCount != 2 {
 				t.Fatalf("%s: opened %q, %d certificates, %+v", label, ks.Opened, len(on.Certificates), ks.Entries)
 			}
 			pk := ksKeyEntry(ks)
@@ -454,7 +459,9 @@ func TestParsePKCS12_HiddenKeyIterationsCostNothing(t *testing.T) {
 		if d := time.Since(start); d > 30*time.Second {
 			t.Fatalf("%s: took %v", name, d)
 		}
-		if err != nil || got.Keystore.DefaultPassword == nil || !*got.Keystore.DefaultPassword || len(got.Certificates) != 1 {
+		// Opened either way; only "changeit" is a default.
+		wantDefault := strings.Contains(name, "changeit")
+		if err != nil || got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword != wantDefault || len(got.Certificates) != 1 {
 			t.Errorf("%s: %v %q %+v", name, err, got.DefaultsNotTried, got.Keystore)
 		}
 		if !strings.Contains(got.Keystore.Protection, "keys: PBES2 (PBKDF2-HMAC-SHA256, 2000000000 iterations, AES-256-CBC)") {

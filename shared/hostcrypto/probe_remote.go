@@ -618,12 +618,12 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 	case "default":
 		ks.Opened, ks.DefaultPassword = OpenedDefaultPassword, &yes
 	case "empty":
+		// Listed with the empty password: the store needs none (or, for a
+		// listing keytool did not verify, its password is not known). Either
+		// way no well-known default opened it.
 		ks.Opened = OpenedWithoutPassword
 		if tried {
-			// The empty password is one of the well-known defaults; a
-			// listing keytool did not verify proves no password at all.
-			v := !unverified
-			ks.DefaultPassword = &v
+			ks.DefaultPassword = &no
 		}
 	case "locked":
 		ks.Unknown = "remote: the keystore needs a password; entries not read"
