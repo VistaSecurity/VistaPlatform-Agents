@@ -207,11 +207,12 @@ func TestPKCS12HiddenPartReasons(t *testing.T) {
 
 // TestPKCS12RetryBudget: a store that fitted the trial budget before the
 // empty password was tried apart still gets its answer (the other parts are
-// budgeted once, under the password that passes the check); a retry the
-// budget does not allow is not run, and the part says it was not tried.
+// budgeted once, under the password that passes the check); a retry whose
+// key equals one already tried is not run again; and a retry the budget
+// does not allow leaves "does a default open this?" unanswered.
 func TestPKCS12RetryBudget(t *testing.T) {
 	if testing.Short() {
-		t.Skip("derives keys at 600,000 and 900,000 iterations")
+		t.Skip("derives keys at 600,000 to 1,200,000 iterations")
 	}
 	a := ksTestCert(t, ksTestECDSA(t), "costly", false)
 	// 600,000 PBKDF2 iterations cost 1,200,000: five of them (the old
@@ -222,16 +223,71 @@ func TestPKCS12RetryBudget(t *testing.T) {
 		t.Fatalf("a store that fitted before: %v %q %+v", err, got.DefaultsNotTried, got.Keystore)
 	}
 	// 900,000 iterations cost 1,800,000: the first try (the empty password,
-	// which passes the MAC) and one retry fit, the retry with "changeit"
-	// does not, so the part is reported as not tried, never as refused.
-	cut := ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "changeit", 900_000, ksCertSafeBag(t, a.Raw)))
+	// which passes the MAC) and the retry with "changeit" fit, because the
+	// second spelling of the empty password is the same PBES2 key and is
+	// not derived again.
+	same := ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "changeit", 900_000, ksCertSafeBag(t, a.Raw)))
+	got, err = ParsePKCS12(same, true)
+	if ks := got.Keystore; err != nil || got.DefaultsNotTried != "" || ks.Opened != OpenedDefaultPassword || ks.DefaultPassword == nil || !*ks.DefaultPassword || len(got.Certificates) != 1 {
+		t.Fatalf("the empty password's second spelling was derived again: %v %q %+v", err, got.DefaultsNotTried, ks)
+	}
+	// 1,200,000 iterations cost 2,400,000: the first try fits, the retry
+	// with "changeit" does not. The defaults were not tried on that part,
+	// so DefaultPassword has no answer and the store says why, as an
+	// untried store does; the part's reason is the cost, not refusal.
+	cut := ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "changeit", 1_200_000, ksCertSafeBag(t, a.Raw)))
 	got, err = ParsePKCS12(cut, true)
-	if err != nil || got.DefaultsNotTried != "" {
+	if err != nil || got.DefaultsNotTried != ksNotTriedCost {
 		t.Fatalf("cut: %v %q", err, got.DefaultsNotTried)
 	}
 	ks := got.Keystore
-	if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || ks.EntryCount != nil ||
-		!strings.Contains(ks.Unknown, "does not try") || strings.Contains(ks.Unknown, "neither empty") {
+	if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword != nil || ks.EntryCount != nil ||
+		!strings.Contains(ks.Unknown, "iteration count is above the limit") || strings.Contains(ks.Unknown, "neither empty") || strings.Contains(ks.Unknown, "does not try") {
 		t.Fatalf("cut: %+v", ks)
+	}
+}
+
+// TestPKCS12WrongPasswordPaddingIsNotUnreadable: a wrong candidate that
+// happens to give valid padding (about once in 256) decrypts to garbage; that
+// is the candidate not opening the part, not the part being unreadable. The
+// case is built directly: the part is encrypted under "changeit" around bytes
+// that are not SafeContents, the MAC takes the empty password, and the part
+// is rebuilt until the empty password's key gives invalid padding, so only
+// the retry with "changeit" decrypts it.
+func TestPKCS12WrongPasswordPaddingIsNotUnreadable(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "listed", false)
+	listed := ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))
+	var part ksContentInfo
+	for i := 0; ; i++ {
+		if i > 64 {
+			t.Fatal("could not build a part the empty password does not decrypt")
+		}
+		part = ksEncryptedBytes(t, "changeit", 1, []byte("decrypts with valid padding, but is no SafeContents"))
+		var ed ksEncryptedData
+		if err := ksUnmarshalAll(part.Content.Bytes, &ed); err != nil {
+			t.Fatal(err)
+		}
+		_, open, ok := ksP12Decrypter(ed.EncryptedContentInfo.ContentEncryptionAlgorithm, ed.EncryptedContentInfo.EncryptedContent.Bytes)
+		if !ok {
+			t.Fatal("the part's scheme is not decrypted here")
+		}
+		if _, ok := open(ksP12Password{bmp: []byte{0, 0}, utf8: []byte{}, empty: true}); !ok {
+			break
+		}
+	}
+	got, err := ParsePKCS12(ksBuildPFX(t, ksStr(""), listed, part), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks := got.Keystore
+	if strings.Contains(ks.Unknown, "not a list of entries") || !strings.Contains(ks.Unknown, "neither empty nor a well-known default") ||
+		ks.DefaultPassword == nil || *ks.DefaultPassword {
+		t.Fatalf("a wrong password's garbage was called unreadable: %+v", ks)
+	}
+	// Under the password that passed the check, the same garbage is
+	// unreadable: that password is the store's.
+	got, err = ParsePKCS12(ksBuildPFX(t, ksStr("changeit"), part), true)
+	if err != nil || !strings.Contains(got.Keystore.Unknown, "not a list of entries") {
+		t.Fatalf("under the store's password: %v %+v", err, got.Keystore)
 	}
 }

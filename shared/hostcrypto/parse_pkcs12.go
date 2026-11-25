@@ -402,9 +402,9 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	if tryDefaults {
 		res, reason := st.trial(maxEntries)
 		out.DefaultsNotTried = reason
+		// An empty password is no default: the store needs none.
+		found, empty = res == ksP12OpenedByDefault, res == ksP12OpenedByEmpty
 		if reason == "" {
-			// An empty password is no default: the store needs none.
-			found, empty = res == ksP12OpenedByDefault, res == ksP12OpenedByEmpty
 			out.Keystore.DefaultPassword = &found
 		}
 	}
@@ -440,15 +440,18 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 // hiddenReason says, for every part that stayed shut, only what the trial
 // established about it: that every candidate was tried and refused, that a
 // candidate decrypted it to something that is not a list of entries, or that
-// it was not tried (public-key encrypted, an algorithm not decrypted here,
-// or a retry the budget did not allow). Each reason that applies is given.
+// its retries were cut for cost, or that it was not tried at all
+// (public-key encrypted, an algorithm not decrypted here). Each reason that
+// applies is given.
 func (st *ksP12Structure) hiddenReason() string {
-	var refused, unreadable, untried bool
+	var refused, unreadable, costly, untried bool
 	for _, p := range st.parts {
 		switch {
 		case p.opened:
 		case p.unreadable:
 			unreadable = true
+		case p.cut:
+			costly = true
 		case p.refused:
 			refused = true
 		default:
@@ -461,6 +464,9 @@ func (st *ksP12Structure) hiddenReason() string {
 	}
 	if unreadable {
 		why = append(why, "part of the store decrypted to contents that are not a list of entries")
+	}
+	if costly {
+		why = append(why, "part of the store was not tried with every default password: its iteration count is above the limit")
 	}
 	if untried {
 		why = append(why, "part of the store is protected in a way the collector does not try")
@@ -878,6 +884,9 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		idx  int
 		cost int
 		open func(pw ksP12Password) ([]byte, bool)
+		// key is the password as the part's scheme uses it: two
+		// candidates with the same key are one try.
+		key func(pw ksP12Password) string
 	}
 	var openers []opener
 	for i, p := range st.parts {
@@ -885,7 +894,7 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 			continue
 		}
 		if cost, open, ok := ksP12Decrypter(p.alg, p.content); ok {
-			openers = append(openers, opener{idx: i, cost: cost, open: open})
+			openers = append(openers, opener{idx: i, cost: cost, open: open, key: ksP12KeyMaterial(p.alg)})
 		}
 	}
 
@@ -937,9 +946,12 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 	}
 	left := ksMaxTrialWork - total
 
-	// open walks a part the password opens into st.bags; a decryption whose
-	// plaintext is not SafeContents marks the part unreadable.
-	open := func(o opener, pw ksP12Password) bool {
+	// open walks a part the password opens into st.bags. Under the password
+	// that passed the store's check, a decryption whose plaintext is not
+	// SafeContents marks the part unreadable; under any other candidate it
+	// is that candidate not opening the part (a wrong password yields valid
+	// padding about once in 256 tries).
+	open := func(o opener, pw ksP12Password, passed bool) bool {
 		pt, ok := o.open(pw)
 		if !ok {
 			return false
@@ -947,7 +959,9 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		before := len(st.bags)
 		if st.walkSafeContents(pt, maxEntries, 1) != nil {
 			st.bags = st.bags[:before]
-			st.parts[o.idx].unreadable = true
+			if passed {
+				st.parts[o.idx].unreadable = true
+			}
 			return false
 		}
 		st.parts[o.idx].opened = true
@@ -962,22 +976,26 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		// a well-known default that opens any part of the store is found
 		// even when the empty password passed the check, and a store whose
 		// MAC is a default but a part is empty is listed in full.
-		byDefault := !pw.empty
+		byDefault, cut := !pw.empty, false
 		for _, o := range openers {
-			if open(o, pw) {
+			if open(o, pw, true) {
 				continue
 			}
+			tried := map[string]bool{o.key(pw): true}
 			opened := false
 			for _, other := range cands {
-				if other.empty == pw.empty && bytes.Equal(other.bmp, pw.bmp) {
-					continue
+				k := o.key(other)
+				if tried[k] {
+					continue // the same key for this part's scheme
 				}
+				tried[k] = true
 				if o.cost > left {
 					st.parts[o.idx].cut = true
+					cut = true
 					break
 				}
 				left -= o.cost
-				if open(o, other) {
+				if open(o, other, false) {
 					byDefault = byDefault || !other.empty
 					opened = true
 					break
@@ -987,12 +1005,32 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 				st.parts[o.idx].refused = true
 			}
 		}
-		if byDefault {
+		switch {
+		case byDefault:
 			return ksP12OpenedByDefault, ""
+		case cut:
+			// A default was not tried on every part: "does a default open
+			// this?" has no answer, which is said as for an untried store.
+			return ksP12OpenedByEmpty, ksNotTriedCost
 		}
 		return ksP12OpenedByEmpty, ""
 	}
 	return ksP12NotOpened, ""
+}
+
+// ksP12KeyMaterial is the password as a part's scheme derives from it: PBES2
+// takes UTF-8 (where the empty string and no bytes are one key), the PKCS#12
+// schemes the terminated BMPString (where they are two).
+func ksP12KeyMaterial(alg ksAlgorithmIdentifier) func(pw ksP12Password) string {
+	if alg.Algorithm.Equal(ksOIDPBES2) {
+		return func(pw ksP12Password) string { return "u:" + string(pw.utf8) }
+	}
+	return func(pw ksP12Password) string {
+		if pw.bmp == nil {
+			return "n:"
+		}
+		return "b:" + string(pw.bmp)
+	}
 }
 
 // ksHashFor maps a digest OID (as a PKCS#12 MacData names it) or an HMAC OID
