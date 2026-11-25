@@ -130,7 +130,7 @@ host budget); a path a batch did not answer is asked for singly. Pass 1
 prefetches through it on a remote target: at its start, every plain file the
 location tables name and every directory it would list, so a directory the
 host does not have (most of them, on any one host) costs no listing; then,
-per table entry, the files the listing returned. On xps15 (Windows 11, the
+per table entry, the files the listing returned. On a Windows 11 test host (the
 production SSH runner) pass 1 went from 218 commands and 125-152 s to 26
 commands and about 22 s. A target without the interface, or a local one,
 makes the single calls.

@@ -260,7 +260,7 @@ func TestRemoteWindowsStat(t *testing.T) {
 // TestRemoteWindowsReadFileGuard is the Windows half of the guard: for every
 // file that is not public ReadFile returns ErrNotPublic and the only script
 // sent is psIdentify. Mutation-checked by deleting the Public() test in
-// ReadFile. It includes the reviewer's xps15 reproductions: a UTF-16 file
+// ReadFile. It includes the reviewer's reproductions on a Windows host: a UTF-16 file
 // that Select-String decoded as a certificate, and a UTF-16 certificate with
 // an ASCII private key after it.
 func TestRemoteWindowsReadFileGuard(t *testing.T) {
