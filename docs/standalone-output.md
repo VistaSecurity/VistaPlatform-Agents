@@ -231,6 +231,8 @@ Always last.
 | `warnings` | The warnings, as text, when there are any: packets dropped, an interrupted run, a collector section that did not complete, the SSH host key accepted without a pin. |
 | `partial` | `true` when some part failed; the exit status is then 2. |
 | `scope` | How much was looked at, in words: "3 addresses in 1 target, depth standard, pace polite", or the packet count of a capture. |
+| `step_errors` | `host-crypto` only: how many step errors the report holds (its `errors`); `errors` above counts error records. |
+| `partial_sections` | `host-crypto` only: the report's sections that did not complete (`partial`, or `failed` marked so). |
 | `duration_seconds`, `finished_at` | How long the run took and when it ended. |
 
 ## The CSV

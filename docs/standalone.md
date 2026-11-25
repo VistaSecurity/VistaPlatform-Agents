@@ -263,13 +263,17 @@ fullest result; on macOS give the terminal Full Disk Access too.
   credential comes from `--identity-file` (a private key only you can read;
   its passphrase from `VISTA_DEVICE_KEY_PASSPHRASE`), a `--credentials` file
   (`username`, `password`, `private_key`, `passphrase`) or
-  `VISTA_DEVICE_PASSWORD`. `--ssh-host-key` pins the host key; without it the
-  key is checked against `known_hosts`, or accepted on first contact, and the
-  summary names the pin to use next time.
+  `VISTA_DEVICE_PASSWORD`. `--ssh-host-key SHA256:...` pins the host's key.
+  Without a pin your `~/.ssh/known_hosts` decides, strictly: a host it does
+  not list is refused, and the error says how to pin it. Only with no
+  `known_hosts` file at all is the key accepted on first contact; the summary
+  then names the pin to use next time. Details:
+  [`host-crypto.md`](host-crypto.md#another-host-over-ssh).
 - `--home-directories` and `--default-keystore-passwords`: the two opt-ins.
-- `--exclude PATH` (repeatable): never entered. `--root PATH` (repeatable):
-  swept for key material by content (by name and size with `--remote`); no
-  sweep without one.
+- `--exclude PATH` (repeatable): never entered. `--root PATH` (repeatable, at
+  most 16): swept for key material by content (by name and size with
+  `--remote`); no sweep without one. Not a whole filesystem; a root in a home
+  directory needs `--home-directories`.
 - `--max-duration` bounds the run (default 15 minutes, 1 minute to 1 hour).
 - The output file is readable by you alone on every system, because it says
   where every key on the host is and who can read it: 0600 on Linux and

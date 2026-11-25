@@ -631,7 +631,9 @@ func HostKeyHint(err error) string {
 		if len(ke.Want) > 0 {
 			return "the host's key is not the one known_hosts lists for it: if the host was rebuilt, verify its new key and update known_hosts; otherwise this is what an interception looks like"
 		}
-		return "the host is not in the known_hosts file of the account the agent runs as, which is then used strictly: pin the host's key (SHA256:..., from `ssh-keyscan HOST | ssh-keygen -lf -` checked against the host itself), or add the host to that known_hosts"
+		return "the host is not in the known_hosts file of the account the agent runs as, which is then used strictly: pin the host's key " +
+			"(the SHA256 fingerprint of the key the host presents to the agent, usually its ECDSA key: `ssh-keyscan HOST | ssh-keygen -lf -` lists them, " +
+			"checked against the host itself; a wrong pin's refusal names the key presented), or add the host to that known_hosts"
 	}
 	var me *sshtrust.MismatchError
 	if errors.As(err, &me) {

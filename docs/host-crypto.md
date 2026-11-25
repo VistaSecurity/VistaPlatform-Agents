@@ -69,7 +69,7 @@ bytes, raw, hex or base64, may appear in what it returns.
    by that configuration.
 3. **The running system**: which process listens on which port, which crypto
    libraries it has loaded and which key or keystore files it holds open.
-4. **A sweep**, only when you name roots (`--root`, or `sweep_roots` in a
+4. **A sweep**, only when you name roots (the `host_crypto_sweep_roots` setting, `--root`, or `sweep_roots` in a
    job): files under them are identified by their content, so a key saved as
    `backup.txt` is found.
 
@@ -116,6 +116,21 @@ takes them from its configuration file.
   `changeme`, `password`, empty) against Java and PKCS#12 keystores. Only
   whether one worked is recorded; the password and the contents are not.
 
+## Directories it sweeps
+
+The sweep identifies files by their content, so a key saved as `backup.txt`
+is found; it covers only the directories you name. `host_crypto_sweep_roots`
+(one absolute path per line, at most 16) lists them for every collection by
+that agent: the scheduled one, and added to every collection you ask for
+(`sweep_roots`), as the excluded paths are. A standalone run takes `--root`.
+Two rules hold whoever names a root: a whole filesystem (`/`, a drive root
+such as `C:\`, a share root) is refused, because the file bounds would end
+its sweep in the first directories it met and the rest would be reported as
+cut; and a directory in a home directory (`/home`, `/Users`, `/root`,
+`C:\Users`) is swept only when home directories are included. A root that
+breaks one is left out and the report's errors say which and why. Remotely
+the sweep goes by file name and size only.
+
 ## Paths it never enters
 
 `host_crypto_exclude_paths` (one absolute path per line, at most 64) lists
@@ -140,15 +155,32 @@ what it had, marked as not finished).
 ## Another host, over SSH
 
 A remote collection connects with the credentials stored for that host
-(username and password, or a private key). When a key is pinned for the host,
-a different key aborts the connection before any credential is sent. Without
-a pin the key is checked against the agent's `known_hosts`, or, on first
-contact, accepted; either way the result names the key it connected through
-and how it was trusted (`ssh_host_key_fingerprint`,
-`ssh_host_key_verification`), so the platform can show it and pin it for the
-next collection. Until it is pinned, a first collection trusts the key it is
-shown and sends the credential to that host: pin the key when you can. The
-agent never falls back to anything weaker. WinRM is not
+(username and password, or a private key). The host's key is trusted by the
+same rule as every remote collection the agent makes (remote host inventory
+included), decided before any credential is sent:
+
+| | The host's key is |
+|---|---|
+| A key is pinned for the host | compared with the pin; a different key stops the connection |
+| No pin, and the agent's account has a `~/.ssh/known_hosts` file | checked against that file, strictly: a host the file does not list is **refused** ("knownhosts: key is unknown"), as is one it lists with another key |
+| No pin, and no `known_hosts` file | accepted on first contact |
+
+The installed agent's account normally has no `known_hosts` file (Linux and
+macOS: the agent's own account, whose home is its install directory;
+Windows: SYSTEM), so an unpinned managed collection accepts the key on first
+contact, and its result names the key and how it was trusted
+(`ssh_host_key_fingerprint`, `ssh_host_key_verification`: `pinned`,
+`known_hosts`, `first_use`) so the platform can show it and pin it for the
+next collection. Until it is pinned, that first collection sends the
+credential to whichever host answered: pin the key when you can. A
+standalone `--remote` run is made as you, and your own `known_hosts`, which
+usually exists, then decides: a host it does not list is refused, and the
+error says how to proceed: pin the key with `--ssh-host-key SHA256:...` (the
+fingerprint of the key the host presents, usually its ECDSA key; `ssh-keyscan
+HOST | ssh-keygen -lf -` lists them, to check against the host itself, and a
+wrong pin's refusal names the key presented), or add the host to
+`known_hosts` with `ssh`. Nothing is ever accepted that one of these rules
+refuses. WinRM is not
 supported; a Windows host is reached through its OpenSSH server, with
 PowerShell 5.1 or later.
 
@@ -201,6 +233,16 @@ These are known and accepted:
 - A kept configuration value crosses as written, apart from long base64 or hex
   runs, which are replaced by `[redacted]`. A path-shaped value is kept whole,
   so a base64 secret that begins with `/` can, rarely, cross with it.
+
+## In a container
+
+An agent running in a Kubernetes pod sees the container's filesystem, not the
+node's, so a local collection there describes the container image. The
+scheduled collection is off by default everywhere and stays so in a pod; if
+it is turned on there, or a local collection is asked for, the agent logs a
+note and the report's errors say that it describes the container
+(step `platform`). To describe a node, ask for a remote collection of it over
+SSH, which works from a pod as from anywhere.
 
 ## Supported systems
 
