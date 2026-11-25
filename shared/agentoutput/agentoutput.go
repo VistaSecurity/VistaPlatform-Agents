@@ -41,6 +41,7 @@ const (
 	KindScanHost            Kind = "scan_host"
 	KindDeviceInterrogation Kind = "device_interrogation"
 	KindHostInventory       Kind = "host_inventory"
+	KindKubernetesInventory Kind = "kubernetes_inventory"
 	KindError               Kind = "error"
 	KindSummary             Kind = "summary"
 )

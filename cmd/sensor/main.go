@@ -336,10 +336,19 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 // resolve and a device opens) without starting it. Without a packet capture
 // (tests that drive registration alone) there is nothing to check.
 func (s *Sensor) capturePreflight() error {
-	if s.packetCapture == nil {
+	if s.packetCapture == nil || s.captureOff() {
 		return nil
 	}
 	return s.packetCapture.Preflight()
+}
+
+// captureOff reports whether this sensor runs without passive capture: it was
+// configured so (capture.disabled, CAPTURE_DISABLED: the sensor in a
+// Kubernetes pod), or this build has no capture library. Such a sensor opens
+// no interface, needs no capture privileges, and does everything else a
+// sensor does: it enrolls, heartbeats and runs the platform's scan jobs.
+func (s *Sensor) captureOff() bool {
+	return !capture.Built || (s.config != nil && s.config.Capture.Disabled)
 }
 
 // startupStateLine is the line the sensor prints once it is up. It reports what
@@ -435,7 +444,7 @@ func main() {
 		// installs that cannot answer a prompt. The sensor pins the platform CA
 		// only if it hashes to this value — which, unlike the interactive
 		// prompt, is not trust-on-first-use.
-		caFingerprint = flag.String("ca-fingerprint", "",
+		caFingerprint = flag.String("ca-fingerprint", os.Getenv("PLATFORM_CA_FINGERPRINT"),
 			"Expected SHA-256 fingerprint of the control plane's CA certificate. Required for unattended "+
 				"enrollment against a control plane whose certificate is signed by a private CA this host does not trust.")
 	)
@@ -1212,6 +1221,14 @@ func (s *Sensor) retryUnpersistedCredentials() {
 func (s *Sensor) start() error {
 	log.Println("🚀 Starting sensor...")
 
+	if s.captureOff() {
+		// The capture object still exists: scan results and enrichment reach
+		// the submission pipeline through its discoveries channel.
+		log.Println("ℹ️  Passive capture is off for this sensor: no interface is opened. It runs scan jobs only.")
+		log.Println("✅ Sensor started")
+		return nil
+	}
+
 	// Start packet capture
 	if err := s.packetCapture.Start(); err != nil {
 		return fmt.Errorf("failed to start packet capture: %v", err)
@@ -1937,6 +1954,9 @@ func (s *Sensor) handleUpdateInterfaces(command models.Command) *models.CommandR
 // PacketCapture.Stop() closes it. Capture sends are non-blocking, so Stop()'s
 // wg.Wait() can't deadlock while the consumer loop is parked here.
 func (s *Sensor) reinitCapture() error {
+	if s.captureOff() {
+		return errors.New("passive capture is off for this sensor (it runs scan jobs only), so there are no monitored interfaces to change")
+	}
 	// Bring the replacement up FIRST. If it cannot start, the running capture
 	// and enricher are untouched, so the main loop never reads channels of a
 	// capture that was stopped and never replaced (a nil discovery, an error
@@ -2253,7 +2273,20 @@ func isFlagSet(name string) bool {
 // directory the sensor happened to be started from must not shadow the
 // enrolled config, so it is only a last resort.
 func findDefaultConfigFile() string {
-	return pickDefaultConfigFile(defaultConfigCandidates(getDefaultDataPath())...)
+	return pickDefaultConfigFile(defaultConfigCandidates(configuredDataPath())...)
+}
+
+// configuredDataPath is where this sensor keeps its enrollment: DATA_PATH when
+// the environment sets it (a container, where the data directory is a mounted
+// volume), else the platform default. Without this a sensor started with
+// DATA_PATH enrolled, saved its identity there, and on its next start looked
+// for it in the default directory, found nothing, and tried to enroll again
+// with a spent key.
+func configuredDataPath() string {
+	if p := strings.TrimSpace(os.Getenv("DATA_PATH")); p != "" {
+		return p
+	}
+	return getDefaultDataPath()
 }
 
 // defaultConfigCandidates lists the default config locations in precedence

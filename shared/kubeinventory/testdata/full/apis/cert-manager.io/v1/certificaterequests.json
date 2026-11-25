@@ -1,0 +1,64 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "web-3",
+    "uid": "ccde509b-8c63-429c-8233-756c3b13be01",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "namespace": "shop",
+    "ownerReferences": [
+     {
+      "apiVersion": "cert-manager.io/v1",
+      "kind": "Certificate",
+      "name": "web",
+      "uid": "64cfd161-f303-4f87-828d-4c495a2bab56",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "issuerRef": {
+     "group": "cert-manager.io",
+     "kind": "ClusterIssuer",
+     "name": "internal-ca"
+    },
+    "request": "{{CSR:web}}",
+    "usages": [
+     "server auth"
+    ],
+    "duration": "2160h0m0s"
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Approved",
+      "status": "True"
+     },
+     {
+      "type": "Ready",
+      "status": "True",
+      "reason": "Issued"
+     }
+    ],
+    "certificate": "{{CERT:web}}",
+    "ca": "{{CERT:ca-internal}}"
+   }
+  }
+ ]
+}

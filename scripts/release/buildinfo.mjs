@@ -26,7 +26,9 @@ export function modulesOf(info) {
   });
 }
 
-// expect: { modulePath, command, goos, goarch, cgo, version, sourceSha, goVersion }
+// expect: { modulePath, command, goos, goarch, cgo, version, sourceSha, goVersion, tags }
+// tags: the build tags a container build must carry (release/agents.json
+// image.build_tags); undefined for every other build, which uses none.
 export function checkBuildInfo(info, expect) {
   const errors = [];
   const s = settingsOf(info);
@@ -45,7 +47,8 @@ export function checkBuildInfo(info, expect) {
   // information (go.dev/issue/52372), so the version stamp is checked in the
   // binary itself (checkVersionStamp) and, on the smoked targets, by running it.
   if (s.has('-ldflags')) errors.push('-ldflags is recorded, so this binary was not built with -trimpath as scripts/build.sh builds');
-  if (s.has('-tags') && s.get('-tags') !== '') errors.push(`build tags ${JSON.stringify(s.get('-tags'))}: release builds use none`);
+  if (expect.tags) want('build tags', s.get('-tags'), expect.tags);
+  else if (s.has('-tags') && s.get('-tags') !== '') errors.push(`build tags ${JSON.stringify(s.get('-tags'))}: release builds use none`);
   for (const d of info.Deps || []) {
     if (d.Replace) errors.push(`module ${d.Path} is replaced (${d.Replace.Path})`);
     if (!/^v\d/.test(d.Version || '')) errors.push(`module ${d.Path} has no released version (${JSON.stringify(d.Version)})`);

@@ -1,0 +1,2639 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/defs/kubernetes-inventory.json",
+  "title": "Kubernetes inventory (one part of one collection)",
+  "description": "What a kubernetes_inventory job returns, as the kubernetes_inventory member of a device agent job result (docs/design/kubernetes-inventory.md). The device agent reads the Kubernetes API of the cluster it runs in, with its own service account and read-only verbs, and projects each object onto the fields below. The document is closed at every level: a field this schema does not name is an error. Collect posture, never key material: no member can hold the content of a Secret other than certificates, and no member holds a private key. Every pod, Service and declared port is attributed to the cluster (cluster.id, required in every part), to its namespace and to a workload.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "collection_id",
+    "part",
+    "collected_at",
+    "cluster"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "collection_id": {
+      "type": "string",
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "One id per collection, the same in every part of it."
+    },
+    "part": {
+      "type": "object",
+      "description": "A collection is sent as `count` job results, `index` 0 first. Part 0 carries `cluster` in full, `sections`, `collector`, `mesh` and `api_server`; the lists may continue across parts. Nothing is to be marked removed until every part has arrived.",
+      "required": [
+        "index",
+        "count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "collector": {
+      "type": "object",
+      "required": [
+        "tls_secrets"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tls_secrets": {
+          "type": "string",
+          "enum": [
+            "not_enabled",
+            "enabled"
+          ],
+          "description": "Whether this deployment was set up to read TLS Secrets. Only the cluster's administrators can enable it; no job parameter can."
+        },
+        "agent_namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        }
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "description": "The UID of the kube-system namespace: the cluster's stable id. Every row of the collection belongs to this cluster."
+        },
+        "kubernetes_version": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "version_major": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "version_minor": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "distribution": {
+          "type": "string",
+          "enum": [
+            "eks",
+            "aks",
+            "gke",
+            "rke2",
+            "k3s",
+            "openshift",
+            "kubeadm",
+            "unknown"
+          ]
+        },
+        "node_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ca_certificates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The cluster CA bundle (the kube-root-ca.crt ConfigMap).",
+          "maxItems": 32
+        },
+        "api_endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "address",
+              "port"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/ip"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          },
+          "description": "The API server's own endpoints (the endpoints of the default/kubernetes Service).",
+          "maxItems": 64
+        },
+        "pod_cidrs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr"
+          },
+          "maxItems": 4096
+        },
+        "service_cidrs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr"
+          },
+          "maxItems": 16
+        }
+      }
+    },
+    "sections": {
+      "type": "object",
+      "required": [
+        "cluster",
+        "nodes",
+        "namespaces",
+        "workloads",
+        "pods",
+        "services",
+        "ingresses",
+        "gateways",
+        "cert_manager",
+        "certificate_signing_requests",
+        "tls_secrets",
+        "mesh_istio",
+        "mesh_linkerd",
+        "mesh_cilium",
+        "api_server_certificate",
+        "kubelet_certificates",
+        "control_plane_node_certificates",
+        "admission_webhooks",
+        "api_services"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cluster": {
+          "$ref": "#/$defs/section"
+        },
+        "nodes": {
+          "$ref": "#/$defs/section"
+        },
+        "namespaces": {
+          "$ref": "#/$defs/section"
+        },
+        "workloads": {
+          "$ref": "#/$defs/section"
+        },
+        "pods": {
+          "$ref": "#/$defs/section"
+        },
+        "services": {
+          "$ref": "#/$defs/section"
+        },
+        "ingresses": {
+          "$ref": "#/$defs/section"
+        },
+        "gateways": {
+          "$ref": "#/$defs/section"
+        },
+        "cert_manager": {
+          "$ref": "#/$defs/section"
+        },
+        "certificate_signing_requests": {
+          "$ref": "#/$defs/section"
+        },
+        "tls_secrets": {
+          "$ref": "#/$defs/section"
+        },
+        "mesh_istio": {
+          "$ref": "#/$defs/section"
+        },
+        "mesh_linkerd": {
+          "$ref": "#/$defs/section"
+        },
+        "mesh_cilium": {
+          "$ref": "#/$defs/section"
+        },
+        "api_server_certificate": {
+          "$ref": "#/$defs/section"
+        },
+        "kubelet_certificates": {
+          "$ref": "#/$defs/section"
+        },
+        "control_plane_node_certificates": {
+          "$ref": "#/$defs/section"
+        },
+        "admission_webhooks": {
+          "$ref": "#/$defs/section"
+        },
+        "api_services": {
+          "$ref": "#/$defs/section"
+        }
+      },
+      "description": "One answer per class, every class every time."
+    },
+    "mesh": {
+      "$ref": "#/$defs/mesh"
+    },
+    "api_server": {
+      "$ref": "#/$defs/handshake"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "namespaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/namespace"
+      }
+    },
+    "workloads": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/workload"
+      }
+    },
+    "pods": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pod"
+      }
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "ingresses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ingress"
+      }
+    },
+    "gateways": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/gateway"
+      }
+    },
+    "routes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/route"
+      }
+    },
+    "cert_manager_certificates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/cert_manager_certificate"
+      }
+    },
+    "cert_manager_issuers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/cert_manager_issuer"
+      }
+    },
+    "cert_manager_requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/cert_manager_request"
+      }
+    },
+    "certificate_signing_requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/certificate_signing_request"
+      }
+    },
+    "tls_secrets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tls_secret"
+      }
+    },
+    "istio_peer_authentications": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/istio_peer_authentication"
+      }
+    },
+    "istio_destination_rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/istio_destination_rule"
+      }
+    },
+    "linkerd_servers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/linkerd_server"
+      }
+    },
+    "linkerd_authorization_policies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/linkerd_authorization_policy"
+      }
+    },
+    "kubelets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/kubelet"
+      }
+    },
+    "admission_webhooks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/admission_webhook"
+      }
+    },
+    "api_services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/api_service"
+      }
+    },
+    "certificates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/certificate"
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "part": {
+        "properties": {
+          "index": {
+            "const": 0
+          }
+        }
+      }
+    }
+  },
+  "then": {
+    "required": [
+      "sections",
+      "collector"
+    ]
+  },
+  "$defs": {
+    "ip": {
+      "description": "An IPv4 or IPv6 address. Pod and Service addresses are not unique between clusters: read them only together with cluster.id.",
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "ipv4"
+        },
+        {
+          "type": "string",
+          "format": "ipv6"
+        }
+      ]
+    },
+    "cidr": {
+      "type": "string",
+      "maxLength": 49,
+      "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+    },
+    "labels": {
+      "type": "object",
+      "description": "Label keys and values in Kubernetes label syntax (a value is at most 63 characters of letters, digits, '-', '_' and '.').",
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 317,
+        "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?/)?[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 63,
+        "pattern": "^[A-Za-z0-9._-]*$"
+      }
+    },
+    "workload_ref": {
+      "type": "object",
+      "description": "The workload a pod or Service belongs to, in the same namespace as the row that carries it. It names one entry of `workloads`.",
+      "required": [
+        "kind",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Z][A-Za-z0-9]*$",
+          "description": "Deployment, StatefulSet, DaemonSet, CronJob, Job, ReplicaSet, Pod (a pod nothing owns), Node (a static pod), or the kind of another controller that owns the pods."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        }
+      }
+    },
+    "object_ref": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "description": "A Ready-style condition. `message` is the controller's text after redaction, cut to 512 characters.",
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "section": {
+      "type": "object",
+      "description": "How one class answered. ok: read in full, so an empty list means none exist. failed: it should have been readable and was not (rows already read are still sent, and nothing may be marked removed). unsupported: this cluster does not have it, this deployment was not given it, or this release does not collect it.",
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "failed",
+            "unsupported"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "not_permitted",
+            "not_installed",
+            "not_enabled",
+            "not_requested",
+            "not_collected_in_this_release",
+            "api_error",
+            "timeout",
+            "item_limit",
+            "unreachable"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        }
+      },
+      "else": {
+        "required": [
+          "reason"
+        ]
+      }
+    },
+    "certificate": {
+      "type": "object",
+      "description": "One certificate, in the field names of defs/certificate.json (a closed subset of it). Each distinct certificate appears once per collection; every other row names it by fingerprint_sha256.",
+      "required": [
+        "subject_dn",
+        "issuer_dn",
+        "fingerprint_sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "subject_dn": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "issuer_dn": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "serial_number": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "not_before": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "not_after": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "key_algorithm": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "key_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signature_alg": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "is_ca": {
+          "type": "boolean"
+        },
+        "certificate_pem": {
+          "type": "string",
+          "maxLength": 65536,
+          "pattern": "^-----BEGIN CERTIFICATE-----\\n[A-Za-z0-9+/=\\n]+\\n-----END CERTIFICATE-----\\n$",
+          "description": "Exactly one CERTIFICATE block. Left out when the job asked for no PEM."
+        },
+        "fingerprint_sha256": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fingerprint_sha1": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "subject_alternative_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "maxItems": 1024
+        },
+        "key_usage": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 16
+        },
+        "extended_key_usage": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
+        }
+      }
+    },
+    "csr": {
+      "type": "object",
+      "description": "What a certificate signing request asks for. The request itself is public; it is parsed and not forwarded.",
+      "additionalProperties": false,
+      "properties": {
+        "subject_dn": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "dns_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 1024
+        },
+        "key_algorithm": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "key_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signature_alg": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "issuer_ref": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        }
+      }
+    },
+    "handshake": {
+      "type": "object",
+      "description": "One TLS handshake the device agent made itself. It makes them only to the API server and to kubelets; every other endpoint is the sensor's to scan.",
+      "required": [
+        "address",
+        "port",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/ip"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "server_name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "refused",
+            "timeout",
+            "unreachable",
+            "tls_error"
+          ]
+        },
+        "tls_version": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "cipher_suite": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "key_exchange_group": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The chain as served, leaf first.",
+          "maxItems": 32
+        },
+        "chains_to_cluster_ca": {
+          "type": "boolean",
+          "description": "Whether the served chain verifies against the cluster CA bundle."
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "name",
+        "uid"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "addresses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "type",
+              "address"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "InternalIP",
+                  "ExternalIP",
+                  "Hostname",
+                  "InternalDNS",
+                  "ExternalDNS"
+                ]
+              },
+              "address": {
+                "type": "string",
+                "maxLength": 253
+              }
+            }
+          },
+          "maxItems": 32
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 63
+          },
+          "maxItems": 16
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "unschedulable": {
+          "type": "boolean"
+        },
+        "kubelet_version": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "container_runtime_version": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "os_image": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "kernel_version": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "operating_system": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "architecture": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "provider_id": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "spec.providerID, which names the machine at its cloud provider."
+        },
+        "machine_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "system_uuid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "pod_cidrs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cidr"
+          },
+          "maxItems": 8
+        },
+        "kubelet_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "namespace": {
+      "type": "object",
+      "required": [
+        "name",
+        "uid"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "Active",
+            "Terminating"
+          ]
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "istio_injection": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled",
+            "unset"
+          ]
+        },
+        "istio_revision": {
+          "type": "string",
+          "maxLength": 63
+        },
+        "istio_mtls_mode": {
+          "type": "string",
+          "enum": [
+            "strict",
+            "permissive",
+            "disabled",
+            "not_meshed",
+            "unknown"
+          ],
+          "description": "The Istio peer-authentication mode in force for the namespace (namespace policy, else mesh policy, else permissive); not_meshed without Istio."
+        },
+        "linkerd_injection": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled",
+            "unset"
+          ]
+        },
+        "linkerd_default_inbound_policy": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "tls_secrets_readable": {
+          "type": "boolean",
+          "description": "Present only when reading TLS Secrets is enabled: whether this namespace's could be listed."
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "description": "A controller and what its pod template declares: images and ports, nothing else of the pod spec (no environment, no commands, no arguments).",
+      "required": [
+        "namespace",
+        "kind",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Z][A-Za-z0-9]*$",
+          "description": "Deployment, StatefulSet, DaemonSet, CronJob, Job, ReplicaSet, Pod (a pod nothing owns), Node (a static pod), or the kind of another controller that owns the pods."
+        },
+        "api_group": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "replicas_desired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replicas_ready": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schedule": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "image"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "image": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "init": {
+                "type": "boolean"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "port",
+                    "protocol"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 63
+                    },
+                    "port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "protocol": {
+                      "type": "string",
+                      "enum": [
+                        "TCP",
+                        "UDP",
+                        "SCTP"
+                      ]
+                    },
+                    "host_port": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    }
+                  }
+                },
+                "maxItems": 256
+              }
+            }
+          },
+          "maxItems": 128
+        },
+        "host_network": {
+          "type": "boolean"
+        },
+        "service_account": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "secret_volumes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+          },
+          "description": "Names of the Secrets the pod template mounts as volumes. Names only.",
+          "maxItems": 256
+        },
+        "mesh_proxy": {
+          "type": "string",
+          "enum": [
+            "none",
+            "istio",
+            "linkerd"
+          ]
+        },
+        "mtls_mode": {
+          "type": "string",
+          "enum": [
+            "strict",
+            "permissive",
+            "disabled",
+            "not_meshed",
+            "unknown"
+          ],
+          "description": "The mesh mTLS mode in force for this workload's pods."
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "pod": {
+      "type": "object",
+      "description": "A pod that has an address. Evidence for its workload, not an object of its own.",
+      "required": [
+        "namespace",
+        "name",
+        "workload",
+        "addresses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workload": {
+          "$ref": "#/$defs/workload_ref"
+        },
+        "node": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "addresses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ip"
+          },
+          "maxItems": 8
+        },
+        "host_network": {
+          "type": "boolean",
+          "description": "true: the addresses are the node's own."
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "Pending",
+            "Running",
+            "Unknown"
+          ]
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name",
+        "type",
+        "backing",
+        "workloads",
+        "ports"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer",
+            "ExternalName"
+          ]
+        },
+        "headless": {
+          "type": "boolean"
+        },
+        "cluster_ips": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ip"
+          },
+          "maxItems": 4
+        },
+        "external_ips": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ip"
+          },
+          "maxItems": 32
+        },
+        "load_balancer_addresses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 32
+        },
+        "external_name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "backing": {
+          "type": "string",
+          "enum": [
+            "workloads",
+            "manual_endpoints",
+            "external_name",
+            "none"
+          ],
+          "description": "What answers behind the Service. `workloads` is non-empty exactly when this is `workloads`."
+        },
+        "workloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workload_ref"
+          },
+          "maxItems": 256
+        },
+        "endpoints_ready": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endpoints_not_ready": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "port",
+              "protocol"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 63
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "protocol": {
+                "type": "string",
+                "enum": [
+                  "TCP",
+                  "UDP",
+                  "SCTP"
+                ]
+              },
+              "app_protocol": {
+                "type": "string",
+                "maxLength": 253
+              },
+              "target_port": {
+                "type": "string",
+                "maxLength": 63,
+                "description": "As declared: a number or a container port name."
+              },
+              "resolved_target_ports": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "description": "The numbers the endpoints actually use for this port.",
+                "maxItems": 64
+              },
+              "node_port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          },
+          "maxItems": 256
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "class_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "controller": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "load_balancer_addresses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 32
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "hosts"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 253
+                },
+                "maxItems": 256
+              },
+              "secret_name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              }
+            }
+          },
+          "maxItems": 256
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "type": "string",
+                "maxLength": 253
+              },
+              "tls": {
+                "type": "boolean",
+                "description": "Whether a tls entry covers this host."
+              },
+              "secret_name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "service"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "path_type": {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    "service": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+                    },
+                    "service_port": {
+                      "type": "string",
+                      "maxLength": 63
+                    }
+                  }
+                },
+                "maxItems": 256
+              }
+            }
+          },
+          "maxItems": 512
+        },
+        "default_backend": {
+          "type": "object",
+          "required": [
+            "service"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "service": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "service_port": {
+              "type": "string",
+              "maxLength": 63
+            }
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "class_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "controller": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "addresses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 32
+        },
+        "listeners": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "port",
+              "protocol"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "hostname": {
+                "type": "string",
+                "maxLength": 253
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "protocol": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "tls_mode": {
+                "type": "string",
+                "enum": [
+                  "Terminate",
+                  "Passthrough"
+                ]
+              },
+              "certificate_refs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/object_ref"
+                },
+                "maxItems": 64
+              },
+              "attached_routes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "maxItems": 64
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": [
+        "kind",
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "HTTPRoute",
+            "GRPCRoute",
+            "TLSRoute",
+            "TCPRoute"
+          ]
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 64
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "section_name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          },
+          "maxItems": 32
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "maxLength": 63,
+                "pattern": "^[A-Z][A-Za-z0-9]*$"
+              },
+              "namespace": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          },
+          "maxItems": 256
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "cert_manager_certificate": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "secret_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "issuer_ref": {
+          "$ref": "#/$defs/issuer_ref"
+        },
+        "common_name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "dns_names": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "maxItems": 1024
+        },
+        "ip_addresses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ip"
+          },
+          "maxItems": 256
+        },
+        "uris": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "maxItems": 256
+        },
+        "is_ca": {
+          "type": "boolean"
+        },
+        "usages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
+        },
+        "duration": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9hms.]+$"
+        },
+        "renew_before": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9hms.]+$"
+        },
+        "key_request": {
+          "type": "object",
+          "description": "What spec.privateKey asks cert-manager to generate. Settings only.",
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "encoding": {
+              "type": "string",
+              "maxLength": 16
+            },
+            "rotation_policy": {
+              "type": "string",
+              "maxLength": 16
+            }
+          }
+        },
+        "ready": {
+          "$ref": "#/$defs/condition"
+        },
+        "not_before": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "not_after": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "renewal_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "cert_manager_issuer": {
+      "type": "object",
+      "description": "An Issuer or ClusterIssuer of cert-manager.io. An issuer of another group is known only through the issuer_ref of the Certificates that name it.",
+      "required": [
+        "scope",
+        "name",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "cluster",
+            "namespace"
+          ]
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "acme",
+            "ca",
+            "self_signed",
+            "vault",
+            "venafi",
+            "unknown"
+          ]
+        },
+        "acme_server": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "acme_solvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "http01",
+              "dns01"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 2
+        },
+        "ca_secret_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "vault_server": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "vault_path": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "venafi_zone": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "ready": {
+          "$ref": "#/$defs/condition"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "cert_manager_request": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "certificate_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "issuer_ref": {
+          "$ref": "#/$defs/issuer_ref"
+        },
+        "is_ca": {
+          "type": "boolean"
+        },
+        "usages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
+        },
+        "duration": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[0-9hms.]+$"
+        },
+        "approval": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "denied",
+            "pending"
+          ]
+        },
+        "ready": {
+          "$ref": "#/$defs/condition"
+        },
+        "csr": {
+          "$ref": "#/$defs/csr"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "status.certificate, leaf first.",
+          "maxItems": 32
+        },
+        "ca_certificates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "status.ca.",
+          "maxItems": 32
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "certificate_signing_request": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "signer_name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "requestor": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "usages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
+        },
+        "expiration_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "approval": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "denied",
+            "failed",
+            "pending"
+          ]
+        },
+        "csr": {
+          "$ref": "#/$defs/csr"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "status.certificate, leaf first.",
+          "maxItems": 32
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "tls_secret": {
+      "type": "object",
+      "description": "A Secret of type kubernetes.io/tls, sent only when the cluster's administrators enabled reading them. The certificates of its tls.crt and ca.crt entries, and nothing of any other entry: there is no field for one.",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cert_manager_certificate": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "owner": {
+          "$ref": "#/$defs/object_ref"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The certificates of the tls.crt entry, leaf first.",
+          "maxItems": 32
+        },
+        "ca_certificates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The certificates of the ca.crt entry.",
+          "maxItems": 32
+        },
+        "unparsed_entries": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "tls.crt",
+              "ca.crt"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Certificate entries that did not parse.",
+          "maxItems": 2
+        }
+      }
+    },
+    "istio_peer_authentication": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name",
+        "scope",
+        "mode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "mesh",
+            "namespace",
+            "workload"
+          ]
+        },
+        "selector": {
+          "$ref": "#/$defs/labels"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "STRICT",
+            "PERMISSIVE",
+            "DISABLE",
+            "UNSET"
+          ]
+        },
+        "port_modes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "port",
+              "mode"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "STRICT",
+                  "PERMISSIVE",
+                  "DISABLE",
+                  "UNSET"
+                ]
+              }
+            }
+          },
+          "maxItems": 256
+        }
+      }
+    },
+    "istio_destination_rule": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "host": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "tls_mode": {
+          "type": "string",
+          "enum": [
+            "DISABLE",
+            "SIMPLE",
+            "MUTUAL",
+            "ISTIO_MUTUAL",
+            "UNSET"
+          ]
+        },
+        "port_tls_modes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "port",
+              "mode"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "DISABLE",
+                  "SIMPLE",
+                  "MUTUAL",
+                  "ISTIO_MUTUAL"
+                ]
+              }
+            }
+          },
+          "maxItems": 256
+        }
+      }
+    },
+    "linkerd_server": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "port": {
+          "type": "string",
+          "maxLength": 63
+        },
+        "proxy_protocol": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "pod_selector": {
+          "$ref": "#/$defs/labels"
+        }
+      }
+    },
+    "linkerd_authorization_policy": {
+      "type": "object",
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "target": {
+          "$ref": "#/$defs/object_ref"
+        },
+        "required_authentications": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/object_ref"
+          },
+          "maxItems": 64
+        }
+      }
+    },
+    "kubelet": {
+      "type": "object",
+      "required": [
+        "node",
+        "address",
+        "port",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "address": {
+          "$ref": "#/$defs/ip"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "server_name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "refused",
+            "timeout",
+            "unreachable",
+            "tls_error"
+          ]
+        },
+        "tls_version": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "cipher_suite": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "key_exchange_group": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The chain as served, leaf first.",
+          "maxItems": 32
+        },
+        "chains_to_cluster_ca": {
+          "type": "boolean",
+          "description": "Whether the served chain verifies against the cluster CA bundle."
+        }
+      }
+    },
+    "admission_webhook": {
+      "type": "object",
+      "required": [
+        "kind",
+        "configuration",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "validating",
+            "mutating"
+          ]
+        },
+        "configuration": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "configuration_uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "service": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "url_host": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "failure_policy": {
+          "type": "string",
+          "enum": [
+            "Fail",
+            "Ignore"
+          ]
+        },
+        "ca_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The certificates of clientConfig.caBundle. Empty: the API server's own trust roots are used.",
+          "maxItems": 32
+        }
+      }
+    },
+    "api_service": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 253
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "group": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 63
+        },
+        "service": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "insecure_skip_tls_verify": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "ca_bundle": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "The certificates of spec.caBundle.",
+          "maxItems": 32
+        }
+      }
+    },
+    "mesh": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "istio": {
+          "type": "object",
+          "required": [
+            "present"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "present": {
+              "type": "boolean"
+            },
+            "root_namespace": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "mesh_mtls_mode": {
+              "type": "string",
+              "enum": [
+                "strict",
+                "permissive",
+                "disabled",
+                "not_meshed",
+                "unknown"
+              ]
+            },
+            "trust_anchors": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "description": "The mesh root certificates.",
+              "maxItems": 32
+            }
+          }
+        },
+        "linkerd": {
+          "type": "object",
+          "required": [
+            "present"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "present": {
+              "type": "boolean"
+            },
+            "namespace": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "trust_anchors": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "description": "The identity trust anchors.",
+              "maxItems": 32
+            }
+          }
+        },
+        "cilium": {
+          "type": "object",
+          "required": [
+            "present"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "present": {
+              "type": "boolean"
+            },
+            "encryption": {
+              "type": "string",
+              "enum": [
+                "none",
+                "wireguard",
+                "ipsec",
+                "unknown"
+              ]
+            },
+            "node_encryption": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  }
+}

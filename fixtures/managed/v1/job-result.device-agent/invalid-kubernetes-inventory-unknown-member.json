@@ -1,0 +1,575 @@
+{
+  "job_id": "5d0c2a4e-7b1f-4c3a-9e2d-6f8a1b0c9d7e",
+  "success": true,
+  "completed_at": "2026-01-02T03:04:05Z",
+  "kubernetes_inventory": {
+    "schema_version": 1,
+    "collection_id": "00000000-0000-4000-8000-00000000c011",
+    "part": {
+      "index": 0,
+      "count": 1
+    },
+    "collected_at": "2026-01-02T03:04:05Z",
+    "cluster": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "kubernetes_version": "v1.33.4",
+      "version_major": "1",
+      "version_minor": "33",
+      "platform": "linux/amd64",
+      "distribution": "kubeadm",
+      "node_count": 1,
+      "ca_certificates": [
+        "0101010101010101010101010101010101010101010101010101010101010101"
+      ],
+      "api_endpoints": [
+        {
+          "address": "192.0.2.10",
+          "port": 6443
+        }
+      ],
+      "pod_cidrs": [
+        "198.51.100.0/24"
+      ],
+      "service_cidrs": [
+        "203.0.113.0/24"
+      ]
+    },
+    "ingresses": [
+      {
+        "namespace": "shop",
+        "name": "web",
+        "uid": "00000000-0000-4000-8000-00000000000a",
+        "class_name": "nginx",
+        "controller": "k8s.io/ingress-nginx",
+        "load_balancer_addresses": [
+          "192.0.2.80"
+        ],
+        "tls": [
+          {
+            "hosts": [
+              "shop.example.test"
+            ],
+            "secret_name": "web-tls"
+          }
+        ],
+        "rules": [
+          {
+            "host": "shop.example.test",
+            "tls": true,
+            "secret_name": "web-tls",
+            "paths": [
+              {
+                "path": "/",
+                "path_type": "Prefix",
+                "service": "web",
+                "service_port": "https"
+              }
+            ]
+          },
+          {
+            "host": "plain.example.test",
+            "tls": false,
+            "paths": [
+              {
+                "path": "/",
+                "path_type": "Prefix",
+                "service": "web",
+                "service_port": "443"
+              }
+            ]
+          }
+        ],
+        "created_at": "2026-01-02T03:04:05Z"
+      }
+    ],
+    "gateways": [
+      {
+        "namespace": "shop",
+        "name": "edge",
+        "uid": "00000000-0000-4000-8000-00000000000b",
+        "class_name": "istio",
+        "controller": "istio.io/gateway-controller",
+        "addresses": [
+          "192.0.2.81"
+        ],
+        "listeners": [
+          {
+            "name": "https",
+            "hostname": "api.example.test",
+            "port": 443,
+            "protocol": "HTTPS",
+            "tls_mode": "Terminate",
+            "certificate_refs": [
+              {
+                "kind": "Secret",
+                "name": "web-tls"
+              }
+            ],
+            "attached_routes": 1
+          }
+        ]
+      }
+    ],
+    "routes": [
+      {
+        "kind": "HTTPRoute",
+        "namespace": "shop",
+        "name": "api",
+        "uid": "00000000-0000-4000-8000-00000000000c",
+        "hostnames": [
+          "api.example.test"
+        ],
+        "parents": [
+          {
+            "name": "edge",
+            "section_name": "https"
+          }
+        ],
+        "backends": [
+          {
+            "kind": "Service",
+            "name": "web",
+            "port": 443
+          }
+        ]
+      }
+    ],
+    "cert_manager_certificates": [
+      {
+        "namespace": "shop",
+        "name": "web",
+        "uid": "00000000-0000-4000-8000-00000000000d",
+        "secret_name": "web-tls",
+        "issuer_ref": {
+          "group": "cert-manager.io",
+          "kind": "ClusterIssuer",
+          "name": "internal-ca"
+        },
+        "common_name": "shop.example.test",
+        "dns_names": [
+          "shop.example.test"
+        ],
+        "is_ca": false,
+        "usages": [
+          "server auth"
+        ],
+        "duration": "2160h",
+        "renew_before": "360h",
+        "key_request": {
+          "algorithm": "ECDSA",
+          "size": 256,
+          "rotation_policy": "Always"
+        },
+        "ready": {
+          "status": "true",
+          "reason": "Ready"
+        },
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "renewal_time": "2026-12-17T00:00:00Z",
+        "revision": 3,
+        "created_at": "2026-01-02T03:04:05Z"
+      }
+    ],
+    "cert_manager_issuers": [
+      {
+        "scope": "cluster",
+        "name": "internal-ca",
+        "uid": "00000000-0000-4000-8000-00000000000e",
+        "type": "ca",
+        "ca_secret_name": "internal-ca-root",
+        "ready": {
+          "status": "true",
+          "reason": "KeyPairVerified"
+        }
+      },
+      {
+        "scope": "namespace",
+        "namespace": "shop",
+        "name": "public",
+        "type": "acme",
+        "acme_server": "https://acme.example.test/directory",
+        "acme_solvers": [
+          "http01"
+        ],
+        "ready": {
+          "status": "false",
+          "reason": "ErrRegisterACMEAccount",
+          "message": "the directory could not be reached"
+        }
+      }
+    ],
+    "cert_manager_requests": [
+      {
+        "namespace": "shop",
+        "name": "web-3",
+        "uid": "00000000-0000-4000-8000-00000000000f",
+        "certificate_name": "web",
+        "issuer_ref": {
+          "group": "cert-manager.io",
+          "kind": "ClusterIssuer",
+          "name": "internal-ca"
+        },
+        "approval": "approved",
+        "ready": {
+          "status": "true",
+          "reason": "Issued"
+        },
+        "csr": {
+          "subject_dn": "CN=shop.example.test",
+          "dns_names": [
+            "shop.example.test"
+          ],
+          "key_algorithm": "ECDSA",
+          "key_size": 256,
+          "signature_alg": "ECDSA-SHA256"
+        },
+        "certificate_chain": [
+          "0303030303030303030303030303030303030303030303030303030303030303"
+        ],
+        "ca_certificates": [
+          "0404040404040404040404040404040404040404040404040404040404040404"
+        ],
+        "created_at": "2026-01-02T03:04:05Z"
+      }
+    ],
+    "certificate_signing_requests": [
+      {
+        "name": "csr-abcde",
+        "uid": "00000000-0000-4000-8000-000000000010",
+        "signer_name": "kubernetes.io/kubelet-serving",
+        "requestor": "system:node:node-a.example.test",
+        "usages": [
+          "digital signature",
+          "server auth"
+        ],
+        "approval": "approved",
+        "csr": {
+          "subject_dn": "CN=system:node:node-a.example.test,O=system:nodes",
+          "key_algorithm": "ECDSA",
+          "key_size": 256
+        },
+        "certificate_chain": [
+          "0505050505050505050505050505050505050505050505050505050505050505"
+        ],
+        "created_at": "2026-01-02T03:04:05Z"
+      }
+    ],
+    "istio_peer_authentications": [
+      {
+        "namespace": "istio-system",
+        "name": "default",
+        "uid": "00000000-0000-4000-8000-000000000011",
+        "scope": "mesh",
+        "mode": "PERMISSIVE"
+      },
+      {
+        "namespace": "shop",
+        "name": "default",
+        "uid": "00000000-0000-4000-8000-000000000012",
+        "scope": "namespace",
+        "mode": "STRICT"
+      }
+    ],
+    "istio_destination_rules": [],
+    "kubelets": [
+      {
+        "node": "node-a.example.test",
+        "address": "192.0.2.10",
+        "port": 10250,
+        "status": "ok",
+        "tls_version": "TLS 1.3",
+        "cipher_suite": "TLS_AES_128_GCM_SHA256",
+        "certificate_chain": [
+          "0505050505050505050505050505050505050505050505050505050505050505"
+        ],
+        "chains_to_cluster_ca": true
+      }
+    ],
+    "admission_webhooks": [
+      {
+        "kind": "validating",
+        "configuration": "cert-manager-webhook",
+        "configuration_uid": "00000000-0000-4000-8000-000000000013",
+        "name": "webhook.cert-manager.io",
+        "service": {
+          "namespace": "cert-manager",
+          "name": "cert-manager-webhook",
+          "port": 443
+        },
+        "failure_policy": "Fail",
+        "ca_bundle": [
+          "0707070707070707070707070707070707070707070707070707070707070707"
+        ]
+      }
+    ],
+    "api_services": [
+      {
+        "name": "v1beta1.metrics.k8s.io",
+        "uid": "00000000-0000-4000-8000-000000000014",
+        "group": "metrics.k8s.io",
+        "version": "v1beta1",
+        "service": {
+          "namespace": "kube-system",
+          "name": "metrics-server",
+          "port": 443
+        },
+        "insecure_skip_tls_verify": true,
+        "available": true,
+        "ca_bundle": []
+      }
+    ],
+    "certificates": [
+      {
+        "subject_dn": "CN=kubernetes",
+        "issuer_dn": "CN=kubernetes",
+        "serial_number": "1001",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "RSA",
+        "key_size": 2048,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": true,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0101010101010101010101010101010101010101010101010101010101010101",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": []
+      },
+      {
+        "subject_dn": "CN=kube-apiserver",
+        "issuer_dn": "CN=kubernetes",
+        "serial_number": "1002",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": false,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0202020202020202020202020202020202020202020202020202020202020202",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": [
+          "ServerAuth"
+        ]
+      },
+      {
+        "subject_dn": "CN=shop.example.test",
+        "issuer_dn": "CN=Example Test CA",
+        "serial_number": "1003",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": false,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0303030303030303030303030303030303030303030303030303030303030303",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": [
+          "ServerAuth"
+        ]
+      },
+      {
+        "subject_dn": "CN=Example Test CA",
+        "issuer_dn": "CN=Example Test CA",
+        "serial_number": "1004",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": true,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0404040404040404040404040404040404040404040404040404040404040404",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": []
+      },
+      {
+        "subject_dn": "CN=system:node:node-a.example.test,O=system:nodes",
+        "issuer_dn": "CN=kubernetes",
+        "serial_number": "1005",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": false,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0505050505050505050505050505050505050505050505050505050505050505",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": [
+          "ServerAuth"
+        ]
+      },
+      {
+        "subject_dn": "CN=mesh-root.example.test",
+        "issuer_dn": "CN=mesh-root.example.test",
+        "serial_number": "1006",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": true,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0606060606060606060606060606060606060606060606060606060606060606",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": []
+      },
+      {
+        "subject_dn": "CN=cert-manager-webhook-ca",
+        "issuer_dn": "CN=cert-manager-webhook-ca",
+        "serial_number": "1007",
+        "not_before": "2026-01-01T00:00:00Z",
+        "not_after": "2027-01-01T00:00:00Z",
+        "key_algorithm": "ECDSA",
+        "key_size": 256,
+        "signature_alg": "ECDSA-SHA256",
+        "is_ca": true,
+        "certificate_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNFUlRJRklDQVRFLU5PVC1BLVJFQUwtQ0VSVA==\n-----END CERTIFICATE-----\n",
+        "fingerprint_sha256": "0707070707070707070707070707070707070707070707070707070707070707",
+        "subject_alternative_names": [],
+        "key_usage": [
+          "DigitalSignature"
+        ],
+        "extended_key_usage": []
+      }
+    ],
+    "collector": {
+      "tls_secrets": "enabled"
+    },
+    "sections": {
+      "cluster": {
+        "status": "ok",
+        "count": 1
+      },
+      "nodes": {
+        "status": "ok",
+        "count": 1
+      },
+      "namespaces": {
+        "status": "ok",
+        "count": 2
+      },
+      "workloads": {
+        "status": "ok",
+        "count": 2
+      },
+      "pods": {
+        "status": "ok",
+        "count": 2
+      },
+      "services": {
+        "status": "ok",
+        "count": 3
+      },
+      "ingresses": {
+        "status": "ok",
+        "count": 1
+      },
+      "gateways": {
+        "status": "ok",
+        "count": 1
+      },
+      "cert_manager": {
+        "status": "ok",
+        "count": 3
+      },
+      "certificate_signing_requests": {
+        "status": "ok",
+        "count": 1
+      },
+      "tls_secrets": {
+        "status": "ok",
+        "count": 1
+      },
+      "mesh_istio": {
+        "status": "ok",
+        "count": 2
+      },
+      "mesh_linkerd": {
+        "status": "unsupported",
+        "reason": "not_installed"
+      },
+      "mesh_cilium": {
+        "status": "failed",
+        "reason": "not_permitted",
+        "message": "configmaps \"cilium-config\" is forbidden"
+      },
+      "api_server_certificate": {
+        "status": "ok",
+        "count": 1
+      },
+      "kubelet_certificates": {
+        "status": "ok",
+        "count": 1
+      },
+      "control_plane_node_certificates": {
+        "status": "unsupported",
+        "reason": "not_collected_in_this_release",
+        "message": "etcd, scheduler and controller-manager certificates are files on control-plane nodes."
+      },
+      "admission_webhooks": {
+        "status": "ok",
+        "count": 1
+      },
+      "api_services": {
+        "status": "ok",
+        "count": 1
+      }
+    },
+    "tls_secrets": [
+      {
+        "namespace": "shop",
+        "name": "web-tls",
+        "uid": "00000000-0000-4000-8000-000000000015",
+        "created_at": "2026-01-02T03:04:05Z",
+        "cert_manager_certificate": "web",
+        "owner": {
+          "group": "cert-manager.io",
+          "kind": "Certificate",
+          "name": "web"
+        },
+        "certificate_chain": [
+          "0303030303030303030303030303030303030303030303030303030303030303"
+        ],
+        "ca_certificates": [
+          "0404040404040404040404040404040404040404040404040404040404040404"
+        ]
+      }
+    ],
+    "namespaces": [
+      {
+        "name": "shop",
+        "uid": "00000000-0000-4000-8000-000000000003",
+        "phase": "Active",
+        "labels": {
+          "istio-injection": "enabled"
+        },
+        "created_at": "2026-01-02T03:04:05Z",
+        "istio_injection": "enabled",
+        "istio_mtls_mode": "strict",
+        "tls_secrets_readable": true
+      }
+    ],
+    "config_maps": []
+  }
+}

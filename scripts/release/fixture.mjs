@@ -9,7 +9,10 @@ import { accessSync, constants, cpSync, mkdirSync, mkdtempSync, readFileSync, rm
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { REPO_ROOT, binaryAsset, bundleAsset, expectedArtifacts, loadSurface, packageAsset, parseTag, stableJson } from './lib.mjs';
+import {
+  REPO_ROOT, binaryAsset, bundleAsset, containerBuildDir, expectedArtifacts, expectedImages, loadSurface, packageAsset,
+  parseTag, stableJson,
+} from './lib.mjs';
 import { packageRelease } from './package.mjs';
 import { writeMetadata } from './metadata.mjs';
 
@@ -125,12 +128,24 @@ export function fixtureBuilds(dir, root, version, infoOverride = () => ({}), exe
       writeFileSync(exe, exeContent ? exeContent(agent, t, version) : `fake ${agent.kind} ${t.os}/${t.arch} ${version}\n`);
       infos.set(exe, { ...buildInfoFor(agent, t, version), ...infoOverride(agent, t) });
     }
+    // The container builds of an agent that has an image: static, with the
+    // image's build tags.
+    for (const arch of (agent.image || { arches: [] }).arches) {
+      const d = path.join(builds, containerBuildDir(agent, arch));
+      mkdirSync(d, { recursive: true });
+      const exe = path.join(d, agent.executable);
+      const t = { os: 'linux', arch, cgo: false, container: true };
+      writeFileSync(exe, exeContent ? exeContent(agent, t, version) : `fake ${agent.kind} container linux/${arch} ${version}\n`);
+      const info = buildInfoFor(agent, t, version);
+      info.Settings.push({ Key: '-tags', Value: agent.image.build_tags });
+      infos.set(exe, { ...info, ...infoOverride(agent, t) });
+    }
   }
   return { builds, infos };
 }
 
 // The whole pipeline. Returns { root, assets, state, tag }.
-export function makeRelease({ tag = 'v5.3.0', modules = { 'github.com/example/mit': MIT }, rootOpts, infoOverride, exeContent, provenance = 'attested', afterPackage, smokeExecuted } = {}) {
+export function makeRelease({ tag = 'v5.3.0', modules = { 'github.com/example/mit': MIT }, rootOpts, infoOverride, exeContent, provenance = 'attested', afterPackage, smokeExecuted, imageRepository, imagesPushed = false } = {}) {
   const dir = tempDir();
   const root = fixtureRoot(dir, rootOpts);
   const t = parseTag(tag);
@@ -143,13 +158,13 @@ export function makeRelease({ tag = 'v5.3.0', modules = { 'github.com/example/mi
   const sha = t.channel === 'nightly' ? `${t.sha12}${SHA.slice(12)}` : SHA;
   if (t.channel === 'nightly') for (const [k, v] of infos) infos.set(k, { ...v, Settings: v.Settings.map((s) => (s.Key === 'vcs.revision' ? { ...s, Value: sha } : s)) });
   const res = packageRelease(
-    { builds, tag, sourceSha: sha, sourceTime: SOURCE_TIME, out: assets, state, root, requireNotices: t.channel !== 'nightly' },
+    { builds, tag, sourceSha: sha, sourceTime: SOURCE_TIME, out: assets, state, root, requireNotices: t.channel !== 'nightly', repo: REPO, imageRepository },
     { readBuildInfo: (f) => infos.get(f), moduleDir: fixtureModules(dir, modules), goroot },
   );
   if (res.errors.length) return { dir, root, errors: res.errors };
   if (afterPackage) afterPackage(assets);
   // Placeholder bundles (not signatures) for every artefact; provenance file.
-  for (const a of expectedArtifacts(loadSurface(root), t.version)) writeFileSync(path.join(assets, bundleAsset(a.file)), `{"placeholder":"${a.file}"}\n`);
+  for (const a of [...expectedArtifacts(loadSurface(root), t.version), ...expectedImages(loadSurface(root), t.version)]) writeFileSync(path.join(assets, bundleAsset(a.file)), `{"placeholder":"${a.file}"}\n`);
   if (provenance === 'attested') writeFileSync(path.join(assets, 'provenance.intoto.jsonl'), '{"placeholder":"provenance"}\n');
   const smoke = path.join(dir, 'smoke');
   mkdirSync(smoke);
@@ -164,7 +179,7 @@ export function makeRelease({ tag = 'v5.3.0', modules = { 'github.com/example/mi
   }
   const meta = writeMetadata({
     assets, state, repo: REPO, runUrl: `https://github.com/${REPO}/actions/runs/123/attempts/1`, smoke,
-    provenance, provenanceReason: 'fixture: no attestation', issuedAt: '2026-11-19T11:00:00Z', root,
+    provenance, provenanceReason: 'fixture: no attestation', issuedAt: '2026-11-19T11:00:00Z', root, imagesPushed,
   });
   if (meta.errors.length) return { dir, root, errors: meta.errors };
   for (const f of ['agents-release.json', JSON.parse(readFileSync(path.join(assets, 'agents-release.json'), 'utf8')).initial_record.file]) {

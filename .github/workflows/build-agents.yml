@@ -11,9 +11,15 @@
 #            and macOS), cross-compiled with CGO off otherwise. Each leg runs
 #            scripts/build.sh with AGENT_VERSION from the release, -trimpath,
 #            and uploads only the executable.
+#   build-container
+#            one leg per platform of each agent's container image: the static
+#            executable that goes into it (scripts/build.sh ... container),
+#            cross-compiled with CGO off.
 #   package  checks every binary's build information, generates
-#            THIRD_PARTY_LICENSES, the SBOMs and the packages
-#            (scripts/release/package.mjs).
+#            THIRD_PARTY_LICENSES, the SBOMs, the packages and the container
+#            images (scripts/release/package.mjs). An image is assembled from
+#            the executable alone, without a container engine or a base image
+#            (scripts/release/image.mjs).
 #   smoke    unpacks the packages on linux/amd64, linux/arm64, darwin/amd64
 #            (macos-15-intel), darwin/arm64 (macos-15) and windows/amd64
 #            (windows-2025) runners and runs each agent and its installer's
@@ -45,6 +51,11 @@ on:
         description: Fail when LICENSE or NOTICE is missing (tagged releases)
         required: true
         type: boolean
+      image-repository:
+        description: Where the caller will push the container images (ghcr.io/owner), or empty when it will not
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -111,9 +122,52 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  build-container:
+    name: build (${{ matrix.agent }} container ${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {agent: sensor, os: linux, arch: amd64}
+          - {agent: sensor, os: linux, arch: arm64}
+          - {agent: device-agent, os: linux, arch: amd64}
+          - {agent: device-agent, os: linux, arch: arm64}
+    env:
+      AGENT: ${{ matrix.agent }}
+      TARGET: ${{ matrix.os }}-${{ matrix.arch }}
+      AGENT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build
+        run: scripts/build.sh "$AGENT" "$TARGET" container
+      - name: Stage the executable
+        run: |
+          exe=$(jq -r --arg k "$AGENT" '.agents[] | select(.kind == $k) | .executable' release/agents.json)
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "dist/$AGENT-container/$TARGET/$exe" "$RUNNER_TEMP/out/"
+          # Static: an image holds this file and no library.
+          if file "$RUNNER_TEMP/out/$exe" | grep -q 'dynamically linked'; then
+            echo "::error::$exe for the $AGENT image is dynamically linked"; exit 1
+          fi
+          ls -l "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: build-${{ matrix.agent }}-container-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 3
+
   package:
     name: package
-    needs: build
+    needs: [build, build-container]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -137,10 +191,12 @@ jobs:
           TAG: ${{ inputs.tag }}
           SOURCE_TIME: ${{ inputs.source-time }}
           REQUIRE_NOTICES: ${{ inputs.require-notices }}
+          IMAGE_REPOSITORY: ${{ inputs.image-repository }}
         run: |
           args=(--builds "$RUNNER_TEMP/builds" --tag "$TAG" --source-sha "$GITHUB_SHA" --source-time "$SOURCE_TIME"
-                --out "$RUNNER_TEMP/assets" --state "$RUNNER_TEMP/state")
+                --out "$RUNNER_TEMP/assets" --state "$RUNNER_TEMP/state" --repo "$GITHUB_REPOSITORY")
           [ "$REQUIRE_NOTICES" != true ] || args+=(--require-notices)
+          [ -z "$IMAGE_REPOSITORY" ] || args+=(--image-repository "$IMAGE_REPOSITORY")
           node scripts/release/package.mjs "${args[@]}"
           ls -l "$RUNNER_TEMP/assets"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2

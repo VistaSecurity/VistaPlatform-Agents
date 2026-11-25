@@ -1,0 +1,73 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "metadata": {
+    "name": "csr-node-a",
+    "uid": "329dc404-7e85-4e82-8e46-5ccbf81e5d74",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ]
+   },
+   "spec": {
+    "request": "{{CSR:kubelet-node-a}}",
+    "signerName": "kubernetes.io/kubelet-serving",
+    "username": "system:node:node-a",
+    "usages": [
+     "digital signature",
+     "server auth"
+    ],
+    "expirationSeconds": 86400,
+    "groups": [
+     "system:nodes"
+    ]
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Approved",
+      "status": "True"
+     }
+    ],
+    "certificate": "{{CERT:kubelet-node-a}}"
+   }
+  },
+  {
+   "metadata": {
+    "name": "csr-pending",
+    "uid": "de2151fc-3515-48d4-863f-66237674a434",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "12345",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}",
+     "example.test/note": "annotation-secret-value"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ]
+   },
+   "spec": {
+    "request": "{{CSR:other}}",
+    "signerName": "example.test/signer",
+    "username": "someone"
+   },
+   "status": {}
+  }
+ ]
+}

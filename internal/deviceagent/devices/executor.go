@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/models"
 	"github.com/vistasecurity/vistaplatform-agents/internal/deviceagent/security"
 	di "github.com/vistasecurity/vistaplatform-agents/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform-agents/shared/kubeinventory"
 	"github.com/vistasecurity/vistaplatform-agents/shared/managedprotocol"
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
@@ -55,6 +56,9 @@ type JobExecutor struct {
 	// jobTimeout is the per-job bound when the job names none; zero means
 	// DefaultJobTimeout.
 	jobTimeout time.Duration
+	// kube is where a kubernetes_inventory job gets its client and its
+	// settings; the zero value is the cluster this process runs in.
+	kube kubernetesSource
 }
 
 // NewJobExecutor creates a new job executor.
@@ -106,6 +110,10 @@ func (e *JobExecutor) timeoutFor(job *models.Job) time.Duration {
 	if e.jobTimeout > 0 {
 		return e.jobTimeout
 	}
+	if job.Type == kubeinventory.JobType {
+		// One job reads a whole cluster, not one device.
+		return kubeinventory.DefaultTimeout
+	}
 	return DefaultJobTimeout
 }
 
@@ -131,6 +139,8 @@ func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) 
 		return e.executeDeviceInterrogation(ctx, job, timeout)
 	case JobTypeHostInventory:
 		return e.executeHostInventory(ctx, job)
+	case kubeinventory.JobType:
+		return e.executeKubernetesInventory(ctx, job)
 	case di.JobTypeDeviceDiscovery:
 		if e.negotiated != nil && !e.negotiated(di.CapabilityDeviceDiscovery) {
 			return e.submitUnsupported(job, "the platform did not negotiate "+di.CapabilityDeviceDiscovery+" with this agent")

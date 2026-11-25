@@ -18,6 +18,7 @@ see [vistasecurity.io](https://vistasecurity.io) if you want that.
 | Scan addresses you own | `crypto-sensor scan --target T` |
 | Ask one device about its own cryptography | `device-agent collect --type TYPE --target HOST` |
 | Inventory the machine you are on | `device-agent host-inventory` |
+| Inventory the Kubernetes cluster a pod runs in | `device-agent kubernetes-inventory` |
 
 Every field of the output: [`standalone-output.md`](standalone-output.md). The
 design and the exact rules: [`design/standalone-mode.md`](design/standalone-mode.md).
@@ -211,6 +212,37 @@ Collects the machine's identity, hardware, interfaces, listening ports,
 installed packages and the certificates in its system stores. It contacts
 nothing on the network. Run it as an administrator for the fullest result; as
 an ordinary user some sections may not complete, and the summary says which.
+
+## Inventory the Kubernetes cluster a pod runs in
+
+```bash
+device-agent kubernetes-inventory --out cluster.json --format json
+```
+
+Run it **in a pod** of the cluster. It reads the cluster's API with the pod's
+service account and writes what the cluster declares about its cryptography:
+workloads and the ports they declare, Services and what backs them, TLS on
+Ingress and Gateway listeners, cert-manager, service-mesh mTLS policy, webhook
+and aggregated-API CA bundles, and the certificates the API server and the
+kubelets serve. What is read, and the record field by field:
+[`design/kubernetes-inventory.md`](design/kubernetes-inventory.md).
+
+- It takes **no kubeconfig, token or API server address**. Outside a pod it
+  stops with "not running in a Kubernetes cluster" and writes nothing.
+- It only reads: `get` and `list`, on a fixed list of resources. The service
+  account needs a role that grants them; a class the role does not grant is
+  reported as `failed`, `not_permitted`, and the run is partial (exit 2).
+- It connects to the API server and to each node's kubelet port
+  (`--no-kubelet-probe` turns the second off) and to nothing else. It does not
+  scan Services or pods; `crypto-sensor scan` does that.
+- **Secrets are not read.** `--read-tls-secrets` (or
+  `VISTA_KUBERNETES_READ_TLS_SECRETS=true`) adds the certificates of Secrets
+  of type `kubernetes.io/tls`, and needs permission to list Secrets, which
+  Kubernetes cannot limit to certificates or to that type. The agent asks the
+  API server for TLS Secrets only and never decodes a private key.
+- Labels are reported from a short built-in list; `--label-key KEY` adds one.
+- `--no-certificate-pem` writes each certificate's parsed fields without its
+  PEM; `--timeout` bounds the whole run (default 10 minutes).
 
 ## The output
 

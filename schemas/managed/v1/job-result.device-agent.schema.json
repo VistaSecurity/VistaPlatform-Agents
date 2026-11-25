@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.vistasecurity.io/agents/managed/v1/job-result.device-agent.schema.json",
   "title": "Device agent job result",
-  "description": "POST /api/v1/device-interrogation-service/agents/{id}/results, at most 32 MiB. Everything a collector returns has passed the agent's projection allowlists and Sanitize, and error text passes redaction, before it is sent (collect posture, never key material). facts, relationships, network and warnings are typed by the collectors (shared/deviceinterrogation); their vocabularies are under enums/.",
+  "description": "POST /api/v1/device-interrogation-service/agents/{id}/results, at most 32 MiB. Everything a collector returns has passed the agent's projection allowlists and Sanitize, and error text passes redaction, before it is sent (collect posture, never key material). facts, relationships, network and warnings are typed by the collectors (shared/deviceinterrogation); their vocabularies are under enums/. A kubernetes_inventory job answers with one result per part of its collection, each carrying kubernetes_inventory; the job is complete when the last part (or a failure) has arrived.",
   "type": "object",
   "required": [
     "job_id",
@@ -221,6 +221,9 @@
         "object",
         "null"
       ]
+    },
+    "kubernetes_inventory": {
+      "$ref": "defs/kubernetes-inventory.json"
     }
   },
   "if": {
