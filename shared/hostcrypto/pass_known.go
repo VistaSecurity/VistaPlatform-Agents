@@ -115,19 +115,19 @@ func (e locEntry) section() string {
 
 // locTables returns a platform's system table and its home-directory table.
 // root prefixes every Unix path (tests build a host under a temporary
-// directory; production passes ""); on Windows it is the system drive and
-// defaults to C:.
-func locTables(platform, root string) (system, home []locEntry) {
+// directory; production passes ""); win are a Windows host's roots (C: and the
+// default names when zero).
+func locTables(platform, root string, win locWinRoots) (system, home []locEntry) {
 	switch platform {
 	case "linux":
 		return locLinuxTable(root), locLinuxHomeTable(root)
 	case "darwin":
 		return locDarwinTable(root), locDarwinHomeTable(root)
 	case "windows":
-		if root == "" {
-			root = "C:"
+		if win.Drive == "" {
+			win = locDefaultWinRoots("C:")
 		}
-		return locWindowsTable(root), locWindowsHomeTable(root)
+		return locWindowsTable(win), locWindowsHomeTable(win)
 	}
 	return nil, nil
 }
@@ -142,6 +142,8 @@ type locState struct {
 	root     string
 	platform string
 	style    locStyle
+	// win are a Windows host's roots, asked for once per collection.
+	win locWinRoots
 
 	// visited holds the records of every file parsed, by real path, in
 	// first-seen order (order), until locFlush hands them to the registry.
@@ -566,7 +568,10 @@ func init() {
 // passKnownLocations is pass 1.
 func passKnownLocations(ctx context.Context, c *collection) {
 	st := c.locSt()
-	system, home := locTables(st.platform, st.root)
+	if st.platform == "windows" && st.win.Drive == "" {
+		st.win = c.locWindowsRoots(ctx)
+	}
+	system, home := locTables(st.platform, st.root, st.win)
 	if system == nil {
 		for _, s := range locSections {
 			c.mark(s, SectionUnsupported)
@@ -713,6 +718,7 @@ func (c *collection) locNSSDirs(ctx context.Context, e locEntry, files []FileInf
 			continue
 		}
 		ks.Location = c.locLocation(fi, d, FoundByKnownLocation, nil)
+		ks.Unknown = locUnknownPlatformStore
 		prod := &locProduced{stores: []Keystore{ks}}
 		st.visited[real] = prod
 		st.order = append(st.order, real)
@@ -1072,7 +1078,7 @@ func (c *collection) locKeyFromMarkers(ctx context.Context, f *locFile) (Private
 
 // locSSH1Key describes a legacy SSH-1 key file, which is only ever RSA.
 func locSSH1Key() PrivateKey {
-	return PrivateKey{Format: "ssh1", Algorithm: "RSA", Protection: KeyProtectionFile,
+	return PrivateKey{Format: KeyFormatSSH1, Algorithm: "RSA", Protection: KeyProtectionFile,
 		Unknown: "legacy SSH-1 key file; not parsed"}
 }
 
@@ -1091,6 +1097,7 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 			ks = Keystore{Type: KeystoreKeychain, Opened: OpenedNot}
 		}
 		ks.Location = locCopy(f.loc)
+		ks.Unknown = locUnknownPlatformStore
 		f.prod.stores = append(f.prod.stores, ks)
 		return locRead
 	}
@@ -1101,10 +1108,7 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 				return locRead
 			}
 		}
-		f.prod.stores = append(f.prod.stores, Keystore{Location: locCopy(f.loc), Type: typ, Opened: OpenedNot})
-		if !c.target.Local() {
-			c.locRemoteNote(SectionKeystores, "remote: keystores are recorded by type and permissions; their entries are not read")
-		}
+		f.prod.stores = append(f.prod.stores, Keystore{Location: locCopy(f.loc), Type: typ, Opened: OpenedNot, Unknown: c.locStoreWhyNot(f)})
 		return locRead
 	}
 	b, ok := c.locRead(ctx, f)
@@ -1118,6 +1122,18 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 	}
 	c.locAddKeystore(f, kc)
 	return locRead
+}
+
+// locUnknownPlatformStore is a keychain or NSS database's Unknown: the file is
+// a platform store's, whose contents its own commands read.
+const locUnknownPlatformStore = "contents are read from the platform store, not from the file"
+
+// locStoreWhyNot is a keystore's Unknown when its file is not read.
+func (c *collection) locStoreWhyNot(f *locFile) string {
+	if f.tooBig {
+		return "the file is over the read bound; entries not read"
+	}
+	return "remote: the file is not read; entries need a command on the host"
 }
 
 // locParseKeystore runs the parser for a keystore type.
@@ -1212,14 +1228,13 @@ func (c *collection) locGnuPGFile(ctx context.Context, f *locFile, base string) 
 	ks := Keystore{Location: locCopy(f.loc), Type: KeystoreGnuPG, Opened: OpenedNot}
 	switch {
 	case base == "secring.gpg":
-		ks.Protection = "GnuPG 1 secret keyring; not read"
+		ks.Protection = "GnuPG 1 secret keyring"
+		ks.Unknown = "a secret keyring; not read"
 	case len(f.id.PEMLabels) > 0:
 		ks.Opened = OpenedWithoutPassword
-		ks.Protection = "armoured OpenPGP public keys; not listed"
+		ks.Unknown = "armoured OpenPGP public keys; not listed"
 	case !local || f.tooBig:
-		if !local {
-			c.locRemoteNote(SectionKeystores, "remote: keystores are recorded by type and permissions; their entries are not read")
-		}
+		ks.Unknown = c.locStoreWhyNot(f)
 	default:
 		b, ok := c.locRead(ctx, f)
 		if !ok {
@@ -1308,7 +1323,7 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 	keys, malformed, truncated := ParseAuthorizedKeys(b, c.opts.maxRecordsPerSection())
 	if !c.target.Local() {
 		for i := range keys {
-			keys[i].Restricted = nil
+			keys[i].Restricted, keys[i].CertificateAuthority = nil, nil
 		}
 		c.locRemoteNote(SectionSSH, "remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known")
 	}
@@ -1328,19 +1343,24 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 func (c *collection) locKnownHosts(ctx context.Context, f *locFile) locResult {
 	k := KnownHostsFile{Location: locCopy(f.loc)}
 	if f.fi.Size == 0 {
+		k.Entries, k.Hashed = ksIntPtr(0), cfgBoolPtr(false)
 		f.prod.known = append(f.prod.known, k)
 		return locRead
 	}
 	if !c.locReadable(f) {
+		// Recorded with its location and nil counts: it exists, and who can
+		// read it is known; what it holds is not.
 		c.partial(SectionSSH, fmt.Errorf("%s: known_hosts %s", f.v.Path, c.locWhyNot(f)))
+		f.prod.known = append(f.prod.known, k)
 		return locRead
 	}
 	b, ok := c.locRead(ctx, f)
 	if !ok {
 		return locFailed
 	}
-	k.Entries, k.Hashed = SummariseKnownHosts(b)
+	n, hashed := SummariseKnownHosts(b)
 	clear(b)
+	k.Entries, k.Hashed = ksIntPtr(n), cfgBoolPtr(hashed)
 	f.prod.known = append(f.prod.known, k)
 	return locRead
 }

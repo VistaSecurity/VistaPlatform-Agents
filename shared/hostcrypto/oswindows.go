@@ -1,5 +1,12 @@
 package hostcrypto
 
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+)
+
 // Where Windows keeps cryptographic material in FILES, for pass 1.
 //
 // A table, not build-tagged code: a Linux agent collects a Windows host over
@@ -11,9 +18,67 @@ package hostcrypto
 // usual install directories, Git for Windows' bundle, MIT Kerberos, the ACME
 // clients' certificate folders.
 //
-// drive is the system drive ("C:"). The usual install directories are
-// assumed; one installed elsewhere is reached only through its configuration
-// or the sweep.
+// The system drive and the ProgramData and Program Files directories are the
+// host's (locWindowsRoots): one PowerShell command over a remote connection,
+// the environment on the host itself, C: with a note when neither answers.
+// Below them the usual install directories are assumed; a product installed
+// elsewhere is reached only through its configuration or the sweep.
+
+// locWinRoots are a Windows host's system drive and the directories programs
+// install into.
+type locWinRoots struct {
+	Drive, ProgramData, ProgramFiles, ProgramFiles86 string
+}
+
+// locDefaultWinRoots are the roots of a host installed on drive with the
+// default directory names.
+func locDefaultWinRoots(drive string) locWinRoots {
+	return locWinRoots{Drive: drive, ProgramData: drive + `\ProgramData`,
+		ProgramFiles: drive + `\Program Files`, ProgramFiles86: drive + `\Program Files (x86)`}
+}
+
+// locWinRootsScript prints the four roots separated by "|". It takes no
+// input, so it is sent as a fixed -EncodedCommand.
+const locWinRootsScript = `[Console]::Out.Write((@($env:SystemDrive, $env:ProgramData, $env:ProgramFiles, ${env:ProgramFiles(x86)}) -join '|'))`
+
+// locWinRootsArgv is the one command that asks a remote host for its roots.
+var locWinRootsArgv = []string{"powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(locWinRootsScript)}
+
+// locWindowsRoots asks the host for its roots, once per collection (the
+// caller caches the answer). Every value is checked: the drive must be a
+// letter and a colon, each directory an absolute path; one that is not is
+// taken from the drive's defaults. No answer at all means C:, with a note.
+func (c *collection) locWindowsRoots(ctx context.Context) locWinRoots {
+	var vals []string
+	if c.target.Local() {
+		vals = []string{os.Getenv("SystemDrive"), os.Getenv("ProgramData"), os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")}
+	} else if out, _, code, err := c.target.Run(ctx, locWinRootsArgv); err == nil && code == 0 {
+		vals = strings.Split(strings.TrimSpace(string(out)), "|")
+	}
+	return c.locParseWinRoots(vals)
+}
+
+// locParseWinRoots validates the four values (see locWindowsRoots).
+func (c *collection) locParseWinRoots(vals []string) locWinRoots {
+	for len(vals) < 4 {
+		vals = append(vals, "")
+	}
+	drive := strings.TrimSpace(vals[0])
+	if len(drive) != 2 || !cfgIsLetter(drive[0]) || drive[1] != ':' {
+		c.note(SectionPlatform, errors.New("assuming C: as the system drive: the host did not say which it is"))
+		return locDefaultWinRoots("C:")
+	}
+	drive = strings.ToUpper(drive)
+	r := locDefaultWinRoots(drive)
+	w := locStyle(true)
+	for i, dst := range []*string{&r.ProgramData, &r.ProgramFiles, &r.ProgramFiles86} {
+		v := strings.TrimRight(strings.TrimSpace(vals[i+1]), `\`)
+		if w.isAbs(v) && !strings.ContainsAny(v, "\x00\r\n|*?\"<>") {
+			*dst = v
+		}
+	}
+	return r
+}
 
 // locWindowsJDKVendors are the directories under Program Files that JDK
 // vendors install into, each holding one directory per JDK.
@@ -22,10 +87,8 @@ var locWindowsJDKVendors = []string{
 	`Amazon Corretto`, `Zulu`, `BellSoft`, `RedHat`, `Semeru`,
 }
 
-func locWindowsTable(d string) []locEntry {
-	pd := d + `\ProgramData`
-	pf := d + `\Program Files`
-	pf86 := d + `\Program Files (x86)`
+func locWindowsTable(r locWinRoots) []locEntry {
+	d, pd, pf, pf86 := r.Drive, r.ProgramData, r.ProgramFiles, r.ProgramFiles86
 	t := []locEntry{
 		// OpenSSH for Windows.
 		{Path: pd + `\ssh`, Dir: true, Names: []string{"ssh_host_*_key", "ssh_host_*_key.pub"}, Kind: locSSHHost, Role: "ssh_host_key"},
@@ -87,8 +150,8 @@ func locWindowsTable(d string) []locEntry {
 
 // locWindowsHomeTable is what each account keeps under C:\Users. Run only when
 // the operator opts in.
-func locWindowsHomeTable(d string) []locEntry {
-	h := d + `\Users\*`
+func locWindowsHomeTable(r locWinRoots) []locEntry {
+	h := r.Drive + `\Users\*`
 	return []locEntry{
 		{Path: h + `\.ssh`, Dir: true, Names: []string{"authorized_keys"}, Kind: locAuthorizedKeys, Account: "*"},
 		{Path: h + `\.ssh`, Dir: true, Names: []string{"known_hosts"}, Kind: locKnownHosts},

@@ -124,12 +124,20 @@ func TestLocWindowsLocalAndRemote(t *testing.T) {
 				t.Errorf("Apache include not read: %v", w.recorded())
 			}
 			crt := locCertAt(rep, `C:\Apache24\conf\ssl\server.crt`)
-			if crt == nil || !locHasUsage(crt.Location, `C:\Apache24\conf\httpd.conf`, "SSLCertificateFile") {
-				t.Fatalf("Apache certificate: %+v", crt)
+			if crt == nil {
+				t.Fatal("no Apache certificate")
+			}
+			if u := locUsage(crt.Location, `C:\Apache24\conf\extra\httpd-ssl.conf`, "SSLCertificateFile"); u == nil ||
+				u.RootConfigPath != `C:\Apache24\conf\httpd.conf` || u.Product != "apache" {
+				t.Fatalf("Apache certificate usage: %+v", crt.Location.UsedBy)
 			}
 			key := locKeyAt(rep, `C:\Apache24\conf\ssl\server.key`)
-			if key == nil || key.Role != "tls" || !locHasUsage(key.Location, `C:\Apache24\conf\httpd.conf`, "SSLCertificateKeyFile") {
+			if key == nil || key.Role != "tls" || !locHasUsage(key.Location, `C:\Apache24\conf\extra\httpd-ssl.conf`, "SSLCertificateKeyFile") {
 				t.Fatalf("Apache key: %+v", key)
+			}
+			// No command answered for the roots: C:, with a note.
+			if !locErrorsContain(rep, "assuming C:") {
+				t.Errorf("the drive fallback was not noted: %+v", rep.Errors)
 			}
 			if uk := locKeyAt(rep, `C:\Users\bob\.ssh\id_ed25519`); uk == nil || uk.Role != "ssh_user_key" {
 				t.Errorf("user key: %+v", uk)
@@ -208,11 +216,18 @@ func TestLocReferencesNotGuessed(t *testing.T) {
 		file("/etc/haproxy/haproxy.cfg", []byte("frontend f\n bind :443 ssl crt /etc/haproxy/live\n")).
 		file("/etc/haproxy/live/a.pem", append(append([]byte(nil), m.leafPEM...), m.ecPEM...))
 	rep := locCollect(t, ft, Options{Platform: "linux"})
-	if !locErrorsContain(rep, "ssl_certificate not followed") || !locErrorsContain(rep, "IdentityFile not followed") {
-		t.Errorf("unexpanded paths not recorded: %+v", rep.Errors)
+	for _, c := range []struct{ d, p, want string }{
+		{"ssl_certificate", "/etc/nginx/$host.crt", RefNotFollowed},
+		{"IdentityFile", "~/.ssh/id_rsa", RefNotFollowed},
+		{"ssl_certificate_key", "/etc/ssl/private/k.pem", RefMissing},
+		{"bind crt", "/etc/haproxy/live", RefFound},
+	} {
+		if got := locRefStatus(rep, c.d, c.p); got != c.want {
+			t.Errorf("%s %s: status %q, want %q", c.d, c.p, got, c.want)
+		}
 	}
-	if !locErrorsContain(rep, "/etc/ssl/private/k.pem", "does not exist") {
-		t.Errorf("missing key not recorded: %+v", rep.Errors)
+	if len(rep.Errors) != 0 {
+		t.Errorf("missing and unfollowed references are not errors: %+v", rep.Errors)
 	}
 	k := locKeyAt(rep, "/etc/haproxy/live/a.pem")
 	if k == nil || k.Role != "tls" || !locHasUsage(k.Location, "/etc/haproxy/haproxy.cfg", "bind crt") {
@@ -288,7 +303,7 @@ func TestLocConfigOnlyThroughReadConfig(t *testing.T) {
 // home directory in the system table.
 func TestLocTablesWellFormed(t *testing.T) {
 	for _, pl := range []string{"linux", "darwin", "windows"} {
-		sys, home := locTables(pl, "")
+		sys, home := locTables(pl, "", locWinRoots{})
 		w := locStyle(pl == "windows")
 		if len(sys) == 0 || len(home) == 0 {
 			t.Fatalf("%s: empty table", pl)
@@ -313,7 +328,7 @@ func TestLocTablesWellFormed(t *testing.T) {
 	// gnutls included), so ConfigProducts is covered.
 	seen := map[string]bool{}
 	for _, pl := range []string{"linux", "darwin", "windows"} {
-		sys, _ := locTables(pl, "")
+		sys, _ := locTables(pl, "", locWinRoots{})
 		for _, e := range sys {
 			seen[e.Product] = true
 		}
@@ -413,12 +428,13 @@ func TestLocRealFilesystemLinux(t *testing.T) {
 
 	at := func(p string) string { return filepath.Join(root, p) }
 	leaf := locCertAt(rep, at("/etc/nginx/ssl/site.crt"))
-	if leaf == nil || !locHasUsage(leaf.Location, at("/etc/nginx/nginx.conf"), "ssl_certificate") || leaf.Location.FoundBy != FoundByConfig {
+	if leaf == nil || leaf.Location.FoundBy != FoundByConfig || locUsage(leaf.Location, at("/etc/nginx/conf.d/site.conf"), "ssl_certificate") == nil ||
+		locUsage(leaf.Location, at("/etc/nginx/conf.d/site.conf"), "ssl_certificate").RootConfigPath != at("/etc/nginx/nginx.conf") {
 		t.Fatalf("nginx certificate: %+v\nerrors: %+v", leaf, rep.Errors)
 	}
 	key := locKeyAt(rep, at("/etc/ssl/private/server.key"))
 	if key == nil || key.Location.Mode != "0600" || key.Role != "tls" || key.PublicKeySHA256 != leaf.PublicKeySHA256 ||
-		!locHasUsage(key.Location, at("/etc/nginx/nginx.conf"), "ssl_certificate_key") {
+		!locHasUsage(key.Location, at("/etc/nginx/conf.d/site.conf"), "ssl_certificate_key") {
 		t.Fatalf("nginx key: %+v", key)
 	}
 	hk := locKeyAt(rep, at("/etc/ssh/ssh_host_ed25519_key"))
@@ -449,4 +465,70 @@ func TestLocRealFilesystemLinux(t *testing.T) {
 		}
 	}
 	keyAssertNoLeak(t, "real filesystem report", rep, m.secrets...)
+}
+
+// TestLocWindowsRootsFromHost: the drive and the program directories come
+// from the host; a bad answer falls back field by field, no answer to C:.
+func TestLocWindowsRootsFromHost(t *testing.T) {
+	m := locTestMaterial(t)
+	w := newLocWinFake(false)
+	w.script(locWinRootsArgv, tgtResult{stdout: `D:|D:\Data|D:\Apps|D:\Apps (x86)` + "\r\n"})
+	w.wfile(`D:\Data\ssh\sshd_config`, []byte("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key\n")).
+		wfile(`D:\Data\ssh\ssh_host_ed25519_key`, m.edPEM).
+		wfile(`D:\Apps\Java\jdk-21\lib\security\cacerts`, m.jks).
+		wfile(`C:\ProgramData\ssh\sshd_config`, []byte("HostKey C:/elsewhere\n"))
+	rep := locCollect(t, w, Options{Platform: "windows"})
+	hk := locKeyAt(rep, `D:\Data\ssh\ssh_host_ed25519_key`)
+	if hk == nil || !locHasUsage(hk.Location, `D:\Data\ssh\sshd_config`, "HostKey") {
+		t.Fatalf("host key under the host's ProgramData: %+v", hk)
+	}
+	if locStoreAt(rep, `D:\Apps\Java\jdk-21\lib\security\cacerts`) == nil {
+		t.Error("JDK under the host's Program Files not found")
+	}
+	if locConfigOf(rep, `C:\ProgramData\ssh\sshd_config`, "sshd") != nil || locErrorsContain(rep, "assuming C:") {
+		t.Error("C: was assumed although the host answered")
+	}
+	runs := 0
+	for _, call := range w.recorded() {
+		if strings.HasPrefix(call, "run powershell") {
+			runs++
+		}
+	}
+	if runs != 1 {
+		t.Errorf("the roots were asked for %d times, want once", runs)
+	}
+
+	c := tgtCollection(w, Options{Platform: "windows"})
+	for _, tc := range []struct {
+		in   []string
+		want locWinRoots
+	}{
+		{[]string{"e:", `E:\PD`, "relative", ""}, locWinRoots{"E:", `E:\PD`, `E:\Program Files`, `E:\Program Files (x86)`}},
+		{[]string{"", "", "", ""}, locDefaultWinRoots("C:")},
+		{[]string{"C:\\x", "", "", ""}, locDefaultWinRoots("C:")},
+		{nil, locDefaultWinRoots("C:")},
+	} {
+		if got := c.locParseWinRoots(tc.in); got != tc.want {
+			t.Errorf("%q: got %+v, want %+v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestLocLegacySSH1Key: a legacy SSH-1 key file is a key of its own format,
+// in both modes, and its bytes never cross.
+func TestLocLegacySSH1Key(t *testing.T) {
+	body := append([]byte("SSH PRIVATE KEY FILE FORMAT 1.1\n\x00"), make([]byte, 64)...)
+	for _, local := range []bool{true, false} {
+		ft := newTgtFakeTarget(local).file("/etc/ssh/ssh_host_key", body).file("/etc/ssh/sshd_config", []byte("HostKey /etc/ssh/ssh_host_key\n"))
+		rep := locCollect(t, ft, Options{Platform: "linux"})
+		k := locKeyAt(rep, "/etc/ssh/ssh_host_key")
+		if k == nil || k.Format != KeyFormatSSH1 || k.Algorithm != "RSA" || k.Unknown == "" {
+			t.Errorf("local=%v: %+v", local, k)
+		}
+		if !local {
+			if err := locPrivateReads(ft.recorded(), []string{"/etc/ssh/ssh_host_key"}); err != nil {
+				t.Error(err)
+			}
+		}
+	}
 }

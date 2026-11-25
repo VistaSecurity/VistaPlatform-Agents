@@ -14,16 +14,17 @@ import (
 // parser with includes resolved through readConfig too, and recorded as
 // CryptoConfig. Then every file it names (a certificate, a key, a keystore, a
 // trust store, DH parameters, a revocation list) is visited wherever it is,
-// and gets the configuration as its UsedBy and FoundBy "config".
+// and gets the configuration as its UsedBy (the file holding the directive,
+// the root that includes it, the product and the block) and FoundBy
+// "config".
 //
-// A named file that does not exist is recorded as an error of the configs
-// section naming the configuration, the directive and the path; one the
-// account may not read makes the item's section partial. Nothing a
-// configuration names is dropped without a word.
+// Every reference ends with a Status: found, missing, unreadable (Errors
+// says why), or not_followed. A missing file is a fact about the host, not a
+// failure to look, so it is recorded on the reference and not in Errors.
 //
 // References that cannot be resolved to one file are not guessed at: a path
 // with a variable ($ssl_server_name), an OpenSSH % token or a ~ (each user's
-// home) is recorded as not followed.
+// home) is not followed.
 
 // passFollowConfiguration is pass 2. It ends by handing every record of
 // passes 1 and 2 to the registry.
@@ -43,8 +44,23 @@ func (c *collection) locCfgKey(product, p string) string {
 	return product + "\x00" + c.registry.realPath(p)
 }
 
-// locReadConfig reads, parses and records one configuration file, then
-// follows what it names.
+// locSource is one file of a configuration as the parser saw it: the root,
+// or a file one of its includes read. It is how a reference is credited to
+// the file that holds its directive.
+type locSource struct {
+	path string
+	text []byte
+}
+
+// locIncl is what the resolver learned: every file read, in order, and the
+// Status of each include pattern.
+type locIncl struct {
+	sources []locSource
+	status  map[string]string
+}
+
+// locReadConfig reads, parses and records one configuration file, after
+// following what it names, so its references carry their Status.
 func (c *collection) locReadConfig(ctx context.Context, cf locConfigFile) {
 	st := c.locSt()
 	key := c.locCfgKey(cf.Product, cf.Path)
@@ -70,29 +86,29 @@ func (c *collection) locReadConfig(ctx context.Context, cf locConfigFile) {
 	}
 	st.count(SectionConfigs, true)
 
+	inc := &locIncl{sources: []locSource{{path: cf.Path, text: text}}, status: map[string]string{}}
 	var cfgs []CryptoConfig
 	if strings.HasPrefix(cf.Product, locBackendProduct) {
 		cfgs = ParseCryptoPolicyBackend(baseName(cf.Path), text)
 	} else if parse := ConfigParserFor(cf.Product); parse != nil {
-		cfgs = parse(text, c.locResolver(ctx, cf))
+		cfgs = parse(text, c.locResolver(ctx, cf, inc))
 	}
 	loc := c.locLocation(cf.Info, cf.Path, cf.FoundBy, cf.UsedBy)
 	for i := range cfgs {
+		for j := range cfgs[i].References {
+			if c.timeUp(ctx, SectionConfigs) {
+				break
+			}
+			cfgs[i].References[j].Status = c.locFollowRef(ctx, cf, cfgs[i], cfgs[i].References[j], inc)
+		}
 		cfgs[i].Location = locCopy(loc)
 		c.registry.addConfig(cfgs[i])
 	}
 	st.cfgDone[key] = cfgs
-	for _, cfg := range cfgs {
-		for _, ref := range cfg.References {
-			if c.timeUp(ctx, SectionConfigs) {
-				return
-			}
-			c.locFollowRef(ctx, cf, ref)
-		}
-	}
 }
 
-// locConfigErr records a configuration file that could not be read.
+// locConfigErr records a configuration file that could not be read for a
+// reason other than its absence.
 func (c *collection) locConfigErr(p string, err error) {
 	st := c.locSt()
 	switch {
@@ -112,23 +128,25 @@ func (c *collection) locConfigErr(p string, err error) {
 // a pattern is resolved against the file's base directory, expanded through
 // the Target (a directory includes its files, as Apache reads it), and each
 // file read through readConfig with the root's product, within the parser's
-// byte budget and the run's file budget.
-func (c *collection) locResolver(ctx context.Context, cf locConfigFile) IncludeResolver {
+// byte budget and the run's file budget. Each file read joins inc.sources;
+// each pattern's outcome is inc.status[pattern].
+func (c *collection) locResolver(ctx context.Context, cf locConfigFile, inc *locIncl) IncludeResolver {
 	st := c.locSt()
 	return func(pattern string, maxBytes int64) []IncludedFile {
+		paths, status := c.locIncludePaths(ctx, cf, pattern)
 		var out []IncludedFile
 		var used int64
-		for _, p := range c.locIncludePaths(ctx, cf, pattern) {
+		failed := false
+		for _, p := range paths {
 			if c.timeUp(ctx, SectionConfigs) || c.files(SectionConfigs, 1) == 0 {
 				break
 			}
 			text, err := c.readConfig(ctx, p, cf.Product)
 			if err != nil {
-				if errors.Is(err, ErrNotExist) {
-					c.note(SectionConfigs, fmt.Errorf("%s: include %s does not exist", cf.Path, p))
-					continue
+				if !errors.Is(err, ErrNotExist) {
+					failed = true
+					c.locConfigErr(p, err)
 				}
-				c.locConfigErr(p, err)
 				continue
 			}
 			if used+int64(len(text)) > maxBytes {
@@ -137,20 +155,36 @@ func (c *collection) locResolver(ctx context.Context, cf locConfigFile) IncludeR
 			}
 			used += int64(len(text))
 			st.included[c.locCfgKey(cf.Product, p)] = true
+			inc.sources = append(inc.sources, locSource{path: p, text: text})
 			out = append(out, IncludedFile{Path: p, Text: text})
+		}
+		switch {
+		case status != "":
+		case len(out) > 0:
+			status = RefFound
+		case failed:
+			status = RefUnreadable
+		default:
+			status = RefMissing
+		}
+		if have := inc.status[pattern]; have != RefFound {
+			inc.status[pattern] = status
 		}
 		return out
 	}
 }
 
 // locIncludePaths turns an include pattern into the files to read, sorted
-// as the products read a glob.
-func (c *collection) locIncludePaths(ctx context.Context, cf locConfigFile, pattern string) []string {
+// as the products read a glob. A status is returned only when the pattern
+// is not followed at all.
+func (c *collection) locIncludePaths(ctx context.Context, cf locConfigFile, pattern string) ([]string, string) {
 	st := c.locSt()
 	p, ok := c.locResolvePath(cf, pattern)
 	if !ok {
-		c.note(SectionConfigs, fmt.Errorf("%s: include not followed: the path holds a variable or a per-user part", cf.Path))
-		return nil
+		return nil, RefNotFollowed
+	}
+	if c.locExcluded(p) {
+		return nil, RefNotFollowed
 	}
 	var files []FileInfo
 	if locHasMeta(p) {
@@ -160,11 +194,11 @@ func (c *collection) locIncludePaths(ctx context.Context, cf locConfigFile, patt
 		switch {
 		case err != nil:
 			// Let the read say what is wrong with it (missing, denied).
-			return []string{p}
+			return []string{p}, ""
 		case fi.IsDir:
 			files = c.locList(ctx, SectionConfigs, p, 0, nil)
 		default:
-			return []string{p}
+			return []string{p}, ""
 		}
 	}
 	out := make([]string, 0, len(files))
@@ -172,7 +206,7 @@ func (c *collection) locIncludePaths(ctx context.Context, cf locConfigFile, patt
 		out = append(out, fi.Path)
 	}
 	sort.Strings(out)
-	return out
+	return out, ""
 }
 
 // locResolvePath makes a path a configuration names absolute, against the
@@ -188,11 +222,11 @@ func (c *collection) locResolvePath(cf locConfigFile, p string) (string, bool) {
 	p = st.style.clean(p)
 	if bool(st.style) && strings.HasPrefix(strings.ToUpper(p), locProgramDataToken) {
 		// OpenSSH for Windows writes its own paths as __PROGRAMDATA__\ssh\...
-		drive := st.root
-		if drive == "" {
-			drive = "C:"
+		pd := st.win.ProgramData
+		if pd == "" {
+			pd = locDefaultWinRoots("C:").ProgramData
 		}
-		p = drive + `\ProgramData` + p[len(locProgramDataToken):]
+		p = pd + p[len(locProgramDataToken):]
 	}
 	if st.style.isAbs(p) {
 		if !st.style {
@@ -232,39 +266,81 @@ func locRefSection(kind string) string {
 	return SectionCertificates
 }
 
-// locFollowRef visits one file a configuration names.
-func (c *collection) locFollowRef(ctx context.Context, cf locConfigFile, ref ConfigReference) {
+// locRefSource is the file of a configuration that holds a reference's
+// directive: the first source (the root, then each include in the order it
+// was read) with a line naming both the directive's keyword and the path (or,
+// for a path the parser rebuilt against a base, the path's file name). The
+// root when none does.
+func locRefSource(inc *locIncl, ref ConfigReference) string {
+	fields := strings.Fields(ref.Directive)
+	word := ""
+	if len(fields) > 0 {
+		word = strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(fields[len(fields)-1], "-D"), "."))
+	}
+	for _, try := range []string{ref.Path, baseName(ref.Path)} {
+		if try == "" {
+			continue
+		}
+		for _, s := range inc.sources {
+			for _, line := range strings.Split(string(s.text), "\n") {
+				if strings.Contains(line, try) && strings.Contains(strings.ToLower(line), word) {
+					return s.path
+				}
+			}
+		}
+	}
+	return inc.sources[0].path
+}
+
+// locFollowRef visits one file a configuration names and returns its
+// Status.
+func (c *collection) locFollowRef(ctx context.Context, cf locConfigFile, cfg CryptoConfig, ref ConfigReference, inc *locIncl) string {
 	st := c.locSt()
-	usage := []Usage{{Kind: "config", ConfigPath: cf.Path, Directive: ref.Directive}}
+	src := locRefSource(inc, ref)
+	u := Usage{Kind: "config", ConfigPath: src, Directive: ref.Directive, Product: cfg.Product, Context: cfg.Context}
+	if src != cf.Path {
+		u.RootConfigPath = cf.Path
+	}
+	usage := []Usage{u}
 	if ref.Kind == "include" {
 		// The parsers follow their own includes through the resolver. A JVM
 		// option naming a security properties file is the one include that
 		// is another product's configuration.
 		if cf.Product == "java-options" {
-			if p, ok := c.locResolvePath(cf, ref.Path); ok {
-				c.locQueueConfig(ctx, cf, ref, p, "java", usage)
+			p, ok := c.locResolvePath(cf, ref.Path)
+			if !ok || c.locExcluded(p) {
+				return RefNotFollowed
+			}
+			return c.locQueueConfig(ctx, p, "java", usage)
+		}
+		for _, k := range []string{ref.Path, strings.TrimSuffix(ref.Path, "/") + "/*"} {
+			if s, ok := inc.status[k]; ok {
+				return s
 			}
 		}
-		return
+		return ""
 	}
 	p, ok := c.locResolvePath(cf, ref.Path)
-	if !ok {
-		c.note(SectionConfigs, fmt.Errorf("%s: %s not followed: the path holds a variable or a per-user part", cf.Path, ref.Directive))
-		return
+	if !ok || c.locExcluded(p) {
+		return RefNotFollowed
 	}
 	kind := locMaterial
 	if ref.Kind == "trust_store" {
 		kind = locTrust
 	}
-	v := locVisit{Path: p, Kind: kind, Role: locRefRole(cf.Product), Trust: kind == locTrust,
+	v := locVisit{Path: p, Kind: kind, Trust: kind == locTrust,
 		FoundBy: FoundByConfig, UsedBy: usage, Section: locRefSection(ref.Kind)}
-	if ref.Kind != "private_key" {
-		v.Role = ""
+	if ref.Kind == "private_key" {
+		v.Role = locRefRole(cf.Product)
 	}
 	res, fi := c.locVisit(ctx, v)
 	switch res {
 	case locMissing:
-		c.note(SectionConfigs, fmt.Errorf("%s: %s names %s, which does not exist", cf.Path, ref.Directive, p))
+		return RefMissing
+	case locDenied, locFailed:
+		return RefUnreadable
+	case locStopped:
+		return ""
 	case locIsDir:
 		// A CA directory (SSLCACertificatePath), HAProxy's "crt <dir>".
 		for _, f := range c.locList(ctx, v.Section, fi.Path, 0, nil) {
@@ -276,13 +352,14 @@ func (c *collection) locFollowRef(ctx context.Context, cf locConfigFile, ref Con
 			sub.Path, sub.Info = f.Path, &info
 			c.locVisit(ctx, sub)
 		}
-	case locRead:
-		st.count(v.Section, true)
 	}
+	st.count(v.Section, true)
+	return RefFound
 }
 
-// locQueueConfig adds a configuration another configuration names.
-func (c *collection) locQueueConfig(ctx context.Context, cf locConfigFile, ref ConfigReference, p, product string, usage []Usage) {
+// locQueueConfig adds a configuration another configuration names, and
+// returns the reference's Status.
+func (c *collection) locQueueConfig(ctx context.Context, p, product string, usage []Usage) string {
 	st := c.locSt()
 	fi, err := c.target.Stat(ctx, p)
 	if err == nil {
@@ -290,13 +367,13 @@ func (c *collection) locQueueConfig(ctx context.Context, cf locConfigFile, ref C
 	}
 	if err != nil {
 		if errors.Is(err, ErrNotExist) {
-			c.note(SectionConfigs, fmt.Errorf("%s: %s names %s, which does not exist", cf.Path, ref.Directive, p))
-			return
+			return RefMissing
 		}
 		c.locConfigErr(p, err)
-		return
+		return RefUnreadable
 	}
 	st.configs = append(st.configs, locConfigFile{
 		Path: p, Product: product, Base: st.style.dir(p), Info: fi, FoundBy: FoundByConfig, UsedBy: usage,
 	})
+	return RefFound
 }

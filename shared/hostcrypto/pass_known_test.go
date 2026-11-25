@@ -224,12 +224,29 @@ func locConfigOf(rep *Report, p, product string) *CryptoConfig {
 }
 
 func locHasUsage(l Location, configPath, directive string) bool {
-	for _, u := range l.UsedBy {
+	return locUsage(l, configPath, directive) != nil
+}
+
+func locUsage(l Location, configPath, directive string) *Usage {
+	for i, u := range l.UsedBy {
 		if u.Kind == "config" && u.ConfigPath == configPath && u.Directive == directive {
-			return true
+			return &l.UsedBy[i]
 		}
 	}
-	return false
+	return nil
+}
+
+// locRefStatus is the Status of the reference with this directive and path
+// among a report's configurations, or "?" when there is none.
+func locRefStatus(rep *Report, directive, path string) string {
+	for _, c := range rep.Configs {
+		for _, r := range c.References {
+			if r.Directive == directive && r.Path == path {
+				return r.Status
+			}
+		}
+	}
+	return "?"
 }
 
 func locErrorsContain(rep *Report, parts ...string) bool {
@@ -289,22 +306,42 @@ func TestLocLinuxLocalAndRemote(t *testing.T) {
 
 			// nginx: the included server block names the certificate and the
 			// key; both carry the configuration as UsedBy and FoundBy config.
+			// The directive is in the included file: the usage names it, the
+			// root that includes it, the product and the server block.
 			leaf := locCertAt(rep, "/etc/nginx/ssl/site.crt")
-			if leaf == nil || leaf.Location.FoundBy != FoundByConfig ||
-				!locHasUsage(leaf.Location, "/etc/nginx/nginx.conf", "ssl_certificate") || leaf.TrustAnchor {
+			if leaf == nil || leaf.Location.FoundBy != FoundByConfig || leaf.TrustAnchor {
 				t.Fatalf("nginx certificate: %+v", leaf)
+			}
+			u := locUsage(leaf.Location, "/etc/nginx/conf.d/site.conf", "ssl_certificate")
+			if u == nil || u.RootConfigPath != "/etc/nginx/nginx.conf" || u.Product != "nginx" || !strings.Contains(u.Context, "a.example") {
+				t.Fatalf("nginx certificate usage: %+v", leaf.Location.UsedBy)
 			}
 			key := locKeyAt(rep, "/etc/ssl/private/server.key")
 			if key == nil || key.Location.FoundBy != FoundByConfig || key.Role != "tls" ||
-				!locHasUsage(key.Location, "/etc/nginx/nginx.conf", "ssl_certificate_key") ||
+				!locHasUsage(key.Location, "/etc/nginx/conf.d/site.conf", "ssl_certificate_key") ||
 				key.Location.Mode != "0600" || key.Location.WorldReadable == nil || *key.Location.WorldReadable {
 				t.Fatalf("nginx key: %+v", key)
 			}
 			if locConfigOf(rep, "/etc/nginx/nginx.conf", "nginx") == nil {
 				t.Error("no nginx configuration record")
 			}
-			if !locErrorsContain(rep, "/etc/nginx/nginx.conf", "ssl_trusted_certificate", "missing-chain.pem", "does not exist") {
-				t.Errorf("the missing reference was not recorded: %+v", rep.Errors)
+			// A missing file is on its reference, not in Errors.
+			if st := locRefStatus(rep, "ssl_trusted_certificate", "/etc/nginx/missing-chain.pem"); st != RefMissing {
+				t.Errorf("missing reference status %q", st)
+			}
+			if locErrorsContain(rep, "missing-chain.pem") {
+				t.Errorf("a missing reference reached Errors: %+v", rep.Errors)
+			}
+			for _, ref := range []struct{ d, p string }{
+				{"ssl_certificate", "/etc/nginx/ssl/site.crt"}, {"ssl_certificate_key", "/etc/ssl/private/server.key"},
+				{"include", "/etc/nginx/conf.d/*.conf"}, {"HostKey", "/etc/ssh/ssh_host_ed25519_key"},
+			} {
+				if st := locRefStatus(rep, ref.d, ref.p); st != RefFound {
+					t.Errorf("%s %s: status %q", ref.d, ref.p, st)
+				}
+			}
+			if u := locUsage(hkUsageLoc(rep), "/etc/ssh/sshd_config", "HostKey"); u == nil || u.RootConfigPath != "" || u.Product != "sshd" {
+				t.Errorf("sshd usage from the root file: %+v", u)
 			}
 
 			// sshd: the host key, role and usage; its public half.
@@ -347,12 +384,23 @@ func TestLocLinuxLocalAndRemote(t *testing.T) {
 				len(rep.SSH.AuthorizedKeys[0].Keys) != 1 {
 				t.Fatalf("authorized keys: %+v", rep.SSH.AuthorizedKeys)
 			}
-			r := rep.SSH.AuthorizedKeys[0].Keys[0].Restricted
-			if local && (r == nil || !*r) {
-				t.Errorf("local: the from= restriction was not read: %v", r)
+			ak := rep.SSH.AuthorizedKeys[0].Keys[0]
+			if local && (ak.Restricted == nil || !*ak.Restricted || ak.CertificateAuthority == nil || *ak.CertificateAuthority) {
+				t.Errorf("local: options not read: restricted %v, cert-authority %v", ak.Restricted, ak.CertificateAuthority)
 			}
-			if !local && r != nil {
-				t.Errorf("remote: options do not cross, Restricted must be unknown: %v", *r)
+			if !local && (ak.Restricted != nil || ak.CertificateAuthority != nil) {
+				t.Errorf("remote: options do not cross, both must be unknown: %v %v", ak.Restricted, ak.CertificateAuthority)
+			}
+			if len(rep.SSH.KnownHosts) != 2 {
+				t.Fatalf("known hosts files: %+v", rep.SSH.KnownHosts)
+			}
+			for _, kh := range rep.SSH.KnownHosts {
+				if local != (kh.Entries != nil && kh.Hashed != nil) {
+					t.Errorf("local=%v: known_hosts %s counts %v %v", local, kh.Location.Path, kh.Entries, kh.Hashed)
+				}
+				if kh.Location.Mode == "" {
+					t.Errorf("known_hosts without its location: %+v", kh.Location)
+				}
 			}
 			uk := locKeyAt(rep, "/home/alice/.ssh/id_ed25519")
 			if uk == nil || uk.Role != "ssh_user_key" {
@@ -369,9 +417,6 @@ func TestLocLinuxLocalAndRemote(t *testing.T) {
 				if key.Algorithm != "ECDSA" || key.PublicKeySHA256 == "" || key.PublicKeySHA256 != leaf.PublicKeySHA256 {
 					t.Errorf("local key not parsed or not paired with its certificate: %+v", key)
 				}
-				if len(rep.SSH.KnownHosts) != 2 {
-					t.Errorf("known hosts: %+v", rep.SSH.KnownHosts)
-				}
 				for _, s := range []string{SectionCertificates, SectionPrivateKeys, SectionKeystores, SectionSSH, SectionConfigs, SectionHomeDirectories} {
 					if rep.Sections[s] != SectionOK {
 						t.Errorf("section %s = %q, errors %+v", s, rep.Sections[s], rep.Errors)
@@ -387,6 +432,9 @@ func TestLocLinuxLocalAndRemote(t *testing.T) {
 			}
 			if key.Format != KeyFormatPKCS8 || key.Encrypted == nil || *key.Encrypted || key.Unknown == "" || key.PublicKeySHA256 != "" {
 				t.Errorf("remote PKCS#8 key from its label: %+v", key)
+			}
+			if ks := locStoreAt(rep, "/usr/lib/jvm/java-17/lib/security/cacerts"); ks == nil || ks.Unknown == "" || ks.EntryCount != nil {
+				t.Errorf("remote keystore must say why it is empty: %+v", ks)
 			}
 			if lk := locKeyAt(rep, "/etc/ssl/private/legacy.key"); lk == nil || lk.Format != KeyFormatPKCS1 ||
 				lk.Algorithm != "RSA" || lk.Encrypted != nil {
@@ -542,12 +590,21 @@ func TestLocOneFileTwoWays(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("one key reached two ways became %d records", n)
 	}
-	if k.Location.FoundBy != FoundByConfig || len(k.Location.UsedBy) != 1 {
-		// Both server blocks are in the one nginx.conf, through two
-		// directives of the same name: one usage.
+	// Two server blocks in two included files name it: two usages, each
+	// crediting its own file, on one record.
+	if k.Location.FoundBy != FoundByConfig || len(k.Location.UsedBy) != 2 ||
+		!locHasUsage(k.Location, "/etc/nginx/conf.d/site.conf", "ssl_certificate_key") ||
+		!locHasUsage(k.Location, "/etc/nginx/conf.d/two.conf", "ssl_certificate_key") {
 		t.Errorf("merged key: %+v", k.Location)
 	}
 	if ft.called("identify", "/etc/nginx/ssl/current.key") && ft.called("identify", "/etc/ssl/private/server.key") {
 		t.Error("the same file was identified twice")
 	}
+}
+
+func hkUsageLoc(rep *Report) Location {
+	if k := locKeyAt(rep, "/etc/ssh/ssh_host_ed25519_key"); k != nil {
+		return k.Location
+	}
+	return Location{}
 }
