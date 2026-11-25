@@ -44,6 +44,10 @@ const locWinRootsScript = `[Console]::Out.Write((@($env:SystemDrive, $env:Progra
 // locWinRootsArgv is the one command that asks a remote host for its roots.
 var locWinRootsArgv = []string{"powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(locWinRootsScript)}
 
+// locLocalEnv reads the agent's own environment for a local Windows
+// collection. A variable so a test does not depend on the machine it runs on.
+var locLocalEnv = os.Getenv
+
 // locWindowsRoots asks the host for its roots, once per collection (the
 // caller caches the answer). Every value is checked: the drive must be a
 // letter and a colon, each directory an absolute path; one that is not is
@@ -51,7 +55,7 @@ var locWinRootsArgv = []string{"powershell", "-NoProfile", "-NonInteractive", "-
 func (c *collection) locWindowsRoots(ctx context.Context) locWinRoots {
 	var vals []string
 	if c.target.Local() {
-		vals = []string{os.Getenv("SystemDrive"), os.Getenv("ProgramData"), os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")}
+		vals = []string{locLocalEnv("SystemDrive"), locLocalEnv("ProgramData"), locLocalEnv("ProgramFiles"), locLocalEnv("ProgramFiles(x86)")}
 	} else if out, _, code, err := c.target.Run(ctx, locWinRootsArgv); err == nil && code == 0 {
 		vals = strings.Split(strings.TrimSpace(string(out)), "|")
 	}

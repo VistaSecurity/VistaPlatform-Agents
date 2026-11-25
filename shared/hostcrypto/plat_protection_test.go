@@ -3,6 +3,7 @@ package hostcrypto
 import (
 	"encoding/json"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -469,6 +470,9 @@ func TestPlatWindowsProtectionThroughCollect(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPlatRealLinuxProtection(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads this machine's /sys and /proc")
+	}
 	if _, err := exec.LookPath("lsblk"); err != nil {
 		t.Skip("lsblk not installed")
 	}

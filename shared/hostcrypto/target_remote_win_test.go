@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,7 +22,8 @@ func tgtJ(v any) string {
 
 func tgtJRaw(js string) string { return "J:" + base64.StdEncoding.EncodeToString([]byte(js)) }
 
-func tgtD(b []byte) string { return "D:" + base64.StdEncoding.EncodeToString(b) }
+// tgtD is psRead's answer: public content and no refused block.
+func tgtD(b []byte) string { return "P:0:" + base64.StdEncoding.EncodeToString(b) }
 
 func tgtT(n int, b []byte) string {
 	return "T:" + strconv.Itoa(n) + ":" + base64.StdEncoding.EncodeToString(b)
@@ -398,10 +400,20 @@ func TestRemoteWindowsEncodingAndLongPaths(t *testing.T) {
 	if sent[1] != long {
 		t.Fatalf("long path sent as %q", sent[1][:12])
 	}
-	for _, script := range psScripts() {
-		if strings.Contains(script, "$a.Path") && !strings.Contains(script, "vPath ([string]$a.Path)") && !strings.Contains(script, "vRead $a.Path") {
-			t.Errorf("a script uses $a.Path without vPath")
+	for name, script := range psScripts() {
+		for _, use := range regexp.MustCompile(`[^\n]*\$a\.Paths?\b[^\n]*`).FindAllString(script, -1) {
+			if !strings.Contains(use, "vPath ([string]$a.Path)") && !strings.Contains(use, "vRead $a.Path") &&
+				!strings.Contains(use, "vStatOne ([string]$a.Path)") && !strings.Contains(use, "vIdentOne ([string]$a.Path)") &&
+				!strings.Contains(use, "foreach ($bmP in @($a.Paths))") {
+				t.Errorf("%s uses $a.Path without vPath: %s", name, use)
+			}
 		}
+	}
+	// The shared functions normalise the path they are given, and the batch
+	// hands each path only to them.
+	if !strings.Contains(psStatFn, "$stP = vPath $soPath") || !strings.Contains(psIdentifyFn, "vRead $ioPath $ioMax") ||
+		strings.Count(psBatch, "$bmP") != 3 {
+		t.Error("vStatOne, vIdentOne or psBatch reach a path without vPath")
 	}
 	// A raw (code-page) answer is refused, not misread.
 	fr = newTgtFakeInputRunner(func([]string, []byte) tgtResult { return tgtResult{stdout: `{"Path":"x"}`} })
@@ -440,7 +452,7 @@ func TestPSScriptRefusesUnsafeTemplate(t *testing.T) {
 	if _, err := psScript("no argument use", psPathArgs{Path: "x"}); err == nil {
 		t.Error("a script that does not read its arguments was accepted")
 	}
-	for _, s := range []string{psStat, psIdentify, psRead, psReadText, psList} {
+	for _, s := range []string{psStat, psIdentify, psRead, psReadText, psList, psBatch} {
 		if strings.Contains(s, "%ARGS%") || !strings.Contains(s, "$vistaArgs") {
 			t.Fatal("a script does not read $vistaArgs")
 		}

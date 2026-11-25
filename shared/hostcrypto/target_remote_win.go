@@ -375,7 +375,8 @@ function vLines([string]$lnT) {
   return [pscustomobject]@{ Parts = $lnParts; Count = $lnCount }
 }
 function vPublic([byte[]]$pcB, [int]$pcN) {
-  if ([Array]::IndexOf($pcB, [byte]0, 0, $pcN) -ge 0) { return $null }
+  if ([Array]::IndexOf($pcB, [byte]0, 0, $pcN) -ge 0) { return [pscustomobject]@{ Text = $null; Ref = 0 } }
+  $pcRef = 0
   $pcL = vLines ($vL1.GetString($pcB, 0, $pcN))
   $pcOut = New-Object System.Text.StringBuilder
   $pcBlock = New-Object 'System.Collections.Generic.List[string]'
@@ -386,7 +387,7 @@ function vPublic([byte[]]$pcB, [int]$pcN) {
     if ($pcS.Contains('----BEGIN') -or $pcS.Contains('---- BEGIN')) {
       $pcIn = $false
       $pcLab = vParse $pcS
-      if ($null -eq $pcLab -or -not $vAllowSet.Contains($pcLab)) { return $null }
+      if ($null -eq $pcLab -or -not $vAllowSet.Contains($pcLab)) { return [pscustomobject]@{ Text = $null; Ref = 0 } }
       $pcIn = $true; $pcOk = $true; $pcBlock.Clear(); $pcBlock.Add($pcS); $pcLen = 0
       if ($pcS.StartsWith('-----', [StringComparison]::Ordinal)) { $pcEnd = '-----END ' + $pcLab + '-----' } else { $pcEnd = '---- END ' + $pcLab + ' ----' }
       continue
@@ -394,9 +395,10 @@ function vPublic([byte[]]$pcB, [int]$pcN) {
     if ($pcIn) {
       if ([string]::Equals($pcS, $pcEnd, [StringComparison]::Ordinal)) {
         $pcIn = $false
-        if (-not $pcOk -or -not $vCertSet.Contains($pcLab) -or -not $pcS.StartsWith('-----', [StringComparison]::Ordinal) -or $pcLen -gt ` + strconv.Itoa(maxCertBody) + `) { continue }
+        if (-not $pcOk -or -not $vCertSet.Contains($pcLab) -or -not $pcS.StartsWith('-----', [StringComparison]::Ordinal)) { continue }
+        if ($pcLen -gt ` + strconv.Itoa(maxCertBody) + `) { $pcRef++; continue }
         $pcPem = vCert $pcLab ([string]::Join('', $pcBlock.ToArray(), 1, $pcBlock.Count - 1))
-        if ($pcPem.Length -gt 0) { [void]$pcOut.Append($pcPem); $pcAny = $true }
+        if ($pcPem.Length -gt 0) { [void]$pcOut.Append($pcPem); $pcAny = $true } else { $pcRef++ }
         continue
       }
       if ($pcS.Contains('----END') -or $pcS.Contains('---- END')) { $pcIn = $false; continue }
@@ -410,8 +412,8 @@ function vPublic([byte[]]$pcB, [int]$pcN) {
       if ($pcK.Length -gt 0) { [void]$pcOut.Append($pcK).Append($vNL); $pcAny = $true }
     }
   }
-  if (-not $pcAny) { return $null }
-  return $pcOut.ToString()
+  if (-not $pcAny) { return [pscustomobject]@{ Text = $null; Ref = $pcRef } }
+  return [pscustomobject]@{ Text = $pcOut.ToString(); Ref = $pcRef }
 }
 function vDerEnd([byte[]]$dlB, [int]$dlPos, [int]$dlEnd) {
   if ($dlPos + 2 -gt $dlEnd) { return -1 }
@@ -726,38 +728,69 @@ const psQuietLine = "$vQuiet = $true\n"
 // huge file is refused with an answer, never lost to a timeout.
 const remoteWindowsTextBudget = 45
 
-// psStat describes one path: Get-Item, then psAcl.
-var psStat = psPrelude + `try {
-  $stP = vPath ([string]$a.Path)
-  $stAttr = [System.IO.File]::GetAttributes($stP)
-} catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-$stDirBit = (($stAttr -band [System.IO.FileAttributes]::Directory) -ne 0)
-if ($stDirBit) { $stInfo = New-Object System.IO.DirectoryInfo $stP } else { $stInfo = New-Object System.IO.FileInfo $stP }
-$stLink = $false; $stTarget = ''
-if (($stAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $stLi = vLinkInfo $stP; $stLink = [bool]$stLi.Link; $stTarget = $stLi.Target }
-$stAcl = psAcl $stP $stDirBit
-$stSize = 0
-if (-not $stDirBit) { $stSize = [int64]$stInfo.Length }
-psOut ([pscustomobject]@{
-  Path = (vShort $stInfo.FullName); Size = $stSize; Modified = (psTime $stInfo)
-  IsDir = [bool]($stDirBit -and -not $stLink); IsLink = [bool]$stLink; Target = $stTarget
-  Owner = $stAcl.Owner; AclOk = $stAcl.Ok; Broad = $stAcl.Broad
-})`
-
-// psIdentify returns ONLY markers from one bounded read: size, the first
-// eight bytes in hex, whether the window holds a NUL, up to 64 valid labels
-// and the rule flags.
-var psIdentify = psPrelude + `try { $idR = vRead $a.Path ([int64]$a.Max) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-if ($idR.Error) { psOut ([pscustomobject]@{ Error = $idR.Error }); exit 0 }
-$idNul = ([Array]::IndexOf($idR.Buf, [byte]0, 0, $idR.N) -ge 0)
-$idText = $vL1.GetString($idR.Buf, 0, $idR.N)
-$idX = vInspect $idText
-$idU16 = $false
-$idHex = vHex $idR.Buf $idR.N
-if ($idHex.StartsWith('fffe', [StringComparison]::Ordinal) -or $idHex.StartsWith('feff', [StringComparison]::Ordinal)) {
-  $idU16 = $vU16PrivRx.IsMatch($vU16Rx.Replace($idText, ''))
+// psStatFn describes one path: its attributes, then psAcl. psStat runs it
+// once, psBatch once per path.
+const psStatFn = `function vStatOne([string]$soPath) {
+  try {
+    $stP = vPath $soPath
+    $stAttr = [System.IO.File]::GetAttributes($stP)
+  } catch { return [pscustomobject]@{ Error = (psErr $_.Exception) } }
+  $stDirBit = (($stAttr -band [System.IO.FileAttributes]::Directory) -ne 0)
+  if ($stDirBit) { $stInfo = New-Object System.IO.DirectoryInfo $stP } else { $stInfo = New-Object System.IO.FileInfo $stP }
+  $stLink = $false; $stTarget = ''
+  if (($stAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $stLi = vLinkInfo $stP; $stLink = [bool]$stLi.Link; $stTarget = $stLi.Target }
+  $stAcl = psAcl $stP $stDirBit
+  $stSize = 0
+  if (-not $stDirBit) { $stSize = [int64]$stInfo.Length }
+  return [pscustomobject]@{
+    Path = (vShort $stInfo.FullName); Size = $stSize; Modified = (psTime $stInfo)
+    IsDir = [bool]($stDirBit -and -not $stLink); IsLink = [bool]$stLink; Target = $stTarget
+    Owner = $stAcl.Owner; AclOk = $stAcl.Ok; Broad = $stAcl.Broad
+  }
 }
-psOut ([pscustomobject]@{ Size = $idR.Size; Magic = $idHex; Nul = $idNul; Utf16 = $idU16; Labels = $idX.Labels; Flags = $idX.Flags })`
+`
+
+// psIdentifyFn returns ONLY markers from one bounded read: size, the first
+// eight bytes in hex, whether the window holds a NUL, up to 64 valid labels
+// and the rule flags. psIdentify runs it once, psBatch once per path.
+const psIdentifyFn = `function vIdentOne([string]$ioPath, [int64]$ioMax) {
+  try { $idR = vRead $ioPath $ioMax } catch { return [pscustomobject]@{ Error = (psErr $_.Exception) } }
+  if ($idR.Error) { return [pscustomobject]@{ Error = $idR.Error } }
+  $idNul = ([Array]::IndexOf($idR.Buf, [byte]0, 0, $idR.N) -ge 0)
+  $idText = $vL1.GetString($idR.Buf, 0, $idR.N)
+  $idX = vInspect $idText
+  $idU16 = $false
+  $idHex = vHex $idR.Buf $idR.N
+  if ($idHex.StartsWith('fffe', [StringComparison]::Ordinal) -or $idHex.StartsWith('feff', [StringComparison]::Ordinal)) {
+    $idU16 = $vU16PrivRx.IsMatch($vU16Rx.Replace($idText, ''))
+  }
+  return [pscustomobject]@{ Size = $idR.Size; Magic = $idHex; Nul = $idNul; Utf16 = $idU16; Labels = $idX.Labels; Flags = $idX.Flags }
+}
+`
+
+// psStat describes one path.
+var psStat = psPrelude + psStatFn + `psOut (vStatOne ([string]$a.Path))`
+
+// psIdentify identifies one path.
+var psIdentify = psPrelude + psIdentifyFn + `psOut (vIdentOne ([string]$a.Path) ([int64]$a.Max))`
+
+// remoteWindowsBatchBudget is how long psBatch may run before it stops and
+// answers for the paths it has done; Go asks for the rest one by one.
+const remoteWindowsBatchBudget = 40
+
+// psBatch runs vStatOne and vIdentOne over each path, in order, within the
+// time budget, and answers with both results per path: the same answers the
+// single scripts give, nothing more (no file content beyond Identify's
+// markers). JSON is written here rather than by psOut, whose depth is too
+// small for an array of results.
+var psBatch = psBudgetLine(remoteWindowsBatchBudget) + psPrelude + psStatFn + psIdentifyFn + `$bmOut = New-Object 'System.Collections.Generic.List[object]'
+foreach ($bmP in @($a.Paths)) {
+  if ($vSw.Elapsed.TotalSeconds -ge $vBudget) { break }
+  $bmS = vStatOne ([string]$bmP)
+  $bmI = vIdentOne ([string]$bmP) ([int64]$a.Max)
+  $bmOut.Add([pscustomobject]@{ S = $bmS; I = $bmI })
+}
+[Console]::Out.Write('J:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 8 -InputObject ([pscustomobject]@{ R = $bmOut.ToArray() })))))`
 
 // psRead reads the buffer once, decides on it with the host-side rule (as the
 // awk "decide" mode does) and only then prints base64 of THAT buffer's public
@@ -766,8 +799,8 @@ var psRead = psQuietLine + psPrelude + `try { $rdR = vRead $a.Path (([int64]$a.M
 if ($rdR.Error) { psOut ([pscustomobject]@{ Error = $rdR.Error }); exit 0 }
 if ($rdR.Size -gt [int64]$a.Max -or $rdR.N -gt [int64]$a.Max) { psOut ([pscustomobject]@{ Error = 'too_large' }); exit 0 }
 $rdPub = vPublic $rdR.Buf $rdR.N
-if ($null -eq $rdPub) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
-[Console]::Out.Write('D:' + [Convert]::ToBase64String($vL1.GetBytes($rdPub)))`
+if ($null -eq $rdPub.Text) { psOut ([pscustomobject]@{ Error = 'not_public' }); exit 0 }
+[Console]::Out.Write('P:' + $rdPub.Ref + ':' + [Convert]::ToBase64String($vL1.GetBytes($rdPub.Text)))`
 
 // psReadText reads the buffer once, filters it with the rules of
 // FilterConfigText within the time budget and prints the result with the
@@ -946,9 +979,10 @@ func psDecode(out []byte) (byte, []byte, error) {
 		return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
 	}
 	kind, body := s[0], s[2:]
-	if kind == 'T' {
-		// T:<count>:<base64>; the count is returned in front of the payload
-		// by psText.
+	if kind == 'T' || kind == 'P' {
+		// T:<count>:<base64> (a filtered text and its redactions) and
+		// P:<count>:<base64> (public content and its refused certificate
+		// blocks); the count is returned in front of the payload.
 		i := strings.IndexByte(body, ':')
 		if i < 0 {
 			return 0, nil, errors.New("hostcrypto: unreadable answer from the host")
@@ -1031,6 +1065,11 @@ func (t *RemoteWindowsTarget) Stat(ctx context.Context, path string) (FileInfo, 
 	if err := json.Unmarshal(out, &r); err != nil {
 		return FileInfo{}, fmt.Errorf("hostcrypto: stat %s: unreadable answer", path)
 	}
+	return psStatInfo(path, r)
+}
+
+// psStatInfo turns one vStatOne answer into a FileInfo or an error.
+func psStatInfo(path string, r psStatResult) (FileInfo, error) {
 	if r.Error != "" {
 		return FileInfo{}, psError(path, r.Error)
 	}
@@ -1083,6 +1122,13 @@ func (t *RemoteWindowsTarget) identify(ctx context.Context, path string) (inspec
 	if err := json.Unmarshal(out, &r); err != nil {
 		return inspection{}, fmt.Errorf("hostcrypto: identify %s: unreadable answer", path)
 	}
+	return t.psInspection(path, r)
+}
+
+// psInspection turns one vIdentOne answer into the host's inspection. A
+// field the host did not return is an error, never a default that could make
+// a file public.
+func (t *RemoteWindowsTarget) psInspection(path string, r psIdentifyResult) (inspection, error) {
 	if r.Error != "" {
 		return inspection{}, psError(path, r.Error)
 	}
@@ -1141,29 +1187,114 @@ func (t *RemoteWindowsTarget) Identify(ctx context.Context, path string) (Identi
 // decides again on the host from the one buffer it prints, and the bytes that
 // arrive are inspected once more here.
 func (t *RemoteWindowsTarget) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	b, _, err := t.ReadPublic(ctx, path)
+	return b, err
+}
+
+// ReadPublic is ReadFile with the number of certificate blocks in the file
+// that could not be read: refused on the host (vCert, the body bound) or
+// dropped by Go's recheck (recheckPublic).
+func (t *RemoteWindowsTarget) ReadPublic(ctx context.Context, path string) ([]byte, int, error) {
 	in, err := t.identify(ctx, path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	readCap := t.readCap()
 	if in.size > readCap {
-		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
+		return nil, 0, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
 	if !identityFrom(path, in).Public() {
-		return nil, fmt.Errorf("%s: %w", path, ErrNotPublic)
+		return nil, 0, fmt.Errorf("%s: %w", path, ErrNotPublic)
 	}
 	kind, out, err := t.psRun(ctx, psRead, psPathArgs{Path: path, Max: readCap})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if kind == 'J' {
-		return nil, psJSONError(path, out)
+		return nil, 0, psJSONError(path, out)
 	}
-	if kind != 'D' {
-		return nil, fmt.Errorf("hostcrypto: read %s: unexpected answer", path)
+	if kind != 'P' {
+		clear(out)
+		return nil, 0, fmt.Errorf("hostcrypto: read %s: unexpected answer", path)
 	}
-	return recheckPublic(path, out, readCap)
+	i := bytes.IndexByte(out, ':')
+	host, cerr := strconv.Atoi(string(out[:max(i, 0)]))
+	if i < 0 || cerr != nil || host < 0 || host > maxCertBlocksCounted {
+		clear(out)
+		return nil, 0, fmt.Errorf("hostcrypto: read %s: unreadable answer", path)
+	}
+	b, dropped, err := recheckPublic(path, out[i+1:], readCap)
+	return b, dropped + host, err
 }
+
+// StatIdentifyMany runs psBatch once per batch of paths (one PowerShell
+// start instead of two per path). Each path's answer is parsed by the same
+// code as Stat's and Identify's; a path the host did not reach within its
+// budget, or a batch whose answer cannot be read, is asked for with the
+// single calls.
+func (t *RemoteWindowsTarget) StatIdentifyMany(ctx context.Context, paths []string) ([]PathInfo, error) {
+	out := make([]PathInfo, 0, len(paths))
+	for _, chunk := range batchChunks(paths) {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		got := t.psBatchRun(ctx, chunk)
+		for i, p := range chunk {
+			if i < len(got) {
+				out = append(out, got[i])
+				continue
+			}
+			out = append(out, statIdentifySingle(ctx, t, p))
+		}
+	}
+	return out, ctx.Err()
+}
+
+type psBatchArgs struct {
+	Paths []string `json:"Paths"`
+	Max   int64    `json:"Max"`
+}
+
+// psBatchRun runs psBatch over one chunk and returns the answers it gave, in
+// order; fewer than asked for (none on an unreadable answer) means the rest
+// are asked for singly.
+func (t *RemoteWindowsTarget) psBatchRun(ctx context.Context, chunk []string) []PathInfo {
+	b, err := t.psJSON(ctx, psBatch, psBatchArgs{Paths: chunk, Max: t.maxBytes})
+	if err != nil {
+		return nil
+	}
+	var ans struct {
+		R json.RawMessage `json:"R"`
+	}
+	if json.Unmarshal(b, &ans) != nil {
+		return nil
+	}
+	items, err := psArray[struct {
+		S *psStatResult     `json:"S"`
+		I *psIdentifyResult `json:"I"`
+	}](ans.R)
+	if err != nil || len(items) > len(chunk) {
+		return nil
+	}
+	res := make([]PathInfo, 0, len(items))
+	for i, it := range items {
+		if it.S == nil || it.I == nil {
+			return res
+		}
+		r := PathInfo{Path: chunk[i]}
+		r.Info, r.StatErr = psStatInfo(chunk[i], *it.S)
+		in, ierr := t.psInspection(chunk[i], *it.I)
+		if ierr != nil {
+			r.IdentifyErr = ierr
+		} else {
+			r.Identity = identityFrom(chunk[i], in)
+		}
+		res = append(res, r)
+	}
+	return res
+}
+
+var _ BatchTarget = (*RemoteWindowsTarget)(nil)
 
 // psJSONError reads a script's {"Error": ...} answer.
 func psJSONError(path string, out []byte) error {

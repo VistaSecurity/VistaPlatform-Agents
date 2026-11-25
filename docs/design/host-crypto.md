@@ -82,7 +82,15 @@ decides on the host, from ONE read of the file, before anything is printed:
   CERTIFICATE's trust settings are cut off first). .NET hands back its input
   as `RawData` and Go's parser takes the outer element as the certificate,
   so without the envelope check a key appended inside the SEQUENCE would
-  cross. A block the check or the parser refuses is dropped. No pattern over a block's
+  cross. A block the check or the parser refuses is dropped and counted:
+  the rest of the file still crosses, and the Report notes "N certificates
+  in this file could not be read" (`PublicReader.ReadPublic`). Go checks
+  what arrives block by block: an answer that is anything but canonical
+  `CERTIFICATE` blocks with a strict envelope and parsing key lines is
+  refused whole, while a strict-envelope block that `crypto/x509` refuses
+  (the EC-ACC root in macOS's `/etc/ssl/cert.pem` has a negative serial
+  number, which LibreSSL and .NET accept) is dropped and counted rather
+  than sinking the bundle. No pattern over a block's
   bytes can tell a certificate from a private key written under a
   certificate's label; a parser can. Public keys, requests, revocation
   lists and parameters do not cross (no record needs them from a remote
@@ -110,6 +118,22 @@ that .NET Framework reads, and a writer can set the last-write time back. `Ident
 first eight bytes, PEM labels, rule flags), and a remote `ReadFile` is
 refused before any content command is sent unless the identity is a
 certificate or SSH key file. Go checks everything that arrives.
+
+**Batching.** A remote target also answers `Stat` and `Identify` for many
+paths in one host program (`BatchTarget.StatIdentifyMany`): on Windows one
+PowerShell start instead of two per path (each about 0.75 s), on Unix one
+shell program that runs, per path, the single `stat` command and the single
+identification script unchanged. Each path's answer is exactly the single
+calls' answers, parsed by the same Go code, and no more crosses than
+`Identify` returns. Batches are bounded (64 paths, 16 KiB of paths, a 40 s
+host budget); a path a batch did not answer is asked for singly. Pass 1
+prefetches through it on a remote target: at its start, every plain file the
+location tables name and every directory it would list, so a directory the
+host does not have (most of them, on any one host) costs no listing; then,
+per table entry, the files the listing returned. On xps15 (Windows 11, the
+production SSH runner) pass 1 went from 218 commands and 125-152 s to 26
+commands and about 22 s. A target without the interface, or a local one,
+makes the single calls.
 
 **Limits, stated.** These cross on purpose or are left alone:
 
@@ -173,7 +197,9 @@ rights allow, and pass 4 by file name and size only, on the roots asked for.
 | Private key: encrypted or not | from the file | from its PEM label and, for OpenSSH and PKCS#8, the same commands |
 | Keystore contents | parsed in memory | from `keytool -list` and `openssl pkcs12 -nokeys` where installed; otherwise type and permissions only |
 | Windows stores, macOS keychain | the platform's own commands | the same commands over SSH |
-| Sweep | by content | by name and size |
+| Sweep | by content | by name and size; the section reads `partial` with the limit `remote_by_name` |
+| known_hosts | entries counted, hashing told | recorded with its location; entries and hashing nil, `ssh` partial (its lines name other hosts and are not read) |
+| authorized_keys | keys with their options | keys only; `restricted` and `certificate_authority` nil, `ssh` partial |
 
 ### Bounds
 
@@ -182,6 +208,13 @@ over 10 MiB are not opened; 2,000 records per section; 15 minutes per run; one
 filesystem per root; pseudo-filesystems, network mounts and container layer
 stores are never entered. Reads are sequential and the walk yields, so a
 collection does not compete with the host's own work.
+
+A run stops at the earlier of `MaxDuration` and the caller's deadline, or when
+the caller cancels. Every section a stopped pass had not finished, and every
+section of a pass that never started, reads `partial` with a `max_duration`
+limit whose detail names the bound that applied; none reads `ok` with a list
+it did not finish, and none reads `failed` because it was cut. A file is
+charged to the file budget once, so the sweep visits what it listed.
 
 ### Opt-ins
 

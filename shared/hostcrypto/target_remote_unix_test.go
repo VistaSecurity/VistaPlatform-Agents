@@ -478,6 +478,7 @@ func tgtRealToolsAvailable() bool {
 // against a real directory, so every flag is checked against this machine's
 // real tools rather than a fake's idea of them.
 func TestRemoteUnixRealTools(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	if !tgtRealToolsAvailable() {
 		t.Skip("Linux POSIX tools not available")
 	}

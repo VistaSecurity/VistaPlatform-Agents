@@ -93,6 +93,13 @@ func locWindowsTree(t *testing.T, local bool) *locWinFake {
 }
 
 func TestLocWindowsLocalAndRemote(t *testing.T) {
+	// The local case reads the agent's environment: pin it, so a real
+	// Windows machine's variables do not decide the fake host's roots.
+	saved := locLocalEnv
+	t.Cleanup(func() { locLocalEnv = saved })
+	locLocalEnv = func(k string) string {
+		return map[string]string{"SystemDrive": "C:", "ProgramData": `C:\ProgramData`, "ProgramFiles": `C:\Program Files`, "ProgramFiles(x86)": `C:\Program Files (x86)`}[k]
+	}
 	for _, local := range []bool{true, false} {
 		t.Run(fmt.Sprintf("local=%v", local), func(t *testing.T) {
 			w := locWindowsTree(t, local)
@@ -135,8 +142,9 @@ func TestLocWindowsLocalAndRemote(t *testing.T) {
 			if key == nil || key.Role != "tls" || !locHasUsage(key.Location, `C:\Apache24\conf\extra\httpd-ssl.conf`, "SSLCertificateKeyFile") {
 				t.Fatalf("Apache key: %+v", key)
 			}
-			// No command answered for the roots: C:, with a note.
-			if !locErrorsContain(rep, "assuming C:") {
+			// No command answered for the roots: C:, with a note (remote; the
+			// local case has the pinned environment).
+			if !local && !locErrorsContain(rep, "assuming C:") {
 				t.Errorf("the drive fallback was not noted: %+v", rep.Errors)
 			}
 			if uk := locKeyAt(rep, `C:\Users\bob\.ssh\id_ed25519`); uk == nil || uk.Role != "ssh_user_key" {
@@ -268,6 +276,7 @@ var locReadTextCall = regexp.MustCompile(`\.ReadText\(`)
 // configuration through collection.readConfig only. Both ways: the files
 // pass; a line calling ReadText fails.
 func TestLocConfigOnlyThroughReadConfig(t *testing.T) {
+	fxNeedSource(t)
 	for _, f := range []string{"pass_known.go", "pass_config.go", "oslinux.go", "osdarwin.go", "oswindows.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {

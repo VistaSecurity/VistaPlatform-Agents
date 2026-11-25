@@ -104,8 +104,9 @@ func TestPlatAddresses(t *testing.T) {
 func TestPlatArgPath(t *testing.T) {
 	for p, want := range map[string]bool{
 		"/etc/ssl/a.pem": true, "/etc/ssl/A.KEY": true, "/srv/ks.jks": true,
-		"relative.pem": false, "/etc/passwd": false, "/etc/x=y.pem": false, "/etc/pass/a.pem": false,
-		"/etc/token.pem": false, "/etc/a b.pem": false, "/etc/a\x01.pem": false,
+		"relative.pem": false, "/etc/passwd": false, "/etc/x=y.pem": false, "/etc/a b.pem": false, "/etc/a\x01.pem": false,
+		// A path may hold the secret words: the rule is on option names.
+		"/etc/pass/a.pem": true, "/etc/token.pem": true, "/var/run/secrets/tls/tls.crt": true, "/x/run/shipping/proc.crt": true,
 	} {
 		if _, ok := platArgPath(p, false); ok != want {
 			t.Errorf("%q: %v", p, ok)
@@ -129,12 +130,19 @@ func TestPlatArgsAwkReal(t *testing.T) {
 		t.Skip("no awk")
 	}
 	in := strings.Join([]string{
+		"A --password=hunter2",
 		"A --password=/run/secrets/hunter2.pem",
-		"A -Djavax.net.ssl.keyStorePassword=/x/changeit.jks",
-		"A --token=abcdef",
+		"A --keystore-password",
+		"A hunter3",
+		"A -Djavax.net.ssl.keyStorePassword=hunter4",
+		"A --token-file",
+		"A /x/token.pem",
 		"A hunter2",
 		"A -Djavax.net.ssl.keyStore=/etc/app/ks.jks",
 		"A --cert=/etc/ssl/a.pem,/etc/ssl/b.crt",
+		"A --cert",
+		"A /var/run/secrets/tls/tls.crt",
+		"A /x/run/shipping/proc.crt",
 		"A /etc/ssl/c.key",
 		"A /etc/ssl/quote'd.pem",
 		"M /usr/lib/x86_64-linux-gnu/libssl.so.3",
@@ -154,7 +162,14 @@ func TestPlatArgsAwkReal(t *testing.T) {
 		return string(out)
 	}
 	got := run(platArgsAwk)
-	want := "A /etc/app/ks.jks\nA /etc/ssl/a.pem\nA /etc/ssl/b.crt\nA /etc/ssl/c.key\nM /usr/lib/x86_64-linux-gnu/libssl.so.3\nM /opt/java/bcprov-jdk18on-1.78.jar\nF /etc/ssl/server.key\n"
+	// --token-file's value is dropped with it: the name says secret, and the
+	// path behind it is the accepted loss.
+	want := "A /etc/app/ks.jks\nA /etc/ssl/a.pem\nA /etc/ssl/b.crt\nA /var/run/secrets/tls/tls.crt\nA /x/run/shipping/proc.crt\nA /etc/ssl/c.key\nM /usr/lib/x86_64-linux-gnu/libssl.so.3\nM /opt/java/bcprov-jdk18on-1.78.jar\nF /etc/ssl/server.key\n"
+	for _, secret := range []string{"hunter2", "hunter3", "hunter4", "token.pem"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("%s crossed", secret)
+		}
+	}
 	if got != want {
 		t.Fatalf("filter output:\n%s\nwant:\n%s", got, want)
 	}
@@ -164,6 +179,13 @@ func TestPlatArgsAwkReal(t *testing.T) {
 	}
 	if !strings.Contains(run(mutated), "hunter2") {
 		t.Fatal("the mutated filter did not leak: the test cannot see a leak")
+	}
+	mutated = strings.Replace(platArgsAwk, `{ skip = 1; next }`, `{ next }`, 1)
+	if mutated == platArgsAwk {
+		t.Fatal("the second mutation did not apply")
+	}
+	if !strings.Contains(run(mutated), "token.pem") {
+		t.Fatal("without the --name value rule the value behind a secret option should cross; the test cannot see it")
 	}
 }
 
@@ -294,7 +316,7 @@ func TestPlatWindowsRunning(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	h := r.procs[0]
-	if len(h.listeners) != 1 || h.listeners[0].Port != 443 || strings.Join(h.libs, ",") != `C:\Apache\bin\libssl-3-x64.dll` || strings.Join(h.args, ",") != `C:\Apache\conf\server.crt` {
+	if len(h.listeners) != 1 || h.listeners[0].Port != 443 || strings.Join(h.libs, ",") != `C:\Apache\bin\libssl-3-x64.dll` || strings.Join(h.args, ",") != `C:\Apache\conf\server.crt,C:\Apache\conf\pass\k.pem` {
 		t.Fatalf("httpd: %+v", h)
 	}
 	if strings.Contains(platJSON(t, map[string]any{"a": h.args, "l": h.libs}), "hunter2") {

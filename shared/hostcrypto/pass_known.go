@@ -139,6 +139,10 @@ func locTables(platform, root string, win locWinRoots) (system, home []locEntry)
 // locState is what passes 1 and 2 share. Passes run one after another, so it
 // needs no lock; the registry and report it feeds have their own.
 type locState struct {
+	// pre holds pass 1's batched Stat and Identify answers
+	// (BatchTarget), by path; nil outside pass 1.
+	pre map[string]PathInfo
+
 	root     string
 	platform string
 	style    locStyle
@@ -167,6 +171,9 @@ type locState struct {
 	// remoteNotes are the once-per-run explanations of what remote mode does
 	// not read.
 	remoteNotes map[string]bool
+	// noPerms counts, per section, files visited whose permissions could not
+	// be read.
+	noPerms map[string]int
 }
 
 type locCount struct{ ok, bad int }
@@ -222,6 +229,52 @@ func newLocState(root, platform string) *locState {
 		tally:        map[string]*locCount{},
 		unidentified: map[string]int{},
 		remoteNotes:  map[string]bool{},
+		noPerms:      map[string]int{},
+	}
+}
+
+// locStat is Stat through pass 1's batched answers.
+func (c *collection) locStat(ctx context.Context, p string) (FileInfo, error) {
+	if r, ok := c.locSt().pre[p]; ok {
+		return r.Info, r.StatErr
+	}
+	return c.target.Stat(ctx, p)
+}
+
+// locIdentify is Identify through pass 1's batched answers.
+func (c *collection) locIdentify(ctx context.Context, p string) (Identity, error) {
+	if r, ok := c.locSt().pre[p]; ok {
+		return r.Identity, r.IdentifyErr
+	}
+	return c.target.Identify(ctx, p)
+}
+
+// locPrefetch asks a remote BatchTarget for the Stat and Identify answers
+// of paths pass 1 is about to visit, in one host program per batch rather
+// than two per path. Paths already answered are not asked again. On a local
+// target, or one without the interface, it does nothing and the single
+// calls are made as before.
+func (c *collection) locPrefetch(ctx context.Context, paths []string) {
+	st := c.locSt()
+	bt, ok := c.target.(BatchTarget)
+	if !ok || c.target.Local() || st.pre == nil {
+		return
+	}
+	var want []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if _, done := st.pre[p]; done || seen[p] || c.locExcluded(p) {
+			continue
+		}
+		seen[p] = true
+		want = append(want, p)
+	}
+	if len(want) < 2 {
+		return // one path: the single calls cost no more
+	}
+	got, _ := bt.StatIdentifyMany(ctx, want)
+	for _, r := range got {
+		st.pre[r.Path] = r
 	}
 }
 
@@ -247,15 +300,16 @@ func (st *locState) count(section string, ok bool) {
 	}
 }
 
-// remoteNote records, once per run, a sentence about what remote mode leaves
-// out, so a reader sees why a field is empty.
+// locRemoteNote records, once per run, a sentence about what remote mode
+// leaves out, so a reader sees why a field is empty, and marks the section
+// partial: the answer is not the whole one.
 func (c *collection) locRemoteNote(section, msg string) {
 	st := c.locSt()
 	if st.remoteNotes[section+"\x00"+msg] {
 		return
 	}
 	st.remoteNotes[section+"\x00"+msg] = true
-	c.note(section, errors.New(msg))
+	c.partial(section, errors.New(msg))
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +453,11 @@ func (c *collection) locList(ctx context.Context, section, root string, depth in
 		c.limit(section, "max_files", fmt.Sprintf("stopped after %d files", c.opts.maxFiles()))
 		return nil
 	}
+	if r, ok := st.pre[root]; ok && errors.Is(r.StatErr, ErrNotExist) {
+		// Pass 1's batch found no such root: the listing would answer
+		// ErrNotExist, which is nothing to record.
+		return nil
+	}
 	files, err := c.target.List(ctx, root, ListOptions{
 		MaxDepth:     depth,
 		MaxFiles:     left,
@@ -427,12 +486,25 @@ func (c *collection) locList(ctx context.Context, section, root string, depth in
 	case errors.Is(err, ErrNotExist):
 		return nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(ctx, section)
+		c.locTimeUp(ctx, section)
 	default:
 		st.count(section, false)
 		c.partial(section, fmt.Errorf("%s: %w", root, err))
 	}
 	return files
+}
+
+// locListRoot is the directory locFiles lists for dirPat: dirPat itself, or
+// the last fixed directory above its first wildcard.
+func (st *locState) locListRoot(dirPat string) string {
+	w := st.style
+	root, comps := w.split(dirPat)
+	for i, s := range comps {
+		if locHasMeta(s) {
+			return w.join(root, comps[:i]...)
+		}
+	}
+	return dirPat
 }
 
 // locFiles returns the files under dirPat (whose components may hold
@@ -486,7 +558,7 @@ func (c *collection) locFiles(ctx context.Context, section, dirPat string, depth
 		// Resolved through the Target, the way a remote host would, not the
 		// agent's filesystem.
 		t := joinLinkTarget(l.Path, l.LinkTarget)
-		tfi, err := c.target.Stat(ctx, t)
+		tfi, err := c.locStat(ctx, t)
 		if err == nil {
 			tfi, err = c.locFollow(ctx, t, tfi)
 		}
@@ -509,7 +581,7 @@ func (c *collection) locEntryFiles(ctx context.Context, e locEntry) []FileInfo {
 		return c.locFiles(ctx, e.section(), e.Path, e.Depth, e.Names, 0)
 	}
 	if !locHasMeta(e.Path) {
-		fi, err := c.target.Stat(ctx, e.Path)
+		fi, err := c.locStat(ctx, e.Path)
 		if err != nil {
 			c.locStatErr(e.section(), e.Path, err)
 			return nil
@@ -527,7 +599,7 @@ func (c *collection) locStatErr(section, p string, err error) {
 	switch {
 	case errors.Is(err, ErrNotExist):
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(context.Background(), section)
+		c.locStoppedAll()
 	default:
 		st.count(section, false)
 		c.partial(section, fmt.Errorf("%s: %w", p, err))
@@ -545,7 +617,7 @@ func (c *collection) locFollow(ctx context.Context, p string, fi FileInfo) (File
 		}
 		c.registry.addLink(fi.Path, fi.LinkTarget)
 		t := joinLinkTarget(fi.Path, fi.LinkTarget)
-		next, err := c.target.Stat(ctx, t)
+		next, err := c.locStat(ctx, t)
 		if err != nil {
 			return FileInfo{}, err
 		}
@@ -561,6 +633,9 @@ func (c *collection) locFollow(ctx context.Context, p string, fi FileInfo) (File
 
 // passKnownLocations is pass 1.
 func passKnownLocations(ctx context.Context, c *collection) {
+	if c.stoppedBefore(ctx, locPassSections(c)...) {
+		return
+	}
 	st := c.locSt()
 	if st.platform == "windows" && st.win.Drive == "" {
 		st.win = c.locWindowsRoots(ctx)
@@ -572,9 +647,34 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		}
 		return
 	}
-	for _, e := range system {
-		if c.timeUp(ctx, e.section()) {
-			break
+	st.pre = map[string]PathInfo{}
+	defer func() { st.pre = nil }()
+	entries := system
+	if c.opts.HomeDirectories {
+		entries = append(append([]locEntry(nil), system...), home...)
+	}
+	// One batch for every plain file the tables name and every directory
+	// pass 1 would list (most of which a given host does not have).
+	var plain []string
+	for _, e := range entries {
+		switch {
+		case e.Dir:
+			plain = append(plain, st.locListRoot(e.Path))
+		case locHasMeta(e.Path):
+			plain = append(plain, st.locListRoot(st.style.dir(e.Path)))
+		default:
+			plain = append(plain, e.Path)
+		}
+	}
+	c.locPrefetch(ctx, plain)
+	for i, e := range system {
+		if c.locTimeUp(ctx, e.section()) {
+			// Every row not visited leaves its section incomplete.
+			c.locRowsNotVisited(system[i:], false)
+			if c.opts.HomeDirectories {
+				c.locRowsNotVisited(home, true)
+			}
+			return
 		}
 		c.locRunEntry(ctx, e)
 	}
@@ -582,13 +682,54 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		c.skip(SectionHomeDirectories)
 		return
 	}
-	for _, e := range home {
+	for i, e := range home {
 		e.Home = true
-		if c.timeUp(ctx, SectionHomeDirectories) {
-			break
+		if c.locTimeUp(ctx, SectionHomeDirectories) {
+			c.locRowsNotVisited(home[i:], true)
+			return
 		}
 		c.locRunEntry(ctx, e)
 	}
+}
+
+// locRowsNotVisited records the time limit on the section of every row the
+// pass did not reach (and on home_directories for home rows), so no section
+// whose rows were not all visited can read ok.
+func (c *collection) locRowsNotVisited(rows []locEntry, home bool) {
+	for _, e := range rows {
+		c.limit(e.section(), "max_duration", c.stopDetail())
+	}
+	if home && len(rows) > 0 {
+		c.limit(SectionHomeDirectories, "max_duration", c.stopDetail())
+	}
+}
+
+// locTimeUp is timeUp for passes 1 and 2: when time is up, what was not
+// visited could have been any kind of file (a row of material, a file a
+// configuration names), so every section of the two passes gets the limit,
+// not only the one being read.
+func (c *collection) locTimeUp(ctx context.Context, section string) bool {
+	if !c.timeUp(ctx, section) {
+		return false
+	}
+	c.locStoppedAll()
+	return true
+}
+
+// locStoppedAll records the time limit on every section of passes 1 and 2.
+func (c *collection) locStoppedAll() {
+	for _, s := range locPassSections(c) {
+		c.limit(s, "max_duration", c.stopDetail())
+	}
+}
+
+// locPassSections are the sections passes 1 and 2 report on in this run.
+func locPassSections(c *collection) []string {
+	s := append([]string(nil), locSections...)
+	if c.opts.HomeDirectories {
+		s = append(s, SectionHomeDirectories)
+	}
+	return s
 }
 
 // locSections are the sections passes 1 and 2 report on.
@@ -598,6 +739,22 @@ var locSections = []string{SectionCertificates, SectionPrivateKeys, SectionKeyst
 func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 	st := c.locSt()
 	files := c.locEntryFiles(ctx, e)
+	if e.Kind != locNSS && e.Kind != locConfig {
+		var paths []string
+		for _, fi := range files {
+			if fi.IsDir {
+				continue
+			}
+			if fi.IsSymlink && fi.LinkTarget != "" {
+				if e.SkipLinks {
+					continue
+				}
+				paths = append(paths, joinLinkTarget(fi.Path, fi.LinkTarget))
+			}
+			paths = append(paths, fi.Path)
+		}
+		c.locPrefetch(ctx, paths)
+	}
 	switch e.Kind {
 	case locNSS:
 		c.locNSSDirs(ctx, e, files)
@@ -609,7 +766,7 @@ func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 		return
 	}
 	for _, fi := range files {
-		if c.timeUp(ctx, e.section()) {
+		if c.locTimeUp(ctx, e.section()) {
 			return
 		}
 		if fi.IsDir {
@@ -737,6 +894,9 @@ type locVisit struct {
 	Section string
 	// Info is the file as a listing saw it; nil means Stat it.
 	Info *FileInfo
+	// Charged: the caller has already charged this file to the run's file
+	// budget (the sweep charges what it lists), so the visit does not again.
+	Charged bool
 }
 
 // locResult is how a visit went.
@@ -759,31 +919,30 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 	if c.locExcluded(v.Path) {
 		return locNotFile, FileInfo{}
 	}
-	if c.timeUp(ctx, v.Section) {
+	if c.locTimeUp(ctx, v.Section) {
 		return locStopped, FileInfo{}
 	}
-	var fi FileInfo
-	if v.Info != nil {
-		fi = *v.Info
-	} else {
-		var err error
-		if fi, err = c.target.Stat(ctx, v.Path); err != nil {
-			return c.locErrResult(v, err), FileInfo{}
-		}
+	fi, err := c.locInfo(ctx, v)
+	if err != nil {
+		return c.locErrResult(v, err), FileInfo{}
 	}
-	fi, err := c.locFollow(ctx, v.Path, fi)
+	fi, err = c.locFollow(ctx, v.Path, fi)
 	if err != nil {
 		return c.locErrResult(v, err), FileInfo{}
 	}
 	if fi.IsDir {
 		return locIsDir, fi
 	}
+	if fi.WorldReadable == nil && fi.Mode == 0 {
+		// Who can read it is not known: the section says so.
+		st.noPerms[v.Section]++
+	}
 	real := c.registry.realPath(v.Path)
 	if prod, ok := st.visited[real]; ok {
 		locTouch(prod, v)
 		return locRead, fi
 	}
-	if c.files(v.Section, 1) == 0 {
+	if !v.Charged && c.files(v.Section, 1) == 0 {
 		return locStopped, fi
 	}
 	prod := &locProduced{}
@@ -792,6 +951,32 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 	res := c.locDispatch(ctx, v, fi, prod)
 	return res, fi
 }
+
+// locInfo is the fullest description of v's path that is known: the batched
+// Stat answer when it carries permissions (a Windows listing does not: its
+// ACL is in the batch, not the listing), else the caller's (a listing's),
+// else a Stat. A visit never uses a record without permissions while one
+// with them is at hand.
+func (c *collection) locInfo(ctx context.Context, v locVisit) (FileInfo, error) {
+	st := c.locSt()
+	if r, ok := st.pre[v.Path]; ok && r.StatErr == nil && locHasPerms(r.Info) {
+		return r.Info, nil
+	}
+	if v.Info != nil && (locHasPerms(*v.Info) || v.Info.IsSymlink || v.Info.IsDir) {
+		return *v.Info, nil
+	}
+	fi, err := c.locStat(ctx, v.Path)
+	if err != nil {
+		if v.Info != nil && !errors.Is(err, ErrNotExist) {
+			return *v.Info, nil
+		}
+		return FileInfo{}, err
+	}
+	return fi, nil
+}
+
+// locHasPerms reports whether fi says who can read the file.
+func locHasPerms(fi FileInfo) bool { return fi.WorldReadable != nil || fi.Mode != 0 }
 
 // locErrResult turns a Target error into a result, recording what must be.
 func (c *collection) locErrResult(v locVisit, err error) locResult {
@@ -804,16 +989,52 @@ func (c *collection) locErrResult(v locVisit, err error) locResult {
 	case errors.Is(err, errNotRegular):
 		return locNotFile
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		c.timeUp(context.Background(), v.Section)
+		c.locStoppedAll()
 		return locStopped
 	}
 	c.partial(v.Section, fmt.Errorf("%s: %w", v.Path, err))
 	return locFailed
 }
 
-// locTouch merges a further sighting into a file's records.
+// locKeyLeaves names the certificates of a keystore's private-key entries
+// (by fingerprint, and by alias): a trust store's trusted entries are
+// anchors, a key's own certificate chain is not.
+func locKeyLeaves(ks Keystore) map[string]bool {
+	m := map[string]bool{}
+	for _, e := range ks.Entries {
+		if e.Kind != "private_key" {
+			continue
+		}
+		if e.CertificateFingerprint != "" {
+			m[e.CertificateFingerprint] = true
+		}
+		if e.Alias != "" {
+			m["alias\x00"+e.Alias] = true
+		}
+	}
+	return m
+}
+
+// locTouch merges a further sighting into a file's records. A sighting as a
+// trust store makes the file's certificates anchors whichever sighting came
+// first (a CA directory a table row saw, then SSLCACertificatePath named).
 func locTouch(p *locProduced, v locVisit) {
 	p.each(func(l *Location) { mergeLocation(l, Location{FoundBy: v.FoundBy, UsedBy: v.UsedBy}) })
+	if v.Trust {
+		leaves := map[string]bool{}
+		for _, ks := range p.stores {
+			for k := range locKeyLeaves(ks) {
+				leaves[k] = true
+			}
+		}
+		for i := range p.certs {
+			c := p.certs[i]
+			if leaves[c.FingerprintSHA256] || (c.Location.Container != "" && leaves["alias\x00"+c.Location.Alias]) {
+				continue
+			}
+			p.certs[i] = ksTrustAnchor(c)
+		}
+	}
 	if v.Role != "" {
 		for i := range p.keys {
 			if p.keys[i].Role == "" {
@@ -847,7 +1068,7 @@ func locCopy(l Location) Location {
 // locDispatch identifies a file and hands it to its parser.
 func (c *collection) locDispatch(ctx context.Context, v locVisit, fi FileInfo, prod *locProduced) locResult {
 	loc := c.locLocation(fi, v.Path, v.FoundBy, v.UsedBy)
-	id, err := c.target.Identify(ctx, v.Path)
+	id, err := c.locIdentify(ctx, v.Path)
 	if err != nil {
 		return c.locErrResult(v, err)
 	}
@@ -909,7 +1130,21 @@ func (c *collection) locReadable(f *locFile) bool {
 // locRead reads a file the caller has decided may be read. A local private
 // file's bytes are the caller's to clear.
 func (c *collection) locRead(ctx context.Context, f *locFile) ([]byte, bool) {
-	b, err := c.target.ReadFile(ctx, f.v.Path)
+	var b []byte
+	var err error
+	unreadable := 0
+	if pr, ok := c.target.(PublicReader); ok && !c.target.Local() {
+		b, unreadable, err = pr.ReadPublic(ctx, f.v.Path)
+	} else {
+		b, err = c.target.ReadFile(ctx, f.v.Path)
+	}
+	if unreadable > 0 {
+		what := "certificates"
+		if unreadable == 1 {
+			what = "certificate"
+		}
+		c.note(f.v.Section, fmt.Errorf("%s: %d %s in this file could not be read", f.v.Path, unreadable, what))
+	}
 	if err == nil {
 		return b, true
 	}
@@ -1158,11 +1393,12 @@ func (c *collection) locAddKeystore(f *locFile, kc KeystoreContents) {
 	}
 	ks.Location = locCopy(f.loc)
 	f.prod.stores = append(f.prod.stores, ks)
+	leaves := locKeyLeaves(ks)
 	for _, cert := range kc.Certificates {
 		l := locCopy(f.loc)
 		l.Container, l.Alias, l.Path = f.v.Path, cert.Location.Alias, ""
 		cert.Location = l
-		if f.v.Trust {
+		if f.v.Trust && !leaves[cert.FingerprintSHA256] && !leaves["alias\x00"+cert.Location.Alias] {
 			cert = ksTrustAnchor(cert)
 		}
 		f.prod.certs = append(f.prod.certs, cert)
@@ -1319,6 +1555,8 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 		for i := range keys {
 			keys[i].Restricted, keys[i].CertificateAuthority = nil, nil
 		}
+		// Not an error, but not the whole answer: who may log in is known,
+		// with what restrictions is not.
 		c.locRemoteNote(SectionSSH, "remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known")
 	}
 	a.Keys = keys
@@ -1333,12 +1571,22 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 }
 
 // locKnownHosts summarises a known_hosts file. Its lines begin with host
-// names, so it is not public and is not read remotely.
+// names, so it is not public and is not read remotely: Identify calls it a
+// public-key file (its lines hold key blobs), but what a remote public read
+// returns is the blobs alone, without the host field that says whether an
+// entry is hashed, and without the lines a marker (@revoked,
+// @cert-authority) leads. Neither the count nor the hashing could be stated
+// soundly from that, so remotely both are nil and the section says why.
 func (c *collection) locKnownHosts(ctx context.Context, f *locFile) locResult {
 	k := KnownHostsFile{Location: locCopy(f.loc)}
 	if f.fi.Size == 0 {
 		k.Entries, k.Hashed = ksIntPtr(0), cfgBoolPtr(false)
 		f.prod.known = append(f.prod.known, k)
+		return locRead
+	}
+	if !c.target.Local() {
+		f.prod.known = append(f.prod.known, k)
+		c.locRemoteNote(SectionSSH, "remote: known_hosts files are not read (their lines name other hosts); entries and hashing are not known")
 		return locRead
 	}
 	if !c.locReadable(f) {
@@ -1386,6 +1634,15 @@ func (c *collection) locFlushRecords() {
 		}
 	}
 	st.visited, st.order = map[string]*locProduced{}, nil
+	secs := make([]string, 0, len(st.noPerms))
+	for s := range st.noPerms {
+		secs = append(secs, s)
+	}
+	sort.Strings(secs)
+	for _, s := range secs {
+		c.partial(s, fmt.Errorf("the permissions of %d files could not be read", st.noPerms[s]))
+	}
+	st.noPerms = map[string]int{}
 }
 
 // locFlush hands every record of passes 1 and 2 to the registry and decides
@@ -1411,7 +1668,7 @@ func (c *collection) locFlush() {
 	}
 	for _, s := range sections {
 		t := st.tally[s]
-		if t != nil && t.bad > 0 && t.ok == 0 {
+		if t != nil && t.bad > 0 && t.ok == 0 && !c.stopping(nil) {
 			c.mark(s, SectionFailed)
 			continue
 		}

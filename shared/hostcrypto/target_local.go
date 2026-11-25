@@ -458,3 +458,18 @@ func mapOSError(path string, err error) error {
 	}
 	return err
 }
+
+// StatIdentifyMany is the single calls in a loop: nothing is saved locally
+// by batching.
+func (t *LocalTarget) StatIdentifyMany(ctx context.Context, paths []string) ([]PathInfo, error) {
+	out := make([]PathInfo, 0, len(paths))
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		out = append(out, statIdentifySingle(ctx, t, p))
+	}
+	return out, ctx.Err()
+}
+
+var _ BatchTarget = (*LocalTarget)(nil)

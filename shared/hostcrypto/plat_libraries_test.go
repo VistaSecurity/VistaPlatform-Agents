@@ -2,6 +2,7 @@ package hostcrypto
 
 import (
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -182,6 +183,9 @@ func TestPlatLibrariesThroughTargets(t *testing.T) {
 }
 
 func TestPlatRealLinuxLibraries(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads this machine's Linux library directories")
+	}
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("no find")
 	}

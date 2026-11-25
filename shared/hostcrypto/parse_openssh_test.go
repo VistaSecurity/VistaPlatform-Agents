@@ -35,6 +35,7 @@ func keyTestOpenSSH(t testing.TB, tk keyTestKey, passphrase string) []byte {
 }
 
 func TestParseOpenSSHPrivateKey(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	for _, tk := range keyTestKeys(t) {
 		sshPub, err := ssh.NewPublicKey(tk.priv.Public())
 		if err != nil {

@@ -33,6 +33,13 @@ import (
 
 // platPass runs the platform part of pass 1.
 func platPass(ctx context.Context, c *collection) {
+	secs := []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionFIPSMode, SectionTokens, SectionLibraries}
+	if c.opts.Platform != hostinventory.PlatformLinux {
+		secs = append(secs, SectionCertificates, SectionPrivateKeys)
+	}
+	if c.stoppedBefore(ctx, secs...) {
+		return
+	}
 	switch c.opts.Platform {
 	case hostinventory.PlatformLinux:
 		platElevatedUnix(ctx, c)
