@@ -1,6 +1,8 @@
 package hostcrypto
 
 import (
+	"encoding/asn1"
+	"strings"
 	"testing"
 
 	"software.sslmate.com/src/go-pkcs12"
@@ -129,5 +131,107 @@ func TestPKCS12MixedPasswords(t *testing.T) {
 	ks := got.Keystore
 	if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || len(got.Certificates) != 1 || ks.EntryCount != nil || ks.Unknown == "" {
 		t.Fatalf("empty plus a real password: %+v, %d certificates", ks, len(got.Certificates))
+	}
+}
+
+// ksEmptyPwUnsupportedPart is an encryptedData part under an algorithm this
+// package does not decrypt.
+func ksEmptyPwUnsupportedPart(t *testing.T) ksContentInfo {
+	type eci struct {
+		ContentType asn1.ObjectIdentifier
+		Alg         ksAlgorithmIdentifier
+		Content     []byte `asn1:"tag:0,optional"`
+	}
+	ed, err := asn1.Marshal(struct {
+		Version int
+		ECI     eci
+	}{0, eci{ksOIDData, ksAlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1}}, make([]byte, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ksContentInfo{ContentType: ksOIDEncryptedData, Content: ksExplicit0(ed)}
+}
+
+// ksEmptyPwEnvelopedPart is a public-key encrypted part: no password opens
+// it, and none is tried.
+func ksEmptyPwEnvelopedPart(t *testing.T) ksContentInfo {
+	null, _ := asn1.Marshal(asn1.NullRawValue)
+	return ksContentInfo{ContentType: ksOIDEnvelopedData, Content: ksExplicit0(null)}
+}
+
+// TestPKCS12HiddenPartReasons: the reason a part stayed shut says only what
+// the trial established about it.
+func TestPKCS12HiddenPartReasons(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "listed", false)
+	b := ksTestCert(t, ksTestECDSA(t), "hidden", false)
+	listed := ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))
+	const (
+		refused    = "needs a password that is neither empty nor a well-known default"
+		unreadable = "decrypted to contents that are not a list of entries"
+		untried    = "protected in a way the collector does not try"
+	)
+	for _, tc := range []struct {
+		name     string
+		pfx      []byte
+		want     []string
+		wantNot  []string
+		wantCert int
+	}{
+		{"(a) public-key encrypted part", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwEnvelopedPart(t)), []string{untried}, []string{refused, unreadable}, 1},
+		{"(b) an algorithm not decrypted here", ksBuildPFX(t, ksStr(""), listed, ksEmptyPwUnsupportedPart(t)), []string{untried}, []string{refused, unreadable}, 1},
+		{"(c) decrypts to something that is not entries", ksBuildPFX(t, ksStr(""), listed, ksEncryptedBytes(t, "", 1, []byte("not a SafeContents at all"))), []string{unreadable}, []string{refused, untried}, 1},
+		{"MAC empty, a part under a real password", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1},
+		{"no MAC, cheap part empty, costlier part real", ksBuildPFX(t, nil, listed, ksEncryptedPart(t, "Real-Pass-7", 50, ksCertSafeBag(t, b.Raw))), []string{refused}, []string{unreadable, untried}, 1},
+		{"both kinds", ksBuildPFX(t, ksStr(""), listed, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, b.Raw)), ksEmptyPwEnvelopedPart(t)), []string{refused, untried}, []string{unreadable}, 1},
+	} {
+		got, err := ParsePKCS12(tc.pfx, true)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		ks := got.Keystore
+		if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || ks.EntryCount != nil || len(got.Certificates) != tc.wantCert {
+			t.Errorf("%s: %+v, %d certificates", tc.name, ks, len(got.Certificates))
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(ks.Unknown, w) {
+				t.Errorf("%s: unknown %q lacks %q", tc.name, ks.Unknown, w)
+			}
+		}
+		for _, w := range tc.wantNot {
+			if strings.Contains(ks.Unknown, w) {
+				t.Errorf("%s: unknown %q claims %q", tc.name, ks.Unknown, w)
+			}
+		}
+	}
+}
+
+// TestPKCS12RetryBudget: a store that fitted the trial budget before the
+// empty password was tried apart still gets its answer (the other parts are
+// budgeted once, under the password that passes the check); a retry the
+// budget does not allow is not run, and the part says it was not tried.
+func TestPKCS12RetryBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("derives keys at 600,000 and 900,000 iterations")
+	}
+	a := ksTestCert(t, ksTestECDSA(t), "costly", false)
+	// 600,000 PBKDF2 iterations cost 1,200,000: five of them (the old
+	// budget for one part) exceed 4,000,000, one does not.
+	fits := ksBuildPFX(t, ksStr("changeit"), ksEncryptedPart(t, "changeit", 600_000, ksCertSafeBag(t, a.Raw)))
+	got, err := ParsePKCS12(fits, true)
+	if err != nil || got.DefaultsNotTried != "" || got.Keystore.Opened != OpenedDefaultPassword || len(got.Certificates) != 1 {
+		t.Fatalf("a store that fitted before: %v %q %+v", err, got.DefaultsNotTried, got.Keystore)
+	}
+	// 900,000 iterations cost 1,800,000: the first try (the empty password,
+	// which passes the MAC) and one retry fit, the retry with "changeit"
+	// does not, so the part is reported as not tried, never as refused.
+	cut := ksBuildPFX(t, ksStr(""), ksEncryptedPart(t, "changeit", 900_000, ksCertSafeBag(t, a.Raw)))
+	got, err = ParsePKCS12(cut, true)
+	if err != nil || got.DefaultsNotTried != "" {
+		t.Fatalf("cut: %v %q", err, got.DefaultsNotTried)
+	}
+	ks := got.Keystore
+	if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword == nil || *ks.DefaultPassword || ks.EntryCount != nil ||
+		!strings.Contains(ks.Unknown, "does not try") || strings.Contains(ks.Unknown, "neither empty") {
+		t.Fatalf("cut: %+v", ks)
 	}
 }

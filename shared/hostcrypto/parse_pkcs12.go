@@ -320,6 +320,13 @@ type ksP12Part struct {
 	alg       ksAlgorithmIdentifier
 	content   []byte // the ciphertext of an encryptedData part
 	opened    bool   // plain, or decrypted by a default password
+
+	// Why an encrypted part stayed shut, for Keystore.Unknown: each
+	// candidate decrypted nothing (refused), a candidate decrypted it to
+	// bytes that are not SafeContents (unreadable), or the trial budget cut
+	// its retries short (cut). A part with none of these was never tried:
+	// public-key encrypted, or an algorithm this code does not decrypt.
+	refused, unreadable, cut bool
 }
 
 // ksP12Structure is the password-free view of a PFX.
@@ -342,7 +349,9 @@ type ksP12Structure struct {
 // on a laptop core. Common writers ask for 1 to 10,000 iterations (OpenSSL
 // 2048, Java 10,000), which costs a few hundred thousand; a file asking for
 // more than about 300,000 per derivation is not tried, and says so in
-// DefaultsNotTried.
+// DefaultsNotTried. The bound covers the check under every candidate and each
+// other part once; retrying a part under the other candidates spends only
+// what is left, and a part whose retry does not fit says it was not tried.
 const ksMaxTrialWork = 4_000_000
 
 // The reasons a default-password trial did not run.
@@ -419,13 +428,44 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	case empty, len(entries) > 0 || len(certs) > 0:
 		out.Keystore.Opened = OpenedWithoutPassword
 	}
-	// A part that neither the empty password nor a default opened keeps what
-	// it holds: Opened says how the rest was read, EntryCount stays nil, and
-	// Unknown says why the listing is short.
+	// A part that stayed shut keeps what it holds: Opened says how the rest
+	// was read, EntryCount stays nil, and Unknown says why the listing is
+	// short, in words true of what the trial did to each such part.
 	if (found || empty) && hidden {
-		out.Keystore.Unknown = "part of the store needs a password that is neither empty nor a well-known default; its entries are not listed"
+		out.Keystore.Unknown = st.hiddenReason()
 	}
 	return out, nil
+}
+
+// hiddenReason says, for every part that stayed shut, only what the trial
+// established about it: that every candidate was tried and refused, that a
+// candidate decrypted it to something that is not a list of entries, or that
+// it was not tried (public-key encrypted, an algorithm not decrypted here,
+// or a retry the budget did not allow). Each reason that applies is given.
+func (st *ksP12Structure) hiddenReason() string {
+	var refused, unreadable, untried bool
+	for _, p := range st.parts {
+		switch {
+		case p.opened:
+		case p.unreadable:
+			unreadable = true
+		case p.refused:
+			refused = true
+		default:
+			untried = true
+		}
+	}
+	var why []string
+	if refused {
+		why = append(why, "part of the store needs a password that is neither empty nor a well-known default")
+	}
+	if unreadable {
+		why = append(why, "part of the store decrypted to contents that are not a list of entries")
+	}
+	if untried {
+		why = append(why, "part of the store is protected in a way the collector does not try")
+	}
+	return strings.Join(why, "; ") + "; its entries are not listed"
 }
 
 // protection renders the description, in the order certificates, keys, MAC.
@@ -879,21 +919,26 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		return ksP12NotOpened, ksNotTriedNoCheck
 	}
 
-	// The budget covers the worst case: the check under every candidate,
-	// and every other part under every candidate too (a part the first
-	// password does not open is tried with the others).
+	// The budget is what the trial runs before its retries: the check under
+	// every candidate, and each other part once, under the password that
+	// passes it (as before the empty password was tried apart). A part that
+	// password does not open is retried with the other candidates only from
+	// what is left of the budget; a retry past it is not run and the part
+	// says so (cut), so a store that fitted before still gets its answer.
 	cands := ksP12Candidates()
 	total := ksMulCost(check.cost, len(cands))
 	for j, o := range openers {
 		if j != verifier {
-			total = ksAddCost(total, ksMulCost(o.cost, len(cands)))
+			total = ksAddCost(total, o.cost)
 		}
 	}
 	if total > ksMaxTrialWork {
 		return ksP12NotOpened, ksNotTriedCost
 	}
+	left := ksMaxTrialWork - total
 
-	// open walks a part the password opens into st.bags.
+	// open walks a part the password opens into st.bags; a decryption whose
+	// plaintext is not SafeContents marks the part unreadable.
 	open := func(o opener, pw ksP12Password) bool {
 		pt, ok := o.open(pw)
 		if !ok {
@@ -902,6 +947,7 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 		before := len(st.bags)
 		if st.walkSafeContents(pt, maxEntries, 1) != nil {
 			st.bags = st.bags[:before]
+			st.parts[o.idx].unreadable = true
 			return false
 		}
 		st.parts[o.idx].opened = true
@@ -921,14 +967,24 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 			if open(o, pw) {
 				continue
 			}
+			opened := false
 			for _, other := range cands {
 				if other.empty == pw.empty && bytes.Equal(other.bmp, pw.bmp) {
 					continue
 				}
-				if open(o, other) {
-					byDefault = byDefault || !other.empty
+				if o.cost > left {
+					st.parts[o.idx].cut = true
 					break
 				}
+				left -= o.cost
+				if open(o, other) {
+					byDefault = byDefault || !other.empty
+					opened = true
+					break
+				}
+			}
+			if !opened && !st.parts[o.idx].cut {
+				st.parts[o.idx].refused = true
 			}
 		}
 		if byDefault {
