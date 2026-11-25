@@ -344,6 +344,32 @@ func (e *JobExecutor) SetShutdown(ctx context.Context) { e.shutdown = ctx }
 // makes, not only the scheduled one.
 func (e *JobExecutor) SetHostCryptoExcludes(f func() []string) { e.hostCryptoExcludes = f }
 
+// SetHostCryptoConsents hands the executor the agent's CONFIRMED opt-ins.
+// A job may ask for less, never for more: a queued job is a person's
+// request for a collection, not a consent the platform confirmed.
+func (e *JobExecutor) SetHostCryptoConsents(f func() (homeDirectories, defaultKeystorePasswords bool)) {
+	e.hostCryptoConsents = f
+}
+
+// clampHostCryptoConsents lowers a job's opt-ins to the confirmed ones and
+// names each one it lowered.
+func clampHostCryptoConsents(o *hostcrypto.Options, consents func() (bool, bool)) []string {
+	home, defaults := false, false
+	if consents != nil {
+		home, defaults = consents()
+	}
+	var clamped []string
+	if o.HomeDirectories && !home {
+		o.HomeDirectories = false
+		clamped = append(clamped, "home_directories")
+	}
+	if o.DefaultKeystorePasswords && !defaults {
+		o.DefaultKeystorePasswords = false
+		clamped = append(clamped, "default_keystore_passwords")
+	}
+	return clamped
+}
+
 // MergeHostCryptoExcludes returns the job's exclusions with the setting's
 // added, each once, in the job's order and then the setting's.
 func MergeHostCryptoExcludes(job, setting []string) []string {
@@ -375,6 +401,7 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 	if e.hostCryptoExcludes != nil {
 		params.Options.ExcludePaths = MergeHostCryptoExcludes(params.Options.ExcludePaths, e.hostCryptoExcludes())
 	}
+	clamped := clampHostCryptoConsents(&params.Options, e.hostCryptoConsents)
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -425,6 +452,13 @@ func (e *JobExecutor) executeHostCrypto(parent context.Context, job *models.Job)
 		}
 	}
 	stopped := e.shutdown != nil && e.shutdown.Err() != nil
+	if rep != nil {
+		for _, opt := range clamped {
+			// The scope already reads false for it; this says why.
+			rep.Errors = append(rep.Errors, hostcrypto.StepError{Step: "scope",
+				Message: opt + " was asked for by the job but is not confirmed for this agent; not collected"})
+		}
+	}
 	if e.auditLogger != nil {
 		outcome, details := "success", map[string]interface{}{"job_type": job.Type, "mode": string(params.Mode)}
 		if rep != nil {

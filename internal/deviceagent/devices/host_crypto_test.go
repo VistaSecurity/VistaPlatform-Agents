@@ -530,3 +530,30 @@ func TestMergeHostCryptoExcludes(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// A job's opt-ins never exceed the agent's confirmed ones: unconfirmed, they
+// are lowered and the report says why; confirmed, they stand.
+func TestExecute_HostCryptoJobOptInsAreClampedToConsents(t *testing.T) {
+	for _, confirmed := range []bool{false, true} {
+		exec, rec := newTestExecutor()
+		exec.SetHostCryptoConsents(func() (bool, bool) { return confirmed, confirmed })
+		job := hcjJob(t, map[string]any{"mode": "local", "options": map[string]any{
+			"home_directories": true, "default_keystore_passwords": true, "max_duration_seconds": 60, "max_files": 50}})
+		if err := exec.Execute(context.Background(), job); err != nil {
+			t.Fatal(err)
+		}
+		r := hcjReport(t, rec.last())
+		if r.Scope.HomeDirectories != confirmed || r.Scope.DefaultKeystorePasswords != confirmed {
+			t.Fatalf("confirmed=%v: scope %+v", confirmed, r.Scope)
+		}
+		noted := 0
+		for _, e := range r.Errors {
+			if e.Step == "scope" && strings.Contains(e.Message, "not confirmed") {
+				noted++
+			}
+		}
+		if (noted == 2) == confirmed {
+			t.Fatalf("confirmed=%v: %d clamp notes", confirmed, noted)
+		}
+	}
+}

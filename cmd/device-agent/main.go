@@ -485,10 +485,10 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	registerManagedSettings(agent.applier, agent.hostInventory, agent.pollEvery, agent.beatEvery, func(on bool) {
 		setVerboseLogging(on)
 	})
+	// The two opt-ins start OFF whatever the device says: they are consents,
+	// and only the platform's desired state turns one on.
 	agent.hostCrypto = newHostCryptoSupervisor(cfg.HostCryptoInterval, hostCryptoSettings{
-		homeDirectories:          cfg.HostCryptoHomeDirectories,
-		defaultKeystorePasswords: cfg.HostCryptoDefaultKeystorePasswords,
-		excludePaths:             append([]string(nil), cfg.HostCryptoExcludePaths...),
+		excludePaths: append([]string(nil), cfg.HostCryptoExcludePaths...),
 	}, agent.collectHostCrypto)
 	registerHostCryptoSettings(agent.applier, agent.hostCrypto)
 	// A host crypto job can run for up to an hour; the agent's lifetime
@@ -496,6 +496,11 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	jobExecutor.SetShutdown(agent.context())
 	// The operator's excluded paths bind every collection, a job's included.
 	jobExecutor.SetHostCryptoExcludes(func() []string { return agent.hostCrypto.options().ExcludePaths })
+	// A job's opt-ins never exceed what the platform confirmed for this agent.
+	jobExecutor.SetHostCryptoConsents(func() (bool, bool) {
+		o := agent.hostCrypto.options()
+		return o.HomeDirectories, o.DefaultKeystorePasswords
+	})
 	// What the file says this agent is running, told to the platform on every
 	// beat. Without it the platform has nothing to go on for a device it has
 	// never been configured for, resolves the built-in defaults, and the first

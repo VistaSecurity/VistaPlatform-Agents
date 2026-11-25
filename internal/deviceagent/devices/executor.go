@@ -66,6 +66,9 @@ type JobExecutor struct {
 	// hostCryptoExcludes is the agent's host_crypto_exclude_paths setting as
 	// it is now (SetHostCryptoExcludes); nil: none.
 	hostCryptoExcludes func() []string
+	// hostCryptoConsents is the agent's confirmed opt-ins (home directories,
+	// default keystore passwords); nil: none confirmed.
+	hostCryptoConsents func() (bool, bool)
 }
 
 // NewJobExecutor creates a new job executor.

@@ -161,15 +161,7 @@ func hostCryptoLocalValues(cfg *config.Config, v agentconfig.Values) {
 	if cfg.HostCryptoInterval > 0 {
 		v[agentconfig.KeyHostCryptoInterval] = agentconfig.Int(int64(cfg.HostCryptoInterval / time.Second))
 	}
-	// The two consents are reported only when ON; the platform never adopts
-	// a consent from a device (BootstrapValues), but an operator reading the
-	// running values should see what the file turned on.
-	if cfg.HostCryptoHomeDirectories {
-		v[agentconfig.KeyHostCryptoHomeDirectories] = agentconfig.Bool(true)
-	}
-	if cfg.HostCryptoDefaultKeystorePasswords {
-		v[agentconfig.KeyHostCryptoDefaultKeystorePasswords] = agentconfig.Bool(true)
-	}
+	// The two consents are never reported: the device does not hold them.
 	if len(cfg.HostCryptoExcludePaths) > 0 {
 		v[agentconfig.KeyHostCryptoExcludePaths] = agentconfig.Text(agentconfig.FormatPathList(cfg.HostCryptoExcludePaths))
 	}
@@ -191,17 +183,41 @@ func (a *DeviceAgent) collectHostCrypto(iv *interval, stop <-chan struct{}) {
 	if collect == nil {
 		collect = devices.CollectLocalHostCrypto
 	}
-	runLocalHostCryptoLoop(a.apiClient, a.config.AgentID, iv, stop, a.hostCrypto.options, collect, config.MinHostCryptoInterval)
+	runLocalHostCryptoLoop(a.apiClient, a.config.AgentID, iv, stop, a.desiredStateApplied, a.hostCrypto.options, collect, config.MinHostCryptoInterval)
 }
+
+// desiredStateApplied reports whether a desired state the platform sent has
+// been applied: until then the settings are the file's, and a scheduled
+// collection made with them would be one the platform never confirmed.
+func (a *DeviceAgent) desiredStateApplied() bool {
+	if a.applier == nil {
+		return false
+	}
+	rev, _, _ := a.applier.Report()
+	return rev != ""
+}
+
+// hostCryptoReadyPoll is how often the loop looks for the first desired
+// state; a variable so tests need not wait a second.
+var hostCryptoReadyPoll = time.Second
 
 // runLocalHostCryptoLoop collects at once, then on the interval, until stop
 // closes. One collection at a time across the whole agent: a cycle that finds
 // a job's collection running is skipped, not queued. A failure is logged and
 // the next cycle tries again.
 func runLocalHostCryptoLoop(sub hostCryptoSubmitter, agentID string, every *interval, stop <-chan struct{},
-	options func() hostcrypto.Options, collectFn hostCryptoCollector, floor time.Duration) {
-	if sub == nil || options == nil || collectFn == nil {
+	ready func() bool, options func() hostcrypto.Options, collectFn hostCryptoCollector, floor time.Duration) {
+	if sub == nil || options == nil || collectFn == nil || ready == nil {
 		return
+	}
+	// No collection before the platform's first desired state is applied:
+	// the opt-ins (and the switch itself) are the platform's to set.
+	for !ready() {
+		select {
+		case <-stop:
+			return
+		case <-time.After(hostCryptoReadyPoll):
+		}
 	}
 	if every == nil {
 		every = newInterval(config.DefaultHostCryptoInterval)

@@ -79,12 +79,12 @@ type Config struct {
 	// HostCryptoInterval is its cadence; below MinHostCryptoInterval it is
 	// raised to the floor.
 	HostCryptoInterval time.Duration `yaml:"host_crypto_interval" env:"HOST_CRYPTO_INTERVAL"`
-	// HostCryptoHomeDirectories and HostCryptoDefaultKeystorePasswords are the
-	// two opt-ins; HostCryptoExcludePaths the paths no collection enters.
-	HostCryptoHomeDirectories          bool           `yaml:"host_crypto_home_directories"`
-	HostCryptoDefaultKeystorePasswords bool           `yaml:"host_crypto_default_keystore_passwords"`
-	HostCryptoExcludePaths             []string       `yaml:"host_crypto_exclude_paths"`
-	Security                           SecurityConfig `yaml:"security"`
+	// HostCryptoExcludePaths are the paths no collection enters. The two
+	// opt-ins (home directories, default keystore passwords) have NO file
+	// key: they are consents, and a consent comes only from the platform's
+	// confirmed desired state, never from the device itself.
+	HostCryptoExcludePaths []string       `yaml:"host_crypto_exclude_paths"`
+	Security               SecurityConfig `yaml:"security"`
 
 	// RegistrationKeySHA256 is the SHA-256 (hex) of the registration key this
 	// agent enrolled with, written in its place once the key is no longer kept

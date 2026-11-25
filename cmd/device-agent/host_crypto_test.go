@@ -53,6 +53,8 @@ func hcjReport(mode hostinventory.Mode, sections map[string]string) *hostcrypto.
 	return &hostcrypto.Report{Collected: time.Now().UTC(), Mode: mode, Platform: "linux", Sections: sections}
 }
 
+func hcjReady() bool { return true }
+
 // hcjSubmitter records what the loop sends.
 type hcjSubmitter struct {
 	mu         sync.Mutex
@@ -181,7 +183,7 @@ func TestHostCryptoLoop_NotNegotiatedCollectsNothing(t *testing.T) {
 	var calls atomic.Int32
 	stop := make(chan struct{})
 	close(stop)
-	runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, func() hostcrypto.Options { return hostcrypto.Options{} },
+	runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, hcjReady, func() hostcrypto.Options { return hostcrypto.Options{} },
 		func(context.Context, string, hostcrypto.Options) (*hostcrypto.Report, error) {
 			calls.Add(1)
 			return hcjReport(hostinventory.ModeLocal, nil), nil
@@ -203,7 +205,7 @@ func TestHostCryptoLoop_CollectsAtTheInterval(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runLocalHostCryptoLoop(sub, "agent-1", newInterval(20*time.Millisecond), stop,
+		runLocalHostCryptoLoop(sub, "agent-1", newInterval(20*time.Millisecond), stop, hcjReady,
 			func() hostcrypto.Options { return hostcrypto.Options{HomeDirectories: home.Load()} },
 			func(_ context.Context, id string, o hostcrypto.Options) (*hostcrypto.Report, error) {
 				mu.Lock()
@@ -231,7 +233,7 @@ func TestHostCryptoLoop_StopCancelsAndSendsNothing(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, func() hostcrypto.Options { return hostcrypto.Options{} },
+		runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, hcjReady, func() hostcrypto.Options { return hostcrypto.Options{} },
 			func(ctx context.Context, _ string, _ hostcrypto.Options) (*hostcrypto.Report, error) {
 				close(started)
 				<-ctx.Done()
@@ -261,7 +263,7 @@ func TestHostCryptoLoop_SkipsWhileAJobCollects(t *testing.T) {
 	var calls atomic.Int32
 	stop := make(chan struct{})
 	close(stop)
-	runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, func() hostcrypto.Options { return hostcrypto.Options{} },
+	runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, hcjReady, func() hostcrypto.Options { return hostcrypto.Options{} },
 		func(context.Context, string, hostcrypto.Options) (*hostcrypto.Report, error) {
 			calls.Add(1)
 			return nil, nil
@@ -322,9 +324,15 @@ func (p *hcjPlatform) postCount() int {
 }
 
 func hcjAgent(t *testing.T, p *hcjPlatform, enabled bool, collect hostCryptoCollector) *DeviceAgent {
+	hostCryptoReadyPoll = 10 * time.Millisecond
+	t.Cleanup(func() { hostCryptoReadyPoll = time.Second })
 	cfg := &config.Config{PlatformURL: p.srv.URL, AgentID: uuid.New().String(), DataPath: t.TempDir(),
 		PollInterval: 30 * time.Minute, HeartbeatInterval: 30 * time.Minute, HostCryptoEnabled: enabled,
 		HostCryptoInterval: 6 * time.Hour}
+	return hcjAgentWith(t, cfg, collect)
+}
+
+func hcjAgentWith(t *testing.T, cfg *config.Config, collect hostCryptoCollector) *DeviceAgent {
 	agent := newDeviceAgent(cfg, "", nil)
 	agent.hostCryptoCollector = collect
 	t.Cleanup(agent.Stop)
@@ -695,4 +703,78 @@ func TestHostCryptoWiring_SettingExcludesReachJobs(t *testing.T) {
 	if ex := strings.Join(res.HostCrypto.Scope.ExcludedPaths, ","); ex != "/job/own,/srv/operator-never" {
 		t.Fatalf("excluded %q, want the job's and the setting's", ex)
 	}
+}
+
+// A consent is never the device's: a configuration file asking for both
+// opt-ins (and for host crypto), answered by a platform that turns host
+// crypto on and the opt-ins off, collects for the first time with both off.
+// Driven through the real supervisor, file loader and heartbeat.
+func TestHostCryptoConsentsNeverComeFromTheDevice(t *testing.T) {
+	hostCryptoReadyPoll = 10 * time.Millisecond
+	t.Cleanup(func() { hostCryptoReadyPoll = time.Second })
+	for _, platformSays := range []bool{false, true} {
+		p := newHCJPlatform(t, agentconfig.Effective(agentconfig.RuntimeAgent, nil, agentconfig.Values{
+			agentconfig.KeyHostCryptoEnabled:                  agentconfig.Bool(true),
+			agentconfig.KeyHostCryptoHomeDirectories:          agentconfig.Bool(platformSays),
+			agentconfig.KeyHostCryptoDefaultKeystorePasswords: agentconfig.Bool(platformSays),
+		}))
+		path := filepath.Join(t.TempDir(), "agent.yaml")
+		if err := os.WriteFile(path, []byte("platform_url: "+p.srv.URL+"\nagent_id: "+uuid.New().String()+
+			"\nhost_crypto_enabled: true\nhost_crypto_home_directories: true\nhost_crypto_default_keystore_passwords: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadFromFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.DataPath, cfg.PollInterval, cfg.HeartbeatInterval = t.TempDir(), 30*time.Minute, 30*time.Minute
+		var mu sync.Mutex
+		var seen []hostcrypto.Options
+		agent := hcjAgentWith(t, cfg, func(_ context.Context, id string, o hostcrypto.Options) (*hostcrypto.Report, error) {
+			mu.Lock()
+			seen = append(seen, o)
+			mu.Unlock()
+			r := hcjReport(hostinventory.ModeLocal, nil)
+			r.AgentID = id
+			return r, nil
+		})
+		if v := localValues(cfg); v[agentconfig.KeyHostCryptoHomeDirectories].B != nil || v[agentconfig.KeyHostCryptoDefaultKeystorePasswords].B != nil {
+			t.Fatalf("the device reports consents as running: %v", v)
+		}
+		waitFor(t, func() bool { return p.postCount() > 0 }, "a submission")
+		mu.Lock()
+		first := seen[0]
+		mu.Unlock()
+		if first.HomeDirectories != platformSays || first.DefaultKeystorePasswords != platformSays {
+			t.Fatalf("platform says %v: the first collection ran with home=%v defaults=%v", platformSays, first.HomeDirectories, first.DefaultKeystorePasswords)
+		}
+		agent.Stop()
+	}
+}
+
+// No scheduled collection before the first desired state is applied.
+func TestHostCryptoLoop_WaitsForTheFirstDesiredState(t *testing.T) {
+	hostCryptoReadyPoll = 5 * time.Millisecond
+	t.Cleanup(func() { hostCryptoReadyPoll = time.Second })
+	var ready atomic.Bool
+	var calls atomic.Int32
+	sub := &hcjSubmitter{}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runLocalHostCryptoLoop(sub, "a", newInterval(time.Hour), stop, ready.Load, func() hostcrypto.Options { return hostcrypto.Options{} },
+			func(context.Context, string, hostcrypto.Options) (*hostcrypto.Report, error) {
+				calls.Add(1)
+				return hcjReport(hostinventory.ModeLocal, nil), nil
+			}, time.Millisecond)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	if calls.Load() != 0 {
+		t.Fatal("collected before any desired state was applied")
+	}
+	ready.Store(true)
+	waitFor(t, func() bool { return calls.Load() == 1 }, "the collection once the desired state is in")
+	close(stop)
+	<-done
 }
