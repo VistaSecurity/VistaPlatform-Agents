@@ -153,7 +153,23 @@ func psSSHTable() string {
 // $fDrop, the redaction count $fRed, the output $fSB.
 var psEmit = `if ($fDrop) { if ($fE.Contains('----END') -or $fE.Contains('---- END')) { $fDrop = $false } }
       elseif ($fE.Contains('----BEGIN') -or $fE.Contains('---- BEGIN')) { $fRed++; $fDrop = -not ($fE.Contains('----END') -or $fE.Contains('---- END')) }
-      else { if ($fE.Length -ge ` + strconv.Itoa(RedactRunLength) + `) { $fMc = $vRunRx.Matches($fE).Count; if ($fMc -gt 0) { $fRed += $fMc; $fE = $vRunRx.Replace($fE, '` + RedactedMarker + `') } }; [void]$fSB.Append($fE).Append($vNL) }`
+      else {
+        if ($fE.Length -ge ` + strconv.Itoa(RedactRunLength) + `) {
+          $fMs = $vRunRx.Matches($fE)
+          if ($fMs.Count -gt 0) {
+            $fJb = New-Object System.Text.StringBuilder; $fJp = 0
+            foreach ($fM in $fMs) {
+              [void]$fJb.Append($fE, $fJp, $fM.Index - $fJp)
+              $fJr = vJudge $fM.Value
+              [void]$fJb.Append($fJr.Text); $fRed += $fJr.N
+              $fJp = $fM.Index + $fM.Length
+            }
+            [void]$fJb.Append($fE, $fJp, $fE.Length - $fJp)
+            $fE = $fJb.ToString()
+          }
+        }
+        [void]$fSB.Append($fE).Append($vNL)
+      }`
 
 // psFirstWord is firstWord on $fWd (already left-trimmed), in place.
 const psFirstWord = `if ($fWd.StartsWith('<', [StringComparison]::Ordinal)) { $fWd = $fWd.Substring(1) }
@@ -453,6 +469,35 @@ function vCert([string]$ceLabel, [string]$ceBody) {
   for ($ceK = 0; $ceK -lt $ceB64.Length; $ceK += 64) { [void]$ceSb.Append($ceB64.Substring($ceK, [Math]::Min(64, $ceB64.Length - $ceK))).Append($vNL) }
   [void]$ceSb.Append('-----END CERTIFICATE-----').Append($vNL)
   return $ceSb.ToString()
+}
+function vJudge([string]$jgR) {
+  $jgB = New-Object System.Text.StringBuilder
+  $jgN = 0; $jgPlain = 0; $jgLen = $jgR.Length
+  $jgI = $jgR.IndexOf([char]47)
+  while ($jgI -ge 0) {
+    if ($jgI -eq $jgPlain -or $jgR[$jgI - 1] -ceq [char]61) {
+      $jgK = $jgI; $jgU = 0
+      while ($jgK -lt $jgLen -and $jgR[$jgK] -ceq [char]47) {
+        $jgJ = $jgR.IndexOf([char]47, $jgK + 1)
+        if ($jgJ -lt 0) { $jgJ = $jgLen }
+        $jgSeg = $jgJ - $jgK - 1
+        if ($jgSeg -lt 1 -or $jgSeg -gt ` + strconv.Itoa(maxPathSegment) + `) { break }
+        $jgK = $jgJ; $jgU++
+      }
+      if ($jgU -ge 2) {
+        if ($jgI - $jgPlain -ge ` + strconv.Itoa(RedactRunLength) + `) { [void]$jgB.Append('` + RedactedMarker + `'); $jgN++ } else { [void]$jgB.Append($jgR, $jgPlain, $jgI - $jgPlain) }
+        [void]$jgB.Append($jgR, $jgI, $jgK - $jgI)
+        $jgPlain = $jgK
+        if ($jgK -ge $jgLen) { break }
+        $jgI = $jgR.IndexOf([char]47, $jgK)
+        continue
+      }
+    }
+    if ($jgI + 1 -ge $jgLen) { break }
+    $jgI = $jgR.IndexOf([char]47, $jgI + 1)
+  }
+  if ($jgLen - $jgPlain -ge ` + strconv.Itoa(RedactRunLength) + `) { [void]$jgB.Append('` + RedactedMarker + `'); $jgN++ } else { [void]$jgB.Append($jgR, $jgPlain, $jgLen - $jgPlain) }
+  return [pscustomobject]@{ Text = $jgB.ToString(); N = $jgN }
 }
 function vMagicAt([byte[]]$mgB, [int]$mgOff, [int]$mgN) {
   $mgH = ''
