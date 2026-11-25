@@ -8,7 +8,10 @@ mode, PKCS#11 tokens). It reports what each item **is** and who can read it.
 It never reports key material, and it never says whether something is good or
 bad.
 
-It is off until you turn it on.
+It is off until you turn it on. A collection you ask for from the console
+runs even when the scheduled one is off; it never collects home directories
+or tries default keystore passwords unless those are turned on (and
+confirmed) for the agent, whatever the request asks.
 
 ## Three ways to run it
 
@@ -96,8 +99,9 @@ rights of whoever starts it.
 
 ## The two opt-ins
 
-Both are off unless you turn them on, in the console (each asks you to
-confirm) or with a flag.
+Both are off unless you turn them on in the console, which asks you to
+confirm each, or with a flag of a standalone run. An installed agent never
+takes them from its configuration file.
 
 - **Home directories** (`host_crypto_home_directories`,
   `--home-directories`): also describe each user's own SSH keys, GnuPG homes,
@@ -151,12 +155,19 @@ of a private key file crosses the connection:
   A certificate crosses as a certificate parser on the host re-encodes it,
   never as the file's bytes; a file holding a private key is refused whole.
 - A private key is described from its markers (its first bytes and its PEM
-  labels) and its permissions, and then by a command on the host that prints
-  only its public key: `ssh-keygen -y` (on Linux, macOS and, where OpenSSH is
-  installed, Windows), else `openssl pkey -pubout` (Linux and macOS). Neither
-  can prompt: an encrypted key makes them fail at once, and the key is then
-  reported as encrypted. Where neither tool can read it, or the account may
-  not, the fields stay empty and `unknown` says why.
+  labels) and its permissions, then on the host, from the file's own header,
+  before any tool runs: an encrypted PEM key (an `ENCRYPTED PRIVATE KEY`
+  label or a `Proc-Type: 4,ENCRYPTED` header) is reported encrypted and no
+  tool is run on it. An OpenSSH key, encrypted or not and whoever may read
+  it, is described from its public half, which the file holds in clear
+  (`ssh-keygen -e`), with whether it is encrypted from its cipher name. An
+  unencrypted PEM key is read by `ssh-keygen -e`, or, where ssh-keygen
+  refuses it, by `openssl pkey -pubout` (Linux and macOS). On Windows only
+  OpenSSH keys are read this way: Windows' ssh-keygen can wait for a
+  passphrase on a PEM key and Windows has no openssl, so a PEM key's size
+  and public key are left empty there with the reason. macOS's LibreSSL and
+  OpenSSH cannot read an Ed25519 PKCS#8 key; it too says so. Every tool run
+  is bounded (3 seconds), and the keys of a pass are probed in batches.
 - A keystore on Linux or macOS is listed by `openssl pkcs12 -nokeys -info`
   (PKCS#12) or `keytool -list` (JKS, JCEKS), which print no key. Only the
   empty password is tried, unless you opt in to default passwords: those are

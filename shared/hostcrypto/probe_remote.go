@@ -105,68 +105,79 @@ func jobKeyProbeArgv(paths []string) []string {
 
 // jobWinKeyProbe is the Windows key probe: ssh-keygen.exe from the
 // system's OpenSSH, started directly (no shell), standard input closed,
-// each run bounded to 3 seconds and the batch to 25, with the same
-// marker-first rule. It answers the same vocabulary, as JSON lines.
+// eight at a time, each bounded to 3 seconds and the batch to 25, with the
+// same marker-first rule. It runs ssh-keygen ONLY on OpenSSH-format keys,
+// whose public half it reads without a passphrase: on a PEM key Windows'
+// ssh-keygen waits on the console for a passphrase even when the key has
+// none (measured on Windows 11, OpenSSH for Windows), and Windows has no
+// openssl, so a PEM key's public half is not read there ("WINPEM").
 var jobWinKeyProbe = psPrelude + `$kpExe = [System.IO.Path]::Combine([Environment]::GetFolderPath('System'), 'OpenSSH', 'ssh-keygen.exe')
 $kpHave = [System.IO.File]::Exists($kpExe)
-$kpOut = New-Object 'System.Collections.Generic.List[string]'
-function kpRun([string]$kpArgs) {
-  $kpPsi = New-Object System.Diagnostics.ProcessStartInfo
-  $kpPsi.FileName = $kpExe
-  $kpPsi.Arguments = $kpArgs
-  $kpPsi.UseShellExecute = $false
-  $kpPsi.RedirectStandardOutput = $true
-  $kpPsi.RedirectStandardError = $true
-  $kpPsi.RedirectStandardInput = $true
-  $kpPsi.CreateNoWindow = $true
-  $kpP = [System.Diagnostics.Process]::Start($kpPsi)
-  $kpP.StandardInput.Close()
-  $kpTask = $kpP.StandardOutput.ReadToEndAsync()
-  if (-not $kpP.WaitForExit(3000)) { try { $kpP.Kill() } catch { }; return $null }
-  return $kpTask.Result
-}
-function kpRfc([string]$kpPath) {
-  $kpO = kpRun ('-e -f "' + $kpPath + '"')
-  if ($null -eq $kpO) { return $false }
-  $kpIn = $false; $kpAny = $false
-  foreach ($kpL in ($kpO -split [string][char]10)) {
-    $kpL = $kpL.TrimEnd([char]13)
-    if ($kpL -ceq '---- BEGIN SSH2 PUBLIC KEY ----') { $kpIn = $true; continue }
-    if ($kpL -ceq '---- END SSH2 PUBLIC KEY ----') { if ($kpIn -and $kpAny) { $kpOut.Add('BLOBEND') }; return $kpAny }
-    if ($kpIn -and $kpL -match '^[A-Za-z0-9+/=]+$') { $kpOut.Add('B ' + $kpL); $kpAny = $true }
-  }
-  return $false
-}
+$kpAns = @{}
+$kpJobs = New-Object 'System.Collections.Generic.List[object]'
 $kpN = 0
 foreach ($kpRaw in $a.Paths) {
-  $kpOut.Add('=== ' + $kpN); $kpN++
-  if ($vSw.Elapsed.TotalSeconds -gt 25) { $kpOut.Add('TIMEUP'); continue }
+  $kpI = $kpN; $kpN++
+  $kpL = New-Object 'System.Collections.Generic.List[string]'
+  $kpAns[$kpI] = $kpL
   $kpPath = [string]$kpRaw
   if ($kpPath.StartsWith('\\?\')) { $kpPath = $kpPath.Substring(4) }
-  if ($kpPath.Contains('"')) { $kpOut.Add('FAILED'); continue }
+  if ($kpPath.Contains('"')) { $kpL.Add('FAILED'); continue }
   try {
     $kpFs = [System.IO.File]::Open($kpPath, 'Open', 'Read', 'ReadWrite')
     $kpBuf = New-Object byte[] 4096
     $kpLen = $kpFs.Read($kpBuf, 0, 4096)
     $kpFs.Close()
-  } catch { $kpOut.Add('DENIED'); continue }
+  } catch { $kpL.Add('DENIED'); continue }
   $kpH = $vL1.GetString($kpBuf, 0, $kpLen).Replace($vCR, '')
   if ($kpH.Contains('-----BEGIN OPENSSH PRIVATE KEY-----')) {
     $kpLines = $kpH -split [string][char]10
-    $kpI = [Array]::IndexOf($kpLines, '-----BEGIN OPENSSH PRIVATE KEY-----')
-    if ($kpI -ge 0 -and $kpI + 1 -lt $kpLines.Count) {
-      $kpB = $kpLines[$kpI + 1]
+    $kpX = [Array]::IndexOf($kpLines, '-----BEGIN OPENSSH PRIVATE KEY-----')
+    if ($kpX -ge 0 -and $kpX + 1 -lt $kpLines.Count) {
+      $kpB = $kpLines[$kpX + 1]
       if ($kpB.Length -ge 44) { $kpB = $kpB.Substring(0, 44) }
       try { $kpC = $vL1.GetString([Convert]::FromBase64String($kpB)) } catch { $kpC = '' }
-      if ($kpC.Contains('none')) { $kpOut.Add('ENC 0') } elseif ($kpC -match 'aes|chacha|3des|blowfish|cbc|ctr') { $kpOut.Add('ENC 1') }
+      if ($kpC.Contains('none')) { $kpL.Add('ENC 0') } elseif ($kpC -match 'aes|chacha|3des|blowfish|cbc|ctr') { $kpL.Add('ENC 1') }
     }
-    if (-not $kpHave) { $kpOut.Add('NOTOOL') } elseif (-not (kpRfc $kpPath)) { $kpOut.Add('FAILED') }
+    if ($kpHave) { $kpJobs.Add(@($kpI, $kpPath)) } else { $kpL.Add('NOTOOL') }
   } elseif ($kpH.Contains('-----BEGIN ENCRYPTED PRIVATE KEY-----') -or $kpH.Contains('Proc-Type: 4,ENCRYPTED')) {
-    $kpOut.Add('ENCRYPTED')
+    $kpL.Add('ENCRYPTED')
   } elseif ($kpH.Contains('PRIVATE KEY-----')) {
-    if (-not $kpHave) { $kpOut.Add('NOTOOL') } elseif (-not (kpRfc $kpPath)) { $kpOut.Add('FAILED') }
-  } else { $kpOut.Add('NOTKEY') }
+    $kpL.Add('WINPEM')
+  } else { $kpL.Add('NOTKEY') }
 }
+for ($kpS = 0; $kpS -lt $kpJobs.Count; $kpS += 8) {
+  $kpRun = @()
+  foreach ($kpJ in $kpJobs.GetRange($kpS, [Math]::Min(8, $kpJobs.Count - $kpS))) {
+    if ($vSw.Elapsed.TotalSeconds -gt 25) { $kpAns[$kpJ[0]].Add('TIMEUP'); continue }
+    $kpPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $kpPsi.FileName = $kpExe
+    $kpPsi.Arguments = '-e -f "' + $kpJ[1] + '"'
+    $kpPsi.UseShellExecute = $false
+    $kpPsi.RedirectStandardOutput = $true
+    $kpPsi.RedirectStandardError = $true
+    $kpPsi.RedirectStandardInput = $true
+    $kpPsi.CreateNoWindow = $true
+    $kpP = [System.Diagnostics.Process]::Start($kpPsi)
+    $kpP.StandardInput.Close()
+    $kpRun += ,@($kpJ[0], $kpP, $kpP.StandardOutput.ReadToEndAsync(), [DateTime]::UtcNow.AddSeconds(3))
+  }
+  foreach ($kpR in $kpRun) {
+    $kpWait = [int][Math]::Max(0, ($kpR[3] - [DateTime]::UtcNow).TotalMilliseconds)
+    $kpL = $kpAns[$kpR[0]]
+    if (-not $kpR[1].WaitForExit($kpWait)) { try { $kpR[1].Kill() } catch { }; $kpL.Add('FAILED'); continue }
+    $kpIn = $false; $kpAny = $false; $kpDone = $false
+    foreach ($kpX in ($kpR[2].Result -split [string][char]10)) {
+      $kpX = $kpX.TrimEnd([char]13)
+      if ($kpX -ceq '---- BEGIN SSH2 PUBLIC KEY ----') { $kpIn = $true; continue }
+      if ($kpX -ceq '---- END SSH2 PUBLIC KEY ----') { if ($kpIn -and $kpAny) { $kpL.Add('BLOBEND'); $kpDone = $true }; break }
+      if ($kpIn -and $kpX -match '^[A-Za-z0-9+/=]+$') { $kpL.Add('B ' + $kpX); $kpAny = $true }
+    }
+    if (-not $kpDone) { $kpL.Add('FAILED') }
+  }
+}
+$kpOut = New-Object 'System.Collections.Generic.List[string]'
+for ($kpI = 0; $kpI -lt $kpN; $kpI++) { $kpOut.Add('=== ' + $kpI); foreach ($kpX in $kpAns[$kpI]) { $kpOut.Add($kpX) } }
 psOut ([pscustomobject]@{ L = $kpOut.ToArray() })
 `
 
@@ -316,7 +327,7 @@ func jobParseKeyProbe(out []byte, base PrivateKey) PrivateKey {
 			blobEnd = true
 		case l == "ENC 0" || l == "ENC 1":
 			enc = l[4:]
-		case l == "ENCRYPTED", l == "DENIED", l == "NOTOOL", l == "FAILED", l == "NOTKEY", l == "TIMEUP":
+		case l == "ENCRYPTED", l == "DENIED", l == "NOTOOL", l == "FAILED", l == "NOTKEY", l == "TIMEUP", l == "WINPEM":
 			verdict = l
 		}
 	}
@@ -365,6 +376,8 @@ func jobParseKeyProbe(out []byte, base PrivateKey) PrivateKey {
 		k.Unknown = "remote: not probed: the host program's time bound ran out"
 	case "NOTKEY":
 		k.Unknown = "remote: the file's first bytes are not a key this probe reads"
+	case "WINPEM":
+		k.Unknown = "remote (Windows): a PEM key's size and public key are not read: Windows' ssh-keygen can wait on a passphrase for one, and Windows has no openssl"
 	default:
 		k.Unknown = cannot
 	}
