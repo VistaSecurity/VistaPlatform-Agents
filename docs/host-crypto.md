@@ -124,9 +124,13 @@ takes them from its configuration file.
   browser key databases (NSS), keychains and certificate stores. Off, the
   report's `home_directories` section says `skipped`.
 - **Default keystore passwords** (`host_crypto_default_keystore_passwords`,
-  `--default-keystore-passwords`): try the well-known defaults (`changeit`,
-  `changeme`, `password`, empty) against Java and PKCS#12 keystores. Only
-  whether one worked is recorded; the password and the contents are not.
+  `--default-keystore-passwords`): try the empty password, then the
+  well-known defaults (`changeit`, `changeme`, `password`), against Java and
+  PKCS#12 keystores. A keystore the empty password opens is reported as
+  needing no password (`opened: no_password`, `default_password: false`) and
+  its contents are listed; only one of the defaults gives
+  `opened: default_password` and `default_password: true`. Which default
+  worked is never recorded.
 
 ## Directories it sweeps
 
@@ -221,7 +225,8 @@ of a private key file crosses the connection:
   (PKCS#12) or `keytool -list` (JKS, JCEKS), which print no key. Only the
   empty password is tried, unless you opt in to default passwords: those are
   sent on the command's standard input, never in its arguments, so they never
-  appear in the host's process list. Windows keystores are not listed
+  appear in the host's process list. A keystore the empty password opens
+  reads `opened: no_password`, never `default_password`. Windows keystores are not listed
   remotely (Windows has no built-in tool that lists one without being able to
   print its keys), nor are keytabs.
 - Configuration is filtered **on the host** to the named directives before

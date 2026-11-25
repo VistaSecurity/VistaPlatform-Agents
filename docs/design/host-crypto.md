@@ -284,9 +284,17 @@ Off unless the operator says otherwise:
 
 - **Home directories**: per-user SSH keys, GnuPG homes, NSS databases,
   per-user keychains and stores.
-- **Default keystore passwords**: trying the well-known defaults (`changeit`,
-  `changeme`, `password`, empty) against JKS, JCEKS and PKCS#12 files. Only
-  the fact that one worked is recorded.
+- **Default keystore passwords**: trying the empty password, as a step of its
+  own, then the well-known defaults (`changeit`, `changeme`, `password`)
+  against JKS, JCEKS and PKCS#12 files. A store the empty password opens is
+  one that needs no password: `opened: no_password`, `default_password:
+  false`, contents listed. Only a well-known default gives
+  `default_password: true`, and which one is never recorded (it would be the
+  store's password); the empty password is kept apart because a store without
+  a password is a fact to record, not a guessed password. Locally, without
+  the opt-in no password is tried. Remotely the empty password is tried
+  either way (the probe lists with it), as before; the defaults only with the
+  opt-in.
 
 ## Rules for anyone adding to it
 
