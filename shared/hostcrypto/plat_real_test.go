@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"reflect"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 )
@@ -29,6 +33,7 @@ import (
 type platSSHExec struct {
 	host    string
 	windows bool
+	calls   *atomic.Int64 // commands sent, when set
 }
 
 func (r platSSHExec) command(argv []string) string {
@@ -47,6 +52,9 @@ func (r platSSHExec) Run(ctx context.Context, argv []string) ([]byte, []byte, in
 }
 
 func (r platSSHExec) RunInput(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, int, error) {
+	if r.calls != nil {
+		r.calls.Add(1)
+	}
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", r.host, r.command(argv))
 	if stdin != nil {
 		cmd.Stdin = strings.NewReader(string(stdin))
@@ -75,13 +83,28 @@ func platRealHost(t *testing.T, env, platform string) {
 		t.Skip("set " + env + " to run against a real host")
 	}
 	var target Target
-	r := platSSHExec{host: host, windows: platform == hostinventory.PlatformWindows}
+	calls := &atomic.Int64{}
+	r := platSSHExec{host: host, windows: platform == hostinventory.PlatformWindows, calls: calls}
 	if r.windows {
 		target = NewRemoteWindowsTarget(r)
 	} else {
 		target = NewRemoteUnixTarget(r, platform)
 	}
-	// Every pass, in the collector's order.
+	// Every pass, in the collector's order, each timed.
+	saved := passes
+	defer func() { passes = saved }()
+	var timed []pass
+	for _, p := range saved {
+		p := p
+		name := runtime.FuncForPC(reflect.ValueOf(p).Pointer()).Name()
+		name = name[strings.LastIndexByte(name, '.')+1:]
+		timed = append(timed, func(ctx context.Context, c *collection) {
+			start, n := time.Now(), calls.Load()
+			p(ctx, c)
+			t.Logf("pass %s: %s, %d commands", name, time.Since(start).Round(100*time.Millisecond), calls.Load()-n)
+		})
+	}
+	passes = timed
 	rep, err := Collect(context.Background(), target, Options{Platform: platform, HomeDirectories: os.Getenv("HOSTCRYPTO_PLAT_HOME") == "1"})
 	if err != nil {
 		t.Fatal(err)
