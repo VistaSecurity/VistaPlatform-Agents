@@ -98,6 +98,9 @@ const (
 	FoundByKnownLocation = "known_location" // a place this platform keeps such things
 	FoundBySweep         = "sweep"          // identified by content in the sweep
 	FoundByPlatformStore = "platform_store" // a Windows store, a macOS keychain
+	// FoundByNeighbour: in the directory of a file a configuration or a
+	// process named, found when that directory was covered (see Coverage).
+	FoundByNeighbour = "neighbour"
 )
 
 // Report is one host crypto collection.
@@ -134,6 +137,11 @@ type Report struct {
 	// Limits lists every bound that cut a section short, so a truncated list
 	// never reads as a complete one.
 	Limits []LimitHit `json:"limits,omitempty"`
+
+	// Coverage names the directories this collection saw completely. It is
+	// what allows a reader to retire a file-based item that is no longer
+	// there, whatever its section says. Absent when nothing was covered.
+	Coverage Coverage `json:"coverage,omitzero"`
 }
 
 // Access is what the collecting account could reach.
@@ -585,6 +593,34 @@ type Token struct {
 	Path string `json:"path,omitempty"`
 	// ConfiguredIn is the file that names it.
 	ConfiguredIn string `json:"configured_in,omitempty"`
+}
+
+// Coverage is what one collection saw completely, directory by directory.
+//
+// A directory is listed in Directories if and only if the collector listed
+// its direct entries completely (no permission error, no bound, no deadline,
+// not excluded, not a home directory without the opt-in), and every regular
+// file directly in it was identified and, when it is something the Report
+// records, is in the Report, or is in SkippedFiles with the reason it was
+// not read. Its subdirectories are covered separately or not at all.
+//
+// So for a covered directory, a file-based item (Location.Path directly in
+// it) that a previous collection reported and this one does not is gone. A
+// false "covered" would retire an item that still exists, so the collector
+// leaves a directory uncovered whenever it is not certain. Items in
+// platform stores (Windows certificate stores, macOS keychains) are not
+// covered by this; their sections decide.
+type Coverage struct {
+	Directories  []string      `json:"directories,omitempty"`
+	SkippedFiles []SkippedFile `json:"skipped_files,omitempty"`
+}
+
+// SkippedFile is a file in a covered directory that was not read, and why
+// ("larger than the read bound", "permission denied"). An item at its path
+// is not gone.
+type SkippedFile struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 // StepError records a step that did not complete. Message is a bounded

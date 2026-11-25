@@ -664,10 +664,12 @@ func foundByRank(f string) int {
 		return 1
 	case FoundByKnownLocation, FoundByPlatformStore:
 		return 2
-	case FoundBySweep:
+	case FoundByNeighbour:
 		return 3
+	case FoundBySweep:
+		return 4
 	}
-	return 4
+	return 5
 }
 
 // mergeLocation folds a second sighting of an item into the first: the
@@ -1165,6 +1167,12 @@ func (r *registry) finish(rep *Report) {
 	sort.Strings(sections)
 	for _, s := range sections {
 		rep.limit(s, "max_records", fmt.Sprintf("kept the first %d records", r.maxRecords))
+	}
+	// A dropped record may sit in a covered directory, which would then read
+	// as gone: with any record dropped, no directory is covered.
+	if len(sections) > 0 && len(rep.Coverage.Directories) > 0 {
+		rep.Coverage = Coverage{}
+		rep.limit(covLimitSection, "max_records", "no directory is covered: a section dropped records at its bound")
 	}
 
 	sort.SliceStable(rep.Limits, func(i, j int) bool {

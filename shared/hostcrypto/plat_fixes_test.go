@@ -66,7 +66,7 @@ func TestStopAtEveryBoundary(t *testing.T) {
 		make     func(bool) Target
 	}
 	fixtures := []fixture{
-		{"linux", "linux", func(l bool) Target { return locLinuxTree(t, l) }},
+		{"linux", "linux", func(l bool) Target { return covTree(t, l) }},
 		{"windows", "windows", func(l bool) Target { return locWindowsTree(t, l) }},
 	}
 	for _, fx := range fixtures {
@@ -77,11 +77,20 @@ func TestStopAtEveryBoundary(t *testing.T) {
 				want := platSectionCounts(full)
 				boundaries := 0
 				for n := 0; n < 5000; n++ {
-					rep, expired := platRunStopping(t, fx.make(local), opts, n)
+					target := fx.make(local)
+					rep, expired := platRunStopping(t, target, opts, n)
 					if !expired {
 						break
 					}
 					boundaries++
+					// No directory is covered unless all its files were
+					// handled, wherever the run stopped.
+					switch ft := target.(type) {
+					case *tgtFakeTarget:
+						covInvariant(t, ft, rep, covIdentity, covIdentity)
+					case *locWinFake:
+						covInvariant(t, ft.tgtFakeTarget, rep, locW2S, locS2W)
+					}
 					got := platSectionCounts(rep)
 					for s, w := range want {
 						state := rep.Sections[s]
