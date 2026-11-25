@@ -240,6 +240,7 @@ func localValues(cfg *config.Config) agentconfig.Values {
 			v[key] = agentconfig.Int(int64(d / time.Second))
 		}
 	}
+	hostCryptoLocalValues(cfg, v)
 	// Only when the file actually says something. The -verbose flag defaults
 	// ON for an interactive install, so treating "no setting" as a level would
 	// report a verbosity the operator never chose — and, being different from
