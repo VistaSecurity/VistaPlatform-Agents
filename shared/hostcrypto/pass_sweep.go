@@ -161,7 +161,7 @@ func sweep(ctx context.Context, c *collection, roots []string) []sweepHit {
 			var ok, readErr bool
 			if r, have := pre[fi.Path]; have && r.IdentifyErr == nil {
 				id = r.Identity
-				ok = !((id.Class == ClassText || id.Class == ClassUnknown) && !interestingName(fi.Path))
+				ok = (id.Class != ClassText && id.Class != ClassUnknown) || interestingName(fi.Path)
 			} else {
 				id, ok, readErr = sweepIdentify(ctx, c.target, local, fi.Path)
 			}
