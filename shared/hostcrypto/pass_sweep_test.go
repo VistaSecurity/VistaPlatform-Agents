@@ -86,8 +86,16 @@ func TestSweepRemoteByName(t *testing.T) {
 			t.Fatalf("the sweep read a file: %s", call)
 		}
 	}
-	if c.report.SectionState(SectionSweep) != SectionOK {
+	// By name is not by content: partial, and the limit says so.
+	if c.report.SectionState(SectionSweep) != SectionPartial {
 		t.Fatalf("sweep = %q", c.report.SectionState(SectionSweep))
+	}
+	found := false
+	for _, l := range c.report.Limits {
+		found = found || (l.Section == SectionSweep && l.Limit == "remote_by_name")
+	}
+	if !found {
+		t.Fatalf("limits: %+v", c.report.Limits)
 	}
 }
 

@@ -396,7 +396,7 @@ BEGIN {
   RUN = ""
   for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
   RUN = RUN "[A-Za-z0-9+/=]*"
-  OSSL = "openssl x509 -outform PEM 2>/dev/null"
+  OSSL = "openssl x509 -outform PEM 2>/dev/null || echo vista-ossl-refused >&2"
   B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
   POW2[0] = 1
   for (k = 1; k <= 8; k++) POW2[k] = POW2[k - 1] * 2
@@ -499,7 +499,7 @@ END {
       if (PKIND[i] == "S") { print PUB[i]; continue }
       fflush()
       for (j = PS[i]; j <= PE[i]; j++) print PL[j] | OSSL
-      if (close(OSSL) != 0) NDROP++
+      close(OSSL)
     }
     print "vista-refused:" (NDROP + 0) > "/dev/stderr"
     exit 0
@@ -619,8 +619,11 @@ exit 0`
 // every certificate block was refused and nothing is left: the shell decides
 // that from the empty output, because macOS awk's close() does not report
 // openssl's exit status), 9 changed while read, 12 no openssl; nothing
-// printed for any of them. The "vista-refused:N" count on stderr is
-// informational and is 0 where close() does not report a failure.
+// printed for any of them. On stderr, "vista-refused:N" counts the blocks
+// the awk rule refused and each openssl failure prints its own
+// "vista-ossl-refused" line (from the pipe command itself, because macOS
+// awk's close() does not report openssl's exit status); ReadPublic adds
+// them up.
 var readScript = readPrelude + readQuiet + `if [ "$size" -gt "$max" ]; then exit 7; fi
 if [ "$size" -eq 0 ]; then exit 8; fi
 if command -v openssl >/dev/null 2>&1; then o=1; else o=0; fi
@@ -686,6 +689,11 @@ func (t *RemoteUnixTarget) identify(ctx context.Context, path string) (inspectio
 	if err != nil {
 		return inspection{}, err
 	}
+	return t.identifyAnswer(path, out, exit)
+}
+
+// identifyAnswer is identify's reading of one identifyScript answer.
+func (t *RemoteUnixTarget) identifyAnswer(path string, out []byte, exit int) (inspection, error) {
 	if exit != 0 {
 		return inspection{}, scriptError(path, exit)
 	}
@@ -801,42 +809,143 @@ func parseIdentifyOutput(out []byte, window int64) (inspection, error) {
 //
 // A DER certificate is not readable remotely (see publicContent).
 func (t *RemoteUnixTarget) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	b, _, err := t.ReadPublic(ctx, path)
+	return b, err
+}
+
+// ReadPublic is ReadFile with the number of certificate blocks in the file
+// that could not be read: refused by the host's rule or its openssl
+// ("vista-refused:N" and one "vista-ossl-refused" line per openssl failure
+// on stderr, counted by the shell because macOS awk's close() does not
+// report an exit status), or dropped by Go's recheck (recheckPublic).
+func (t *RemoteUnixTarget) ReadPublic(ctx context.Context, path string) ([]byte, int, error) {
 	in, err := t.identify(ctx, path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	readCap := t.readCap()
 	if in.size > readCap {
-		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
+		return nil, 0, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
 	if !identityFrom(path, in).Public() {
-		return nil, fmt.Errorf("%s: %w", path, ErrNotPublic)
+		return nil, 0, fmt.Errorf("%s: %w", path, ErrNotPublic)
 	}
-	out, _, exit, err := t.runner.Run(ctx, t.scriptArgv(readScript, path, readCap))
+	out, stderr, exit, err := t.runner.Run(ctx, t.scriptArgv(readScript, path, readCap))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if exit != 0 {
 		clear(out)
-		return nil, scriptError(path, exit)
+		return nil, 0, scriptError(path, exit)
 	}
-	return recheckPublic(path, out, readCap)
+	b, dropped, err := recheckPublic(path, out, readCap)
+	return b, dropped + hostRefusedCount(stderr), err
 }
 
-// recheckPublic requires bytes a remote read returned to be exactly their
-// own public content, and every SSH key line to parse as the key it claims
-// to be. Anything else is cleared and refused.
-func recheckPublic(path string, b []byte, readCap int64) ([]byte, error) {
+// hostRefusedCount reads the host's count of refused certificate blocks
+// from readScript's stderr. It is informational: a missing or unreadable
+// count is 0.
+func hostRefusedCount(stderr []byte) int {
+	n := 0
+	for _, l := range strings.Split(string(stderr), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "vista-ossl-refused" {
+			n++
+		} else if v, ok := strings.CutPrefix(l, "vista-refused:"); ok {
+			if c, err := strconv.Atoi(v); err == nil && c >= 0 && c <= maxCertBlocksCounted {
+				n += c
+			}
+		}
+	}
+	return min(n, maxCertBlocksCounted)
+}
+
+// maxCertBlocksCounted bounds a host-reported count.
+const maxCertBlocksCounted = 1 << 20
+
+// recheckPublic requires bytes a remote read returned to be what the host
+// rule prints and nothing else: canonical CERTIFICATE PEM blocks (64-character
+// lines, the label CERTIFICATE) whose DER is a strict certificate envelope
+// (certEnvelope), and SSH key lines that parse as the key they claim to be.
+// Anything else (text, another label, a non-canonical encoding, an envelope
+// that is not strict, a key line that does not parse) means the host did not
+// run the rule: the whole answer is cleared and refused.
+//
+// A block that passes all of that but that crypto/x509 refuses is dropped
+// (its bytes cleared) and counted, not fatal: the host's parser took it for a
+// certificate and its envelope holds nothing beside the three elements of
+// one. That is the EC-ACC root in macOS's /etc/ssl/cert.pem, whose serial is
+// negative (LibreSSL and .NET accept it; Go does not), and one such root must
+// not sink the other 127. An answer with no certificate or key line left is
+// refused with ErrNotPublic, with the count.
+func recheckPublic(path string, b []byte, readCap int64) ([]byte, int, error) {
+	defer clear(b)
 	if int64(len(b)) > readCap {
-		clear(b)
-		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
+		return nil, 0, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
-	again, ok := publicContent(b)
-	if !ok || !bytes.Equal(again, b) || !sshLinesParse(b) {
-		clear(b)
-		return nil, fmt.Errorf("%s: %w (the host returned more than public content)", path, ErrNotPublic)
+	out, dropped, ok := publicBlocks(b)
+	if !ok {
+		return nil, 0, fmt.Errorf("%s: %w (the host returned more than public content)", path, ErrNotPublic)
 	}
-	return b, nil
+	if len(out) == 0 {
+		return nil, dropped, fmt.Errorf("%s: %w (no certificate in it could be read)", path, ErrNotPublic)
+	}
+	return out, dropped, nil
+}
+
+// publicBlocks is recheckPublic's rule over a remote answer: the blocks and
+// key lines that pass, the number of certificate blocks crypto/x509 refused,
+// and ok false for an answer that is not wholly blocks and key lines of the
+// host rule.
+func publicBlocks(b []byte) ([]byte, int, bool) {
+	if len(b) == 0 || b[len(b)-1] != '\n' || bytes.IndexByte(b, 0) >= 0 {
+		return nil, 0, false
+	}
+	const begin, end = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+	lines := strings.Split(string(b[:len(b)-1]), "\n")
+	var out bytes.Buffer
+	dropped := 0
+	for i := 0; i < len(lines); i++ {
+		s := lines[i]
+		if s != begin {
+			k, ok := sshKeyLine(s)
+			if !ok || k != s || !sshLinesParse([]byte(s+"\n")) {
+				return nil, 0, false
+			}
+			out.WriteString(s + "\n")
+			continue
+		}
+		j := i + 1
+		for j < len(lines) && lines[j] != end {
+			j++
+		}
+		if j == len(lines) {
+			return nil, 0, false
+		}
+		body := lines[i+1 : j]
+		block := strings.Join(lines[i:j+1], "\n") + "\n"
+		i = j
+		bodyLen := 0
+		for _, l := range body {
+			if !isPEMBodyLine(l) {
+				return nil, 0, false
+			}
+			bodyLen += len(l)
+		}
+		if bodyLen > maxCertBody {
+			return nil, 0, false
+		}
+		der, err := base64.StdEncoding.DecodeString(strings.Join(body, ""))
+		if err != nil || !certEnvelope(der) || certificatePEM(der) != block {
+			return nil, 0, false
+		}
+		if _, ok := certificateDER("CERTIFICATE", body); !ok {
+			dropped++
+			continue
+		}
+		out.WriteString(block)
+	}
+	return out.Bytes(), dropped, true
 }
 
 // ReadText returns the lines of a configuration file a parser asked for,
@@ -975,12 +1084,136 @@ func (t *RemoteUnixTarget) statArgv(paths []string) []string {
 	return append(argv, paths...)
 }
 
+// remoteUnixBatchBudget is how many seconds batchScript may run before it
+// stops and answers for the paths it has done; Go asks for the rest singly.
+const remoteUnixBatchBudget = 40
+
+// batchScript is StatIdentifyMany's host program: for each path, in order,
+// the single Stat command (run a second time for its stderr and exit status
+// only when it printed nothing, which is when Stat reads them) and the single
+// identifyScript, unchanged (so the descriptor pin and every refusal are the
+// single call's), each answer hex-encoded on one line:
+//
+//	vista-item s:<stat stdout> e:<stat stderr> x:<stat exit> i:<identify stdout> y:<identify exit>
+//
+// $1 is the platform argument, $2 the identification bound, $3
+// identifyScript, and the paths follow. %s is the stat command.
+const batchScript = `plat=$1; max=$2; ids=$3; shift 3
+t0=$(date +%%s)
+for p in "$@"; do
+  now=$(date +%%s)
+  if [ $((now - t0)) -ge %d ]; then exit 0; fi
+  so=$(%s -- "$p" 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+  se=; sx=0
+  if [ -z "$so" ]; then
+    se=$(%s -- "$p" 2>&1 >/dev/null); sx=$?
+    se=$(printf '%%s' "$se" | od -An -v -tx1 | tr -d ' \n')
+  fi
+  io=$(sh -c "$ids" sh "$p" "$plat" "$max"); ix=$?
+  io=$(printf '%%s\n' "$io" | od -An -v -tx1 | tr -d ' \n')
+  printf 'vista-item s:%%s e:%%s x:%%s i:%%s y:%%s\n' "$so" "$se" "$sx" "$io" "$ix"
+done`
+
+// shQuote quotes s for sh.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// batchArgv is the command of one batch.
+func (t *RemoteUnixTarget) batchArgv(paths []string) []string {
+	st := t.statArgv(nil)
+	st = st[:len(st)-1] // the "--", which the script adds before the path
+	q := make([]string, len(st))
+	for i, a := range st {
+		q[i] = shQuote(a)
+	}
+	cmd := strings.Join(q, " ")
+	script := fmt.Sprintf(batchScript, remoteUnixBatchBudget, cmd, cmd)
+	argv := []string{"env", "LC_ALL=C", "sh", "-c", script, "sh", t.platformArg(), strconv.FormatInt(t.maxBytes, 10), identifyScript}
+	return append(argv, paths...)
+}
+
+// StatIdentifyMany runs batchScript once per batch of paths. Each path's
+// answer is parsed by the same code as Stat's and Identify's; a path the
+// host did not reach within its budget, or a batch whose answer cannot be
+// read, is asked for with the single calls.
+func (t *RemoteUnixTarget) StatIdentifyMany(ctx context.Context, paths []string) ([]PathInfo, error) {
+	out := make([]PathInfo, 0, len(paths))
+	for _, chunk := range batchChunks(paths) {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		got := t.batchRun(ctx, chunk)
+		for i, p := range chunk {
+			if i < len(got) {
+				out = append(out, got[i])
+				continue
+			}
+			out = append(out, statIdentifySingle(ctx, t, p))
+		}
+	}
+	return out, ctx.Err()
+}
+
+// batchRun runs one batch and returns the answers it gave, in order.
+func (t *RemoteUnixTarget) batchRun(ctx context.Context, chunk []string) []PathInfo {
+	out, _, exit, err := t.runner.Run(ctx, t.batchArgv(chunk))
+	if err != nil || exit != 0 {
+		return nil
+	}
+	var res []PathInfo
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		if len(res) == len(chunk) {
+			return nil
+		}
+		f := strings.Fields(line)
+		if len(f) != 6 || f[0] != "vista-item" {
+			return nil
+		}
+		var v [5]string
+		for i, pre := range []string{"s:", "e:", "x:", "i:", "y:"} {
+			x, ok := strings.CutPrefix(f[i+1], pre)
+			if !ok {
+				return nil
+			}
+			v[i] = x
+		}
+		so, e1 := hex.DecodeString(v[0])
+		se, e2 := hex.DecodeString(v[1])
+		io, e3 := hex.DecodeString(v[3])
+		sx, e4 := strconv.Atoi(v[2])
+		ix, e5 := strconv.Atoi(v[4])
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil {
+			return nil
+		}
+		p := chunk[len(res)]
+		r := PathInfo{Path: p}
+		r.Info, r.StatErr = t.statAnswer(p, so, se, sx)
+		in, ierr := t.identifyAnswer(p, io, ix)
+		if ierr != nil {
+			r.IdentifyErr = ierr
+		} else {
+			r.Identity = identityFrom(p, in)
+		}
+		res = append(res, r)
+	}
+	return res
+}
+
+var _ BatchTarget = (*RemoteUnixTarget)(nil)
+
 // Stat runs stat on one path, not following a link.
 func (t *RemoteUnixTarget) Stat(ctx context.Context, path string) (FileInfo, error) {
 	out, stderr, exit, err := t.runner.Run(ctx, t.statArgv([]string{path}))
 	if err != nil {
 		return FileInfo{}, err
 	}
+	return t.statAnswer(path, out, stderr, exit)
+}
+
+// statAnswer is Stat's reading of one stat command's answer.
+func (t *RemoteUnixTarget) statAnswer(path string, out, stderr []byte, exit int) (FileInfo, error) {
 	infos := t.parseStat(out, []string{path})
 	if len(infos) != 1 {
 		if exit != 0 {

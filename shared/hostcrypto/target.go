@@ -78,6 +78,73 @@ type Target interface {
 	ReadText(ctx context.Context, path string, keep []string) (text []byte, redactions int, err error)
 }
 
+// PublicReader is implemented by the remote targets: [Target.ReadFile] with
+// the number of certificate blocks in the file that could not be read (the
+// host's certificate parser refused them, or Go's recheck dropped a block
+// crypto/x509 does not parse). Those blocks never cross; the rest of the
+// file does, and the Report says how many were left out.
+type PublicReader interface {
+	ReadPublic(ctx context.Context, path string) (b []byte, unreadable int, err error)
+}
+
+// BatchTarget is implemented by targets that can Stat and Identify many
+// paths in one host program (the remote targets: one command instead of two
+// per path, which on Windows is a PowerShell start of about 0.75 s each). It
+// is optional; a collector falls back to [Target.Stat] and
+// [Target.Identify] on a target without it.
+//
+// StatIdentifyMany answers for every path, in order, with exactly what the
+// single calls would answer for it: the FileInfo or Stat's error, and the
+// Identity or Identify's error. Nothing else crosses: an Identity holds at
+// most [MagicBytes] bytes of the file and its PEM labels, as Identify's does.
+// The error is for the batch as a whole (the context ended); a path the host
+// did not answer for in a batch is asked for with the single calls.
+type BatchTarget interface {
+	StatIdentifyMany(ctx context.Context, paths []string) ([]PathInfo, error)
+}
+
+// PathInfo is one path's answer from [BatchTarget.StatIdentifyMany].
+type PathInfo struct {
+	Path string
+	// Info is Stat's answer when StatErr is nil.
+	Info    FileInfo
+	StatErr error
+	// Identity is Identify's answer when IdentifyErr is nil.
+	Identity    Identity
+	IdentifyErr error
+}
+
+// maxBatchPaths and maxBatchPathBytes bound one host program of a batch.
+const (
+	maxBatchPaths     = 64
+	maxBatchPathBytes = 16 << 10
+)
+
+// batchChunks splits paths into the batches one host program answers.
+func batchChunks(paths []string) [][]string {
+	var out [][]string
+	start, n := 0, 0
+	for i, p := range paths {
+		if i > start && (i-start >= maxBatchPaths || n+len(p) > maxBatchPathBytes) {
+			out = append(out, paths[start:i])
+			start, n = i, 0
+		}
+		n += len(p)
+	}
+	if start < len(paths) {
+		out = append(out, paths[start:])
+	}
+	return out
+}
+
+// statIdentifySingle answers for one path with the single calls.
+func statIdentifySingle(ctx context.Context, t Target, p string) PathInfo {
+	r := PathInfo{Path: p}
+	r.Info, r.StatErr = t.Stat(ctx, p)
+	r.Identity, r.IdentifyErr = t.Identify(ctx, p)
+	return r
+}
+
 // RedactRunLength is the length of an unbroken run of base64 or hexadecimal
 // characters at which [Target.ReadText] redacts. Forty is below the shortest
 // encoded secret worth the name (a 32-byte key is 43 base64 or 64 hex

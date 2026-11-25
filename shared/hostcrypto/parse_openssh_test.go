@@ -35,6 +35,7 @@ func keyTestOpenSSH(t testing.TB, tk keyTestKey, passphrase string) []byte {
 }
 
 func TestParseOpenSSHPrivateKey(t *testing.T) {
+	t.Parallel() // real tools or long loops: overlapped with the other slow tests
 	for _, tk := range keyTestKeys(t) {
 		sshPub, err := ssh.NewPublicKey(tk.priv.Public())
 		if err != nil {
@@ -250,7 +251,7 @@ func TestParseAuthorizedKeys(t *testing.T) {
 	}
 	for i, w := range want {
 		g := got[i]
-		if g.Algorithm != w.alg || g.SizeBits != w.bits || g.Restricted == nil || *g.Restricted != w.restricted || g.CertificateAuthority != w.ca {
+		if g.Algorithm != w.alg || g.SizeBits != w.bits || g.Restricted == nil || *g.Restricted != w.restricted || g.CertificateAuthority == nil || *g.CertificateAuthority != w.ca {
 			t.Errorf("line %d: got %+v (restricted %v), want %+v", i, g, g.Restricted, w)
 		}
 		if !strings.HasPrefix(g.Fingerprint, "SHA256:") {

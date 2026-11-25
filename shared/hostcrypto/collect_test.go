@@ -302,6 +302,11 @@ func TestRegistryDeterministic(t *testing.T) {
 }
 
 func TestCollectEmpty(t *testing.T) {
+	// The header and scope, with no pass registered (the passes register in
+	// their own files and are tested there).
+	saved := passes
+	t.Cleanup(func() { passes = saved })
+	passes = nil
 	ft := newTgtFakeTarget(true)
 	rep, err := Collect(context.Background(), ft, Options{
 		Platform: "linux", AgentID: "agent-1", Now: tgtNow,
@@ -400,8 +405,14 @@ func TestCollectionWrappers(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if c.report.SectionState(SectionCertificates) != SectionFailed || c.report.SectionState(SectionKeystores) != SectionPartial || len(c.report.Errors) != 15 {
-		t.Fatalf("sections %v, %d errors", c.report.Sections, len(c.report.Errors))
+	// Identical step errors are recorded once, with how many times.
+	if c.report.SectionState(SectionCertificates) != SectionFailed || c.report.SectionState(SectionKeystores) != SectionPartial || len(c.report.Errors) != 3 {
+		t.Fatalf("sections %v, %+v", c.report.Sections, c.report.Errors)
+	}
+	for _, e := range c.report.Errors {
+		if !strings.HasSuffix(e.Message, "(5 times)") {
+			t.Fatalf("%+v", c.report.Errors)
+		}
 	}
 }
 

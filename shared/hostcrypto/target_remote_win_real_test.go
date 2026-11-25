@@ -215,7 +215,7 @@ foreach ($bpS in $a.Items) {
   $bpB = [Convert]::FromBase64String($bpS)
   $bpP = vPublic $bpB $bpB.Length
   $bpT = ''; $bpOk = $false
-  if ($null -ne $bpP) { $bpOk = $true; $bpT = [Convert]::ToBase64String($vL1.GetBytes($bpP)) }
+  if ($null -ne $bpP.Text) { $bpOk = $true; $bpT = [Convert]::ToBase64String($vL1.GetBytes($bpP.Text)) }
   $bpX = vInspect ($vL1.GetString($bpB, 0, $bpB.Length))
   $bpOut.Add([pscustomobject]@{ Ok = $bpOk; T = $bpT; Labels = $bpX.Labels; Flags = $bpX.Flags })
 }
@@ -645,7 +645,7 @@ func TestRemoteWindowsRealFutureTime(t *testing.T) {
 
 // psScripts are the programs a Windows host runs, by name.
 func psScripts() map[string]string {
-	return map[string]string{"psStat": psStat, "psIdentify": psIdentify, "psRead": psRead, "psReadText": psReadText, "psList": psList}
+	return map[string]string{"psStat": psStat, "psIdentify": psIdentify, "psRead": psRead, "psReadText": psReadText, "psList": psList, "psBatch": psBatch}
 }
 
 // psAutomatic are PowerShell's automatic variables, which a script must

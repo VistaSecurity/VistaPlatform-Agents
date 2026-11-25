@@ -76,6 +76,9 @@ const (
 	SectionTPM            = "tpm"
 	SectionSecureBoot     = "secure_boot"
 	SectionTokens         = "tokens"
+	// SectionFIPSMode is the operating system's FIPS switch
+	// ([Protection.FIPSMode]): unsupported where the platform has none.
+	SectionFIPSMode = "fips_mode"
 	// SectionProcesses is pass 3: which running process holds which library,
 	// keystore or key file open, and which socket it listens on.
 	SectionProcesses = "processes"
@@ -119,7 +122,9 @@ type Report struct {
 	SSH          SSH             `json:"ssh"`
 	Configs      []CryptoConfig  `json:"configs,omitempty"`
 	Libraries    []CryptoLibrary `json:"libraries,omitempty"`
-	Protection   Protection      `json:"protection"`
+	// Protection is absent when no protection fact was read (omitzero):
+	// an empty object never stands for "nothing to report".
+	Protection Protection `json:"protection,omitzero"`
 
 	// Sections is the outcome of every section, by name. See the Section
 	// constants.
@@ -156,7 +161,7 @@ type Location struct {
 	// is empty and Store is set.
 	Path string `json:"path,omitempty"`
 	// Store names a platform store: `Cert:\LocalMachine\My`, a macOS keychain
-	// path, a CNG key storage provider.
+	// path. A store key's provider is in [PrivateKey.Provider].
 	Store string `json:"store,omitempty"`
 	// Container is the keystore file an entry lives in, with Alias its name
 	// there. Empty for a file that is the item itself.
@@ -189,9 +194,18 @@ type Usage struct {
 	// Kind is "config" (a configuration file names it), "process" (a running
 	// process holds it open) or "listener" (that process listens on a port).
 	Kind string `json:"kind"`
-	// ConfigPath and Directive are set for kind "config".
-	ConfigPath string `json:"config_path,omitempty"`
-	Directive  string `json:"directive,omitempty"`
+	// ConfigPath and Directive are set for kind "config". ConfigPath is the
+	// file that holds the directive: an included file when the directive is
+	// in one, with RootConfigPath then naming the configuration that
+	// includes it (empty when ConfigPath is itself the root).
+	ConfigPath     string `json:"config_path,omitempty"`
+	RootConfigPath string `json:"root_config_path,omitempty"`
+	Directive      string `json:"directive,omitempty"`
+	// Product and Context are the configuration's (CryptoConfig.Product and
+	// .Context): what reads it, and the server block, Match block or section
+	// whose directive names the item.
+	Product string `json:"product,omitempty"`
+	Context string `json:"context,omitempty"`
 	// Process is the executable's name, set for "process" and "listener".
 	Process string `json:"process,omitempty"`
 	// Address, Port and Transport are set for kind "listener".
@@ -245,6 +259,7 @@ const (
 	KeyFormatOpenSSH       = "openssh"        // PEM "OPENSSH PRIVATE KEY"
 	KeyFormatPuTTY         = "putty"          // PuTTY-User-Key-File-2/3
 	KeyFormatPGP           = "pgp"            // an OpenPGP secret key
+	KeyFormatSSH1          = "ssh1"           // "SSH PRIVATE KEY FILE FORMAT 1.1", legacy SSH-1 (RSA only)
 	KeyFormatPlatformStore = "platform_store" // CNG, CAPI, keychain
 )
 
@@ -255,6 +270,15 @@ const (
 	KeyProtectionTPM      = "tpm"
 	KeyProtectionHSM      = "hsm"     // a PKCS#11 token or network HSM
 	KeyProtectionEnclave  = "enclave" // Secure Enclave
+)
+
+// What a platform-store key's provider keeps it in.
+const (
+	ProviderKindSoftware      = "software"
+	ProviderKindTPM           = "tpm"
+	ProviderKindSmartCard     = "smartcard"
+	ProviderKindSecureEnclave = "secure-enclave"
+	ProviderKindUnknown       = "unknown" // the provider could not be read
 )
 
 // PrivateKey describes one private key. It never holds the key.
@@ -282,6 +306,13 @@ type PrivateKey struct {
 	// Exportable is Windows and keychain only: whether the store lets the key
 	// be exported. Nil elsewhere.
 	Exportable *bool `json:"exportable,omitempty"`
+	// Provider is a platform-store key's provider, as the platform names it:
+	// "Microsoft Software Key Storage Provider", "Microsoft Platform Crypto
+	// Provider", "Microsoft Enhanced Cryptographic Provider v1.0", "macOS
+	// keychain". Empty for a file.
+	Provider string `json:"provider,omitempty"`
+	// ProviderKind is one of the ProviderKind constants. Empty for a file.
+	ProviderKind string `json:"provider_kind,omitempty"`
 	// PublicKeySHA256 is the SHA-256 of the key's SubjectPublicKeyInfo, in
 	// hex: the same value a matching [Certificate] carries. Empty when the
 	// public half could not be derived without the passphrase.
@@ -333,6 +364,10 @@ type Keystore struct {
 	// counted. Nil when it could not.
 	EntryCount *int            `json:"entry_count,omitempty"`
 	Entries    []KeystoreEntry `json:"entries,omitempty"`
+	// Unknown explains, in a few words, why the contents are empty or
+	// incomplete: "remote: entries are not read", "a platform store; its
+	// contents are read from the store".
+	Unknown string `json:"unknown,omitempty"`
 }
 
 // KeystoreEntry is one entry of a keystore.
@@ -385,16 +420,22 @@ type SSHPublicKey struct {
 	// Restricted is true when the entry carries options that limit it (from=,
 	// command=, restrict). Authorized keys only.
 	Restricted *bool `json:"restricted,omitempty"`
-	// CertificateAuthority is true for a cert-authority entry.
-	CertificateAuthority bool `json:"certificate_authority,omitempty"`
+	// CertificateAuthority is whether an authorized_keys entry carries the
+	// cert-authority option. Nil when it could not be known (a remote
+	// collection: options do not cross) and for keys that are not
+	// authorized_keys entries.
+	CertificateAuthority *bool `json:"certificate_authority,omitempty"`
 }
 
 // KnownHostsFile is summarised, never listed: its entries are other people's
 // hosts.
 type KnownHostsFile struct {
 	Location Location `json:"location"`
-	Entries  int      `json:"entries"`
-	Hashed   bool     `json:"hashed"`
+	// Entries and Hashed are nil when the file could not be read in this
+	// mode (a known_hosts file is not public, so a remote collection records
+	// only that it exists and who can read it).
+	Entries *int  `json:"entries,omitempty"`
+	Hashed  *bool `json:"hashed,omitempty"`
 }
 
 // CryptoConfig is the cryptographic policy one configuration file sets, for
@@ -455,7 +496,18 @@ type ConfigReference struct {
 	Kind      string `json:"kind"`
 	Directive string `json:"directive"`
 	Path      string `json:"path"`
+	// Status is what the collector found at Path: one of the Ref
+	// constants. Empty when no collector followed it (a parser alone).
+	Status string `json:"status,omitempty"`
 }
+
+// What a collector found at a ConfigReference's path.
+const (
+	RefFound       = "found"        // the file (or directory) exists and was visited
+	RefMissing     = "missing"      // nothing at the path (a glob that matched nothing)
+	RefUnreadable  = "unreadable"   // it exists and could not be read; Errors says why
+	RefNotFollowed = "not_followed" // the path holds a variable, a % token or ~, and names no one file
+)
 
 // CryptoLibrary is one cryptographic library or provider present on the host.
 type CryptoLibrary struct {
@@ -479,9 +531,12 @@ type CryptoLibrary struct {
 
 // Protection is what the platform itself provides.
 type Protection struct {
-	Volumes    []VolumeEncryption `json:"volumes,omitempty"`
-	TPM        *TPM               `json:"tpm,omitempty"`
-	SecureBoot *bool              `json:"secure_boot,omitempty"`
+	Volumes []VolumeEncryption `json:"volumes,omitempty"`
+	TPM     *TPM               `json:"tpm,omitempty"`
+	// SecureEnclave is Apple's Secure Enclave, macOS only. It is not a TPM
+	// and is not reported as one. Nil where it was not read.
+	SecureEnclave *SecureEnclave `json:"secure_enclave,omitempty"`
+	SecureBoot    *bool          `json:"secure_boot,omitempty"`
 	// FIPSMode is the operating system's FIPS switch. Nil when the platform
 	// has none or it could not be read.
 	FIPSMode *bool `json:"fips_mode,omitempty"`
@@ -505,6 +560,14 @@ type VolumeEncryption struct {
 	// Status is the platform's own word where it has one: "FullyEncrypted",
 	// "EncryptionInProgress".
 	Status string `json:"status,omitempty"`
+}
+
+// SecureEnclave describes a Mac's Secure Enclave.
+type SecureEnclave struct {
+	// Present is nil when it could not be told.
+	Present *bool `json:"present,omitempty"`
+	// Kind is "apple-silicon" or "t2".
+	Kind string `json:"kind,omitempty"`
 }
 
 // TPM describes the host's Trusted Platform Module.
