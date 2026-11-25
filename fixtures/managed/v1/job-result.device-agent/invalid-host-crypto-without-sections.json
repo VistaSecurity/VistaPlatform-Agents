@@ -69,8 +69,7 @@
         "role": "tls",
         "format": "sec1",
         "protection": "file",
-        "unknown": "remote: openssl pkey not available on the host",
-        "private_key_pem": "U1lOVEhFVElDLU5PVC1BLUtFWQ=="
+        "unknown": "remote: openssl pkey not available on the host"
       }
     ],
     "keystores": [
@@ -145,23 +144,6 @@
       "secure_boot": true,
       "fips_mode": false
     },
-    "sections": {
-      "platform": "ok",
-      "certificates": "ok",
-      "private_keys": "partial",
-      "keystores": "ok",
-      "ssh": "ok",
-      "configs": "ok",
-      "libraries": "ok",
-      "disk_encryption": "ok",
-      "tpm": "ok",
-      "secure_boot": "ok",
-      "fips_mode": "ok",
-      "tokens": "ok",
-      "processes": "partial",
-      "sweep": "skipped",
-      "home_directories": "skipped"
-    },
     "errors": [
       {
         "step": "processes",
@@ -175,5 +157,10 @@
         "detail": "stopped after 2000 records"
       }
     ]
+  },
+  "metadata": {
+    "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssh_host_key_type": "ssh-ed25519",
+    "ssh_host_key_verification": "first_use"
   }
 }

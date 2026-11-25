@@ -332,6 +332,9 @@ var jobLongRun = regexp.MustCompile(`[A-Za-z0-9+/=]{` + strconv.Itoa(RedactRunLe
 // bounded, and without a long encoded run.
 func jobProbeName(s string) string {
 	s = strings.TrimSpace(s)
+	if jobResemblesKey(s) || strings.Contains(s, "-----") {
+		return WithheldName
+	}
 	if len(s) > 128 || jobLongRun.MatchString(s) {
 		return ""
 	}

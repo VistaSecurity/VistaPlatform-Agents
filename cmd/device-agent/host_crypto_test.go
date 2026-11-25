@@ -491,13 +491,13 @@ func TestStandaloneHostCrypto_Shape(t *testing.T) {
 		t.Fatalf("a failed collection: exit %d kinds %v", res.code, kinds)
 	}
 
-	// A report the backstop refuses is never written.
+	// A key-shaped value is withheld; the report is still written.
 	leaky := hcjReport(hostinventory.ModeLocal, nil)
 	leaky.Configs = []hostcrypto.CryptoConfig{{Location: hostcrypto.Location{FoundBy: hostcrypto.FoundByConfig}, Product: "x",
 		Settings: map[string]string{"k": "-----BEGIN PRIVATE KEY-----"}}}
 	res = runCmd(t, standaloneEnv{collectHostCrypto: hcjFakeCollector(leaky, nil)}, "host-crypto")
-	if res.code != 1 || strings.Contains(res.stdout, "BEGIN PRIVATE KEY") {
-		t.Fatalf("a report carrying key material was written: exit %d", res.code)
+	if res.code != 0 || strings.Contains(res.stdout, "BEGIN PRIVATE KEY") || !strings.Contains(res.stdout, "name withheld") {
+		t.Fatalf("a key-shaped value: exit %d\n%s", res.code, res.stdout)
 	}
 }
 

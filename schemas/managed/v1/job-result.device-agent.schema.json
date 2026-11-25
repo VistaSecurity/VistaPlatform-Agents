@@ -193,8 +193,8 @@
         },
         "ssh_host_key_type": { "type": "string", "description": "Its algorithm: ssh-ed25519, ecdsa-sha2-nistp256, ssh-rsa." },
         "ssh_host_key_verification": {
-          "enum": ["pinned", "known_hosts", "first_use", "skipped"],
-          "description": "How the key was trusted: against the job's ssh_host_key_fingerprint, the agent's known_hosts, accepted on first use (record and pin it), or not checked (insecure_skip_verify)."
+          "type": "string",
+          "description": "Values today: pinned, known_hosts, first_use, skipped. How the key was trusted: against the job's ssh_host_key_fingerprint, the agent's known_hosts, accepted on first use (record and pin it), or not checked (insecure_skip_verify)."
         }
       }
     },

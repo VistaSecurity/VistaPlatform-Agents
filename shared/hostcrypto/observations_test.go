@@ -11,6 +11,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -188,48 +189,72 @@ func TestJobSchemaNamesEveryReportField(t *testing.T) {
 	}
 }
 
-// The schema's enumerations hold every constant report.go defines for them,
-// and nothing else.
-func TestJobSchemaEnumsMatchTheConstants(t *testing.T) {
+// The fields report.go gives constants for are plain strings in the schema
+// (the protocol has no rule for negotiating a new enum value, so a closed
+// enum would make a newer agent's value an error), and each one's
+// description names every constant.
+func TestJobSchemaDocumentsEveryConstant(t *testing.T) {
 	doc := jobLoadSchemaDoc(t)
-	enum := func(def, prop string) []string {
+	desc := func(def, prop string) string {
 		raw := doc.Properties[prop]
 		if def != "" {
 			raw = doc.Defs[def].Properties[prop]
 		}
-		var o jobSchemaObject
+		var o struct {
+			Type        string          `json:"type"`
+			Enum        []string        `json:"enum"`
+			Description string          `json:"description"`
+			AP          json.RawMessage `json:"additionalProperties"`
+		}
 		if err := json.Unmarshal(raw, &o); err != nil {
 			t.Fatalf("%s.%s: %v", def, prop, err)
 		}
 		if def == "" && prop == "sections" {
-			var m struct {
-				AP jobSchemaObject `json:"additionalProperties"`
+			if err := json.Unmarshal(o.AP, &o); err != nil {
+				t.Fatal(err)
 			}
-			_ = json.Unmarshal(raw, &m)
-			o = m.AP
 		}
-		sort.Strings(o.Enum)
-		return o.Enum
+		if len(o.Enum) != 0 || o.Type != "string" {
+			t.Errorf("%s.%s: want a plain string, got type %q enum %v", def, prop, o.Type, o.Enum)
+		}
+		return o.Description
 	}
-	want := func(vals ...string) []string { sort.Strings(vals); return vals }
 	for _, c := range []struct {
 		def, prop string
 		want      []string
 	}{
-		{"", "mode", want(string(hostinventory.ModeLocal), string(hostinventory.ModeRemote))},
-		{"", "sections", want(SectionOK, SectionPartial, SectionFailed, SectionUnsupported, SectionSkipped)},
-		{"location", "found_by", want(FoundByProcess, FoundByConfig, FoundByKnownLocation, FoundBySweep, FoundByPlatformStore)},
-		{"private_key", "format", want(KeyFormatPKCS1, KeyFormatSEC1, KeyFormatPKCS8, KeyFormatDSA, KeyFormatOpenSSH, KeyFormatPuTTY, KeyFormatPGP, KeyFormatSSH1, KeyFormatPlatformStore)},
-		{"private_key", "protection", want(KeyProtectionFile, KeyProtectionSoftware, KeyProtectionTPM, KeyProtectionHSM, KeyProtectionEnclave)},
-		{"private_key", "provider_kind", want(ProviderKindSoftware, ProviderKindTPM, ProviderKindSmartCard, ProviderKindSecureEnclave, ProviderKindUnknown)},
-		{"keystore", "type", want(KeystoreJKS, KeystoreJCEKS, KeystorePKCS12, KeystoreBCFKS, KeystoreBKS, KeystoreNSS, KeystoreGnuPG, KeystoreKeytab, KeystoreKeychain, KeystoreUBER)},
-		{"keystore", "opened", want(OpenedNot, OpenedWithoutPassword, OpenedDefaultPassword)},
-		{"config_reference", "status", want(RefFound, RefMissing, RefUnreadable, RefNotFollowed)},
+		{"", "mode", []string{string(hostinventory.ModeLocal), string(hostinventory.ModeRemote)}},
+		{"", "sections", []string{SectionOK, SectionPartial, SectionFailed, SectionUnsupported, SectionSkipped}},
+		{"location", "found_by", []string{FoundByProcess, FoundByConfig, FoundByKnownLocation, FoundBySweep, FoundByPlatformStore}},
+		{"private_key", "format", []string{KeyFormatPKCS1, KeyFormatSEC1, KeyFormatPKCS8, KeyFormatDSA, KeyFormatOpenSSH, KeyFormatPuTTY, KeyFormatPGP, KeyFormatSSH1, KeyFormatPlatformStore}},
+		{"private_key", "protection", []string{KeyProtectionFile, KeyProtectionSoftware, KeyProtectionTPM, KeyProtectionHSM, KeyProtectionEnclave}},
+		{"private_key", "provider_kind", []string{ProviderKindSoftware, ProviderKindTPM, ProviderKindSmartCard, ProviderKindSecureEnclave, ProviderKindUnknown}},
+		{"keystore", "type", []string{KeystoreJKS, KeystoreJCEKS, KeystorePKCS12, KeystoreBCFKS, KeystoreBKS, KeystoreNSS, KeystoreGnuPG, KeystoreKeytab, KeystoreKeychain, KeystoreUBER}},
+		{"keystore", "opened", []string{OpenedNot, OpenedWithoutPassword, OpenedDefaultPassword}},
+		{"config_reference", "status", []string{RefFound, RefMissing, RefUnreadable, RefNotFollowed}},
 	} {
-		if got := enum(c.def, c.prop); strings.Join(got, ",") != strings.Join(c.want, ",") {
-			t.Errorf("%s.%s: schema enum %v, constants %v", c.def, c.prop, got, c.want)
+		d := desc(c.def, c.prop)
+		for _, v := range c.want {
+			if !strings.Contains(d, v) {
+				t.Errorf("%s.%s: the description does not name %q: %q", c.def, c.prop, v, d)
+			}
 		}
 	}
+	// And the schema is open: no object of it refuses a field it does not
+	// name (the additive rule), which this test would otherwise not see.
+	b, _ := os.ReadFile(filepath.Join(jobRepoRoot(t), "schemas", "managed", "v1", "defs", "host-crypto-report.json"))
+	if strings.Contains(string(b), `"additionalProperties": false`) {
+		t.Error("the report schema closes an object")
+	}
+}
+
+func jobRepoRoot(t *testing.T) string {
+	t.Helper()
+	set, err := protocolschema.Shared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set.Root
 }
 
 // jobEnumValue is the value a populated report gives a field whose schema
@@ -295,8 +320,8 @@ func jobFullReport() *Report {
 }
 
 // A report with every field set validates, and so does the zero report a
-// failed platform step leaves. Because the schema is closed, a field added to
-// report.go and not to the schema fails here too.
+// failed platform step leaves. (A field added to report.go and not to the
+// schema fails TestJobSchemaNamesEveryReportField: the schema is open.)
 func TestJobFullyPopulatedReportValidates(t *testing.T) {
 	s := jobCompile(t, "defs/host-crypto-report.json")
 	full := jobFullReport()
@@ -315,17 +340,15 @@ func TestJobFullyPopulatedReportValidates(t *testing.T) {
 
 	// The schema is not inert: each of these must be refused.
 	for name, mutate := range map[string]func(m map[string]any){
-		"extra top-level field": func(m map[string]any) { m["private_key_pem"] = "x" },
-		"extra nested field": func(m map[string]any) {
-			m["private_keys"].([]any)[0].(map[string]any)["der"] = "x"
-		},
-		"unknown section state": func(m map[string]any) { m["sections"] = map[string]any{"certificates": "fine"} },
 		"key as a certificate": func(m map[string]any) {
 			m["certificates"].([]any)[0].(map[string]any)["certificate_pem"] = "-----BEGIN PRIVATE KEY-----"
 		},
 		"no sections": func(m map[string]any) { delete(m, "sections") },
-		"bad found_by": func(m map[string]any) {
-			m["certificates"].([]any)[0].(map[string]any)["location"].(map[string]any)["found_by"] = "guess"
+		"wrong type": func(m map[string]any) {
+			m["certificates"].([]any)[0].(map[string]any)["key_size"] = "big"
+		},
+		"no found_by": func(m map[string]any) {
+			delete(m["certificates"].([]any)[0].(map[string]any)["location"].(map[string]any), "found_by")
 		},
 	} {
 		var m map[string]any
@@ -336,6 +359,17 @@ func TestJobFullyPopulatedReportValidates(t *testing.T) {
 		if err := jobValidate(s, b); err == nil {
 			t.Errorf("%s: the schema accepted it", name)
 		}
+	}
+	// And open: what a newer agent adds is accepted.
+	var m map[string]any
+	b, _ = json.Marshal(full)
+	_ = json.Unmarshal(b, &m)
+	m["a_future_field"] = 1
+	m["private_keys"].([]any)[0].(map[string]any)["a_future_field"] = "x"
+	m["sections"].(map[string]any)["future"] = "deferred"
+	b, _ = json.Marshal(m)
+	if err := jobValidate(s, b); err != nil {
+		t.Errorf("a newer agent's additions were refused: %v", err)
 	}
 }
 
@@ -469,31 +503,89 @@ func TestJobResultPayloadCutsErrorsLast(t *testing.T) {
 // The backstop
 // ---------------------------------------------------------------------------
 
-// Each marker refuses the whole report; an honest report passes. Both
-// polarities, so the check can neither be inert nor over-strict.
-func TestJobBackstopRefusesKeyShapes(t *testing.T) {
-	clean := jobFullReport()
-	if _, _, err := ResultPayload(clean, 0); err != nil {
-		t.Fatalf("an honest report was refused: %v", err)
-	}
-	for _, leak := range []string{
-		"-----BEGIN PRIVATE KEY-----",
-		"-----BEGIN RSA PRIVATE KEY-----",
-		"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-		"-----BEGIN OPENSSH PRIVATE KEY-----",
-		"-----BEGIN PGP PRIVATE KEY BLOCK-----",
-		"PuTTY-User-Key-File-3: ssh-ed25519",
-		"SSH PRIVATE KEY FILE FORMAT 1.1",
-		"b3BlbnNzaC1rZXktdjEAAAAA",
+// A host-supplied string that only RESEMBLES key material (a file named like
+// a PuTTY key, a keystore alias spelled as a PEM label, a path holding the
+// OpenSSH magic in base64) is data: the report is sent, the value is
+// replaced with WithheldName and noted, and no section is marked partial for
+// it. One name can never suppress the host's report.
+func TestJobKeyShapedNamesNeverStopTheReport(t *testing.T) {
+	for _, name := range []string{
+		"-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN OPENSSH PRIVATE KEY-----",
+		"-----BEGIN PGP PRIVATE KEY BLOCK-----", "/etc/ssl/PuTTY-User-Key-File-2.pem", "SSH PRIVATE KEY FILE FORMAT 1.1",
+		"/home/u/b3BlbnNzaC1rZXktdjE/id", "-----END EC PRIVATE KEY-----",
 	} {
 		r := jobFullReport()
-		r.Configs[0].Settings = map[string]string{"x": leak}
-		if _, _, err := ResultPayload(r, 0); !errors.Is(err, ErrKeyMaterial) {
-			t.Errorf("%q in a setting: %v", leak, err)
+		r.Sections = map[string]string{SectionPlatform: SectionOK, SectionKeystores: SectionOK, SectionCertificates: SectionOK}
+		r.Keystores[0].Entries[0].Alias = name
+		r.Certificates[0].Location.Path = name
+		b, sent, err := ResultPayload(r, DefaultMaxResultBytes)
+		if err != nil {
+			t.Fatalf("%q stopped the report: %v", name, err)
 		}
-		if _, err := OutputData(r); !errors.Is(err, ErrKeyMaterial) {
-			t.Errorf("%q in a standalone record: %v", leak, err)
+		if strings.Contains(string(b), name) || sent.Keystores[0].Entries[0].Alias != WithheldName || sent.Certificates[0].Location.Path != WithheldName {
+			t.Errorf("%q: not withheld", name)
 		}
+		if sent.Sections[SectionKeystores] != SectionOK || sent.Sections[SectionCertificates] != SectionOK {
+			t.Errorf("%q: a withheld name made a section partial: %v", name, sent.Sections)
+		}
+		noted := 0
+		for _, e := range sent.Errors {
+			if strings.Contains(e.Message, "name was withheld") {
+				noted++
+			}
+		}
+		if noted != 2 {
+			t.Errorf("%q: %d notes, want 2: %+v", name, noted, sent.Errors)
+		}
+		if r.Keystores[0].Entries[0].Alias != name {
+			t.Fatal("the caller's report was changed")
+		}
+		if _, err := OutputData(r); err != nil {
+			t.Errorf("%q stopped the standalone record: %v", name, err)
+		}
+	}
+}
+
+// Real key material in a field (a leaking parser) is removed from that
+// field, the section is marked partial with the item named, and the report
+// is still sent without a byte of the key.
+func TestJobKeyMaterialInAFieldIsRemoved(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	secrets := ksSecretsOf(t, key)
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	for name, leak := range map[string]string{
+		"pem block":       pemText,
+		"pem in a phrase": "unparsed: " + pemText + " (see file)",
+		"bare base64 der": base64.StdEncoding.EncodeToString(der),
+		"hex der":         fmt.Sprintf("%x", der),
+		"hex in a phrase": "key " + fmt.Sprintf("%x", der) + " left",
+	} {
+		r := jobFullReport()
+		r.Sections = map[string]string{SectionPlatform: SectionOK, SectionPrivateKeys: SectionOK}
+		r.PrivateKeys[0].Unknown = leak
+		b, sent, err := ResultPayload(r, DefaultMaxResultBytes)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		jobAssertNoSecret(t, name, b, secrets)
+		if sent.PrivateKeys[0].Unknown != "" || sent.Sections[SectionPrivateKeys] != SectionPartial {
+			t.Fatalf("%s: unknown %q, section %q", name, sent.PrivateKeys[0].Unknown, sent.Sections[SectionPrivateKeys])
+		}
+		found := false
+		for _, e := range sent.Errors {
+			found = found || (e.Step == SectionPrivateKeys && strings.Contains(e.Message, "item 0") && strings.Contains(e.Message, "removed"))
+		}
+		if !found {
+			t.Fatalf("%s: the removal is not recorded: %+v", name, sent.Errors)
+		}
+	}
+	// The last, structural check still refuses a complete block in bytes.
+	if jobCheckNoKeyMaterial([]byte(pemText)) == nil || jobCheckNoKeyMaterial([]byte("-----BEGIN PRIVATE KEY----- name")) != nil {
+		t.Fatal("the structural check is wrong in one direction")
 	}
 }
 
@@ -767,4 +859,39 @@ func TestJobCollectDropsPrivilegeNotesWhenElevated(t *testing.T) {
 			t.Errorf("elevated=%v: %q", elevated, rep.Errors[0].Message)
 		}
 	}
+}
+
+// The reviewer's case: 60,000 swept keys in a report with home directories
+// on. The cut keeps as many as fit (not half), and private keys, the sweep
+// that found them and home directories all read partial with the limit.
+func TestJobBoundCutsToFitAndMarksThePasses(t *testing.T) {
+	s := jobCompile(t, "defs/host-crypto-report.json")
+	r := &Report{Collected: time.Now().UTC(), Mode: hostinventory.ModeLocal, Platform: "linux", Sections: map[string]string{},
+		Scope: Scope{HomeDirectories: true}}
+	for _, sec := range []string{SectionPlatform, SectionPrivateKeys, SectionSweep, SectionHomeDirectories, SectionCertificates} {
+		r.Sections[sec] = SectionOK
+	}
+	for i := 0; i < 60000; i++ {
+		r.PrivateKeys = append(r.PrivateKeys, PrivateKey{Location: Location{Path: fmt.Sprintf("/home/u%d/.ssh/%s", i, strings.Repeat("k", 200)), FoundBy: FoundBySweep},
+			Format: KeyFormatPKCS8, Algorithm: "RSA", SizeBits: 2048, Protection: KeyProtectionFile})
+	}
+	b, sent, err := ResultPayload(r, DefaultMaxResultBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobValidate(s, b); err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > DefaultMaxResultBytes || len(b) < DefaultMaxResultBytes-2048 {
+		t.Fatalf("%d bytes sent: the cut is not to fit", len(b))
+	}
+	for _, sec := range []string{SectionPrivateKeys, SectionSweep, SectionHomeDirectories} {
+		if sent.Sections[sec] != SectionPartial || !jobHasLimit(sent, sec) {
+			t.Errorf("%s: %q, limits %v", sec, sent.Sections[sec], sent.Limits)
+		}
+	}
+	if sent.Sections[SectionCertificates] != SectionOK {
+		t.Errorf("an uncut section was marked: %v", sent.Sections)
+	}
+	t.Logf("kept %d of %d keys in %d bytes", len(sent.PrivateKeys), len(r.PrivateKeys), len(b))
 }

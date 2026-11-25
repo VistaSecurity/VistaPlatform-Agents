@@ -38,7 +38,7 @@
         "subject_dn": "CN=app.example.test",
         "issuer_dn": "CN=Example Test CA",
         "serial_number": "1001",
-        "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "fingerprint_sha256": 7,
         "not_before": "2026-01-01T00:00:00Z",
         "not_after": "2027-01-01T00:00:00Z",
         "key_algorithm": "ECDSA",
@@ -178,6 +178,6 @@
   "metadata": {
     "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "ssh_host_key_type": "ssh-ed25519",
-    "ssh_host_key_verification": "trusted-ish"
+    "ssh_host_key_verification": "first_use"
   }
 }

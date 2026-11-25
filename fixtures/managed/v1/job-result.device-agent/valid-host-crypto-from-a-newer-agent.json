@@ -69,7 +69,8 @@
         "role": "tls",
         "format": "sec1",
         "protection": "file",
-        "unknown": "remote: openssl pkey not available on the host"
+        "unknown": "remote: openssl pkey not available on the host",
+        "a_future_field": "x"
       }
     ],
     "keystores": [
@@ -146,7 +147,7 @@
     },
     "sections": {
       "platform": "ok",
-      "certificates": "fine",
+      "certificates": "ok",
       "private_keys": "partial",
       "keystores": "ok",
       "ssh": "ok",
@@ -159,7 +160,8 @@
       "tokens": "ok",
       "processes": "partial",
       "sweep": "skipped",
-      "home_directories": "skipped"
+      "home_directories": "skipped",
+      "a_future_section": "deferred"
     },
     "errors": [
       {
@@ -174,5 +176,10 @@
         "detail": "stopped after 2000 records"
       }
     ]
+  },
+  "metadata": {
+    "ssh_host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssh_host_key_type": "ssh-ed25519",
+    "ssh_host_key_verification": "first_use"
   }
 }

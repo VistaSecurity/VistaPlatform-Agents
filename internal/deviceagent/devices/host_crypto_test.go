@@ -460,8 +460,9 @@ func TestHostCryptoJobResult(t *testing.T) {
 	leaky.Configs = []hostcrypto.CryptoConfig{{Location: hostcrypto.Location{FoundBy: hostcrypto.FoundByConfig}, Product: "x",
 		Settings: map[string]string{"k": "-----BEGIN EC PRIVATE KEY-----"}}}
 	res = HostCryptoJobResult(job, &leaky, nil, false)
-	if res.Success || len(res.HostCrypto) != 0 || !strings.Contains(res.Error, "private key material") {
-		t.Fatalf("a report carrying key material was sent: %+v", res)
+	// A key-SHAPED value is data: withheld, and the report still sent.
+	if !res.Success || strings.Contains(string(res.HostCrypto), "BEGIN EC PRIVATE KEY") || !strings.Contains(string(res.HostCrypto), "name withheld") {
+		t.Fatalf("a key-shaped setting: %+v %s", res, res.HostCrypto)
 	}
 }
 
