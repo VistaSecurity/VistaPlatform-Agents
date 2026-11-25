@@ -44,7 +44,8 @@ func TestAgentCapabilities_KubernetesInventoryOnlyInACluster(t *testing.T) {
 			t.Fatalf("capabilities outside a cluster: %v", AgentCapabilities())
 		}
 	}
-	if len(AgentCapabilities()) != len(di.AgentCapabilities()) {
+	// Outside a cluster: the shared device capabilities and host_crypto_v1.
+	if len(AgentCapabilities()) != len(di.AgentCapabilities())+1 {
 		t.Errorf("capabilities = %v", AgentCapabilities())
 	}
 }

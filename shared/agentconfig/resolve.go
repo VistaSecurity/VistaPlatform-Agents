@@ -126,6 +126,15 @@ func Validate(rt Runtime, vals Values) error {
 			for _, b := range bad {
 				problems = append(problems, fmt.Sprintf("%s: %s", k, b))
 			}
+		case KindPathList:
+			if v.S == nil {
+				problems = append(problems, fmt.Sprintf("%s: expected a list of paths, got %q", k, v.String()))
+				continue
+			}
+			_, bad := ParsePathFor(f, *v.S)
+			for _, b := range bad {
+				problems = append(problems, fmt.Sprintf("%s: %s", k, b))
+			}
 		}
 	}
 	if len(problems) == 0 {
@@ -177,6 +186,17 @@ func Normalize(rt Runtime, vals Values) (Values, []string) {
 				notes = append(notes, fmt.Sprintf("%s: removed %d duplicate port(s)", k, dropped))
 			}
 			out[k] = Text(FormatPortList(ports))
+			continue
+		}
+		if f.Kind == KindPathList {
+			if v.S == nil {
+				continue
+			}
+			paths, bad := ParsePathFor(f, *v.S)
+			if len(bad) > 0 {
+				continue
+			}
+			out[k] = Text(FormatPathList(paths))
 			continue
 		}
 		if f.Kind != KindInt {

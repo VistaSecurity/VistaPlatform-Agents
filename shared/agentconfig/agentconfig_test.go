@@ -320,6 +320,14 @@ func TestEveryDefaultMatchesItsKind(t *testing.T) {
 			if ports, bad := ParsePortList(*f.Default.S); len(bad) > 0 || FormatPortList(ports) != *f.Default.S {
 				t.Errorf("%s defaults to %q, which is not a canonical port list: %v", k, *f.Default.S, bad)
 			}
+		case KindPathList:
+			if f.Default.S == nil {
+				t.Errorf("%s is a path list with a non-string default", k)
+				continue
+			}
+			if paths, bad := ParsePathList(*f.Default.S); len(bad) > 0 || FormatPathList(paths) != *f.Default.S {
+				t.Errorf("%s defaults to %q, which is not a canonical path list: %v", k, *f.Default.S, bad)
+			}
 		default:
 			t.Errorf("%s has kind %q, which this test does not know how to check", k, f.Kind)
 		}

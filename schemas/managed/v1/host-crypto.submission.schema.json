@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vistasecurity.io/agents/managed/v1/host-crypto.submission.schema.json",
+  "title": "Device agent local host crypto submission",
+  "description": "POST /api/v1/device-interrogation-service/agents/{id}/host-crypto: a LOCAL collection the agent made on its own schedule (setting host_crypto_enabled), which has no job. Sent only when the platform negotiated host_crypto_v1. The report is at most 16 MiB, cut honestly to fit (limit max_result_bytes). A collection the platform asked for is a host_crypto job and returns through /results instead.",
+  "type": "object",
+  "required": ["agent_id", "mode", "collected_at", "report"],
+  "additionalProperties": false,
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "mode": { "const": "local" },
+    "collected_at": { "type": "string", "format": "date-time" },
+    "agent_version": { "type": "string" },
+    "report": { "$ref": "defs/host-crypto-report.json" }
+  }
+}
