@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -695,4 +696,75 @@ func jobAccess(a Access) string {
 		return "no"
 	}
 	return "elevated=" + s(a.Elevated) + " full_disk_access=" + s(a.FullDiskAccess)
+}
+
+// A permission denial says what the platform needs, once per platform, and
+// not when the message already says it; an elevated run takes it back off.
+// The same step and message is counted, not repeated.
+func TestJobRecordErrorPrivilegeAndRepeats(t *testing.T) {
+	for platform, want := range map[string]string{
+		hostinventory.PlatformLinux:   "/etc/ssl/private: hostcrypto: permission denied (needs root)",
+		hostinventory.PlatformDarwin:  "/etc/ssl/private: hostcrypto: permission denied (needs root and Full Disk Access)",
+		hostinventory.PlatformWindows: "/etc/ssl/private: hostcrypto: permission denied (needs SYSTEM or an elevated administrator)",
+	} {
+		r := &Report{Platform: platform}
+		r.partial(SectionPrivateKeys, fmt.Errorf("/etc/ssl/private: %w", ErrPermission))
+		if got := r.Errors[0].Message; got != want {
+			t.Errorf("%s: %q, want %q", platform, got, want)
+		}
+	}
+	r := &Report{Platform: hostinventory.PlatformLinux}
+	r.partial(SectionCertificates, errors.New("/opt: 7 directories could not be read"))
+	r.partial(SectionCertificates, errors.New("/opt: 7 directories could not be read"))
+	r.partial(SectionCertificates, errors.New("/opt: 7 directories could not be read"))
+	r.partial(SectionConfigs, errors.New("/opt: 7 directories could not be read"))
+	r.partial(SectionCertificates, errors.New("/opt: 2 entries could not be read"))
+	r.partial(SectionProcesses, errors.New("12 processes could not be inspected without root: permission denied"))
+	msgs := []string{}
+	for _, e := range r.Errors {
+		msgs = append(msgs, e.Step+"|"+e.Message)
+	}
+	want := []string{
+		"certificates|/opt: 7 directories could not be read (needs root) (3 times)",
+		"configs|/opt: 7 directories could not be read (needs root)",
+		"certificates|/opt: 2 entries could not be read",
+		"processes|12 processes could not be inspected without root: permission denied",
+	}
+	if strings.Join(msgs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors:\n%s\nwant:\n%s", strings.Join(msgs, "\n"), strings.Join(want, "\n"))
+	}
+	yes, no := true, false
+	r.Access.Elevated = &yes
+	r.jobDropPrivilegeNotes()
+	if r.Errors[0].Message != "/opt: 7 directories could not be read (3 times)" {
+		t.Fatalf("elevated run kept the note: %q", r.Errors[0].Message)
+	}
+	d := &Report{Platform: hostinventory.PlatformDarwin, Access: Access{Elevated: &yes, FullDiskAccess: &no}}
+	d.partial(SectionSSH, ErrPermission)
+	d.jobDropPrivilegeNotes()
+	if !strings.Contains(d.Errors[0].Message, "Full Disk Access") {
+		t.Fatalf("root without Full Disk Access dropped the note: %q", d.Errors[0].Message)
+	}
+}
+
+// Collect takes the notes off at the end of an elevated run, and keeps them
+// on an unprivileged one (the call in Collect, not only the method).
+func TestJobCollectDropsPrivilegeNotesWhenElevated(t *testing.T) {
+	saved := passes
+	defer func() { passes = saved }()
+	for _, elevated := range []bool{true, false} {
+		passes = []pass{func(_ context.Context, c *collection) {
+			e := elevated
+			c.report.Access.Elevated = &e
+			c.partial(SectionPrivateKeys, fmt.Errorf("/etc/ssl/private: %w", ErrPermission))
+		}}
+		rep, err := Collect(context.Background(), newTgtFakeTarget(true), Options{Platform: hostinventory.PlatformLinux})
+		if err != nil {
+			t.Fatal(err)
+		}
+		has := strings.Contains(rep.Errors[0].Message, "needs root")
+		if has == elevated {
+			t.Errorf("elevated=%v: %q", elevated, rep.Errors[0].Message)
+		}
+	}
 }

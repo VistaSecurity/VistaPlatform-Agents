@@ -405,8 +405,15 @@ func TestCollectionWrappers(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if c.report.SectionState(SectionCertificates) != SectionFailed || c.report.SectionState(SectionKeystores) != SectionPartial || len(c.report.Errors) != 15 {
+	// 15 errors, three distinct, each recorded five times: kept once each
+	// with its count (recordError).
+	if c.report.SectionState(SectionCertificates) != SectionFailed || c.report.SectionState(SectionKeystores) != SectionPartial || len(c.report.Errors) != 3 {
 		t.Fatalf("sections %v, %d errors", c.report.Sections, len(c.report.Errors))
+	}
+	for _, e := range c.report.Errors {
+		if !strings.HasSuffix(e.Message, " (5 times)") {
+			t.Errorf("error %+v: want its count of 5", e)
+		}
 	}
 }
 
