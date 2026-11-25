@@ -216,6 +216,61 @@ limit whose detail names the bound that applied; none reads `ok` with a list
 it did not finish, and none reads `failed` because it was cut. A file is
 charged to the file budget once, so the sweep visits what it listed.
 
+### Coverage: when an absent item is gone
+
+A section's state is too coarse to retire an item. An unprivileged agent (how
+the Linux and macOS installers run it) always reports `certificates`,
+`private_keys`, `ssh` and `processes` partial, because `/etc/ssl/private` is
+unreadable and other users' processes are invisible; with a section rule a
+deleted key file would never be retired and its finding never close. So the
+Report also says, directory by directory, what it saw completely:
+
+```json
+"coverage": {
+  "directories": ["/etc/ssh", "/srv/tls"],
+  "skipped_files": [{"path": "/etc/ssh/ssh_host_ed25519_key", "reason": "permission denied"}]
+}
+```
+
+A directory is in `coverage.directories` if and only if the collector listed
+its direct entries completely (no permission error, no bound, no deadline; not
+excluded; not a home directory without the opt-in; not a top-level directory
+such as `/etc` or `C:\ProgramData`), and every regular file directly in it was
+identified and, when it is something the Report records, is in the Report, or
+is in `coverage.skipped_files` with the reason it was not read (over the read
+bound, permission denied). Subdirectories are covered separately or not at
+all; symbolic links are not followed (an item a link names lives in its
+target's directory).
+
+A platform may then retire an active file-based item (its `location.path`, or
+`location.container` for a keystore entry, directly in a covered directory)
+that is absent from the Report and not in `skipped_files`, whatever the
+section says. Store-based items (Windows certificate stores, macOS keychains)
+are not covered; their sections decide. A false "covered" retires an item that
+still exists, so the collector leaves a directory uncovered whenever it is not
+certain: it lists the directory again on its own, without name filters or size
+bounds; a file read only in part (a keystore whose entries were not listed, a
+remote file whose certificates are not read, a bundle with unreadable blocks),
+a remote binary its markers cannot place, an excluded file, a listing error,
+or any deadline or budget cut leaves it uncovered; and when any section
+dropped records at its bound, no directory is covered (limit
+`coverage`/`max_records`). At most 5,000 directories are covered per run
+(limit `coverage`/`max_directories`).
+
+Which directories are tried:
+
+| Source | Directories | Bound |
+|---|---|---|
+| Pass 1 | each table row's directory and the directories its files were listed in, except configuration and NSS rows | 4,096 entries |
+| Pass 2, pass 3 | the directory of each file a configuration names or a process holds or names; files first found there say `found_by: "neighbour"` | 512 entries |
+| Sweep (local only) | every directory the sweep walked, with the sweep's content identities | 4,096 entries |
+
+Remote, a directory is covered only where identification is equivalent:
+`Identify` on every file through the batch call, every certificate file read
+through the host's parser, every key recorded from its markers. A remote sweep
+(by name) covers nothing, and a remote directory with a keystore, a file
+holding a key and certificates, or an unknown binary is not covered.
+
 ### Opt-ins
 
 Off unless the operator says otherwise:

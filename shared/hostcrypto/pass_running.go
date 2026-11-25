@@ -713,8 +713,8 @@ func (r *registry) platAttach(p string, usages []Usage, windows bool) bool {
 // same record, and meets the same remote rules (a private key file is never
 // read remotely), as a file found in a known location.
 func platVisitPath(ctx context.Context, c *collection, p string, usages []Usage, windows bool) {
-	if c.registry.platAttach(p, usages, windows) {
-		return
+	if !c.registry.platAttach(p, usages, windows) {
+		c.locVisit(ctx, locVisit{Path: p, Kind: locMaterial, FoundBy: FoundByProcess, UsedBy: usages, Section: SectionProcesses})
 	}
-	c.locVisit(ctx, locVisit{Path: p, Kind: locMaterial, FoundBy: FoundByProcess, UsedBy: usages, Section: SectionProcesses})
+	c.covNeighbour(ctx, p, SectionProcesses)
 }

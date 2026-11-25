@@ -174,6 +174,12 @@ type locState struct {
 	// noPerms counts, per section, files visited whose permissions could not
 	// be read.
 	noPerms map[string]int
+	// coverage is the directories being covered (pass_coverage.go).
+	coverage *covState
+	// covCandidates are the directories pass 1 may cover, in order.
+	covCandidates []string
+	// sweepKnown is what the local sweep identified, for coverage.
+	sweepKnown *covKnownFiles
 }
 
 type locCount struct{ ok, bad int }
@@ -185,6 +191,21 @@ type locProduced struct {
 	stores []Keystore
 	auth   []AuthorizedKeysFile
 	known  []KnownHostsFile
+
+	// For coverage (pass_coverage.go): what the file's markers said, whether
+	// it was over the read bound, and whether its reading came out
+	// incomplete (a read failed, or some of its blocks could not be read).
+	id         Identity
+	tooBig     bool
+	incomplete bool
+	// res is how the file's dispatch went (locRead, locDenied, ...): a
+	// file the account could stat but not read has a record of nothing.
+	res locResult
+}
+
+// records is how many records the file produced.
+func (p *locProduced) records() int {
+	return len(p.certs) + len(p.keys) + len(p.stores) + len(p.auth) + len(p.known)
 }
 
 // each calls fn with every record's Location.
@@ -680,6 +701,7 @@ func passKnownLocations(ctx context.Context, c *collection) {
 	}
 	if !c.opts.HomeDirectories {
 		c.skip(SectionHomeDirectories)
+		c.covKnown(ctx, st.covCandidates)
 		return
 	}
 	for i, e := range home {
@@ -690,6 +712,7 @@ func passKnownLocations(ctx context.Context, c *collection) {
 		}
 		c.locRunEntry(ctx, e)
 	}
+	c.covKnown(ctx, st.covCandidates)
 }
 
 // locRowsNotVisited records the time limit on the section of every row the
@@ -739,6 +762,7 @@ var locSections = []string{SectionCertificates, SectionPrivateKeys, SectionKeyst
 func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 	st := c.locSt()
 	files := c.locEntryFiles(ctx, e)
+	st.covCandidates = append(st.covCandidates, covKnownCandidates(e, files, st.style)...)
 	if e.Kind != locNSS && e.Kind != locConfig {
 		var paths []string
 		for _, fi := range files {
@@ -957,6 +981,7 @@ func (c *collection) locVisit(ctx context.Context, v locVisit) (locResult, FileI
 	st.visited[real] = prod
 	st.order = append(st.order, real)
 	res := c.locDispatch(ctx, v, fi, prod)
+	prod.res = res
 	return res, fi
 }
 
@@ -1082,6 +1107,7 @@ func (c *collection) locDispatch(ctx context.Context, v locVisit, fi FileInfo, p
 	}
 	f := &locFile{v: v, fi: fi, loc: loc, id: id, prod: prod}
 	f.tooBig = fi.Size > c.opts.maxFileBytes()
+	prod.id, prod.tooBig = id, f.tooBig
 	if f.tooBig {
 		c.limit(v.Section, "max_file_bytes", fmt.Sprintf("did not read files over %d bytes", c.opts.maxFileBytes()))
 	}
@@ -1146,6 +1172,9 @@ func (c *collection) locRead(ctx context.Context, f *locFile) ([]byte, bool) {
 	} else {
 		b, err = c.target.ReadFile(ctx, f.v.Path)
 	}
+	if unreadable > 0 || err != nil {
+		f.prod.incomplete = true
+	}
 	if unreadable > 0 {
 		what := "certificates"
 		if unreadable == 1 {
@@ -1175,6 +1204,7 @@ func (c *collection) locPEMOrKey(ctx context.Context, f *locFile) locResult {
 			f.prod.keys = append(f.prod.keys, k)
 		}
 		if f.id.Class == ClassMixed || f.id.Class == ClassCertificate {
+			f.prod.incomplete = true // its certificates are not in the Report
 			c.partial(SectionCertificates, fmt.Errorf("%s: the certificates in it are not read (%s)", f.v.Path, c.locWhyNot(f)))
 		}
 		return locRead
@@ -1347,6 +1377,8 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 				return locRead
 			}
 		}
+		// Its entries are not in the Report.
+		f.prod.incomplete = true
 		f.prod.stores = append(f.prod.stores, Keystore{Location: locCopy(f.loc), Type: typ, Opened: OpenedNot, Unknown: c.locStoreWhyNot(f)})
 		return locRead
 	}
@@ -1357,6 +1389,7 @@ func (c *collection) locKeystoreFile(ctx context.Context, f *locFile) locResult 
 	defer clear(b)
 	kc, err := locParseKeystore(typ, b, c.opts.DefaultKeystorePasswords)
 	if err != nil {
+		f.prod.incomplete = true
 		c.note(SectionKeystores, fmt.Errorf("%s: %s keystore did not parse in full", f.v.Path, typ))
 	}
 	c.locAddKeystore(f, kc)
@@ -1414,6 +1447,7 @@ func (c *collection) locAddKeystore(f *locFile, kc KeystoreContents) {
 		f.prod.certs = append(f.prod.certs, cert)
 	}
 	if kc.Truncated {
+		f.prod.incomplete = true
 		c.limit(SectionKeystores, "max_records", fmt.Sprintf("listed the first %d entries of a keystore", DefaultMaxKeystoreEntries))
 	}
 	if kc.DefaultsNotTried != "" {
@@ -1515,6 +1549,7 @@ func (c *collection) locUnknown(ctx context.Context, f *locFile) locResult {
 	if !c.target.Local() {
 		if len(f.id.Magic) > 0 && !isPrintableText(f.id.Magic) {
 			c.locSt().unidentified[f.v.Section]++
+			f.prod.incomplete = true
 		}
 		return locRead
 	}
@@ -1644,6 +1679,7 @@ func (c *collection) locFlushRecords() {
 		}
 	}
 	st.visited, st.order = map[string]*locProduced{}, nil
+	c.covCommit()
 	secs := make([]string, 0, len(st.noPerms))
 	for s := range st.noPerms {
 		secs = append(secs, s)
