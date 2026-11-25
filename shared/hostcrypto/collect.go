@@ -269,6 +269,11 @@ type collection struct {
 	registry *registry
 	budget   *budget
 
+	// loc is the state passes 1 and 2 share (pass_known.go, pass_config.go):
+	// what was visited, the configuration files found, the references
+	// followed. Created by the first of them; nil until then.
+	loc *locState
+
 	mu sync.Mutex
 }
 
