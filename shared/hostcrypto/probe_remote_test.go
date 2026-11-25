@@ -52,6 +52,21 @@ func TestJobProbeCommandsCarryNoSecretWords(t *testing.T) {
 			t.Errorf("the check passes %q", bad)
 		}
 	}
+	// Each command carries its public-only options (checked here, where the
+	// tools need not exist): ssh-keygen -e (export the public key) and
+	// openssl pkey -pubout for keys, openssl pkcs12 -nokeys for keystores.
+	cmds := jobProbeCommands()
+	for name, want := range map[string][]string{
+		"key-probe":      {"ssh-keygen -e -f", "openssl pkey -in \"$1\" -pubout -passin pass:"},
+		"keystore-probe": {"-nokeys", "keytool -list -keystore"},
+		"win-key-probe":  {"'-e -f \"'"},
+	} {
+		for _, w := range want {
+			if !strings.Contains(cmds[name], w) {
+				t.Errorf("%s does not contain its public-only option %q", name, w)
+			}
+		}
+	}
 	// No default password is ever text of a command: they go on stdin.
 	for _, cmd := range jobProbeCommands() {
 		for _, pw := range DefaultKeystorePasswords {
@@ -110,7 +125,7 @@ func jobPubLine(t *testing.T, s crypto.Signer) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "PUB " + p.Type() + " " + base64.StdEncoding.EncodeToString(p.Marshal())
+	return "B " + base64.StdEncoding.EncodeToString(p.Marshal()) + "\nBLOBEND"
 }
 
 func jobSPKILines(t *testing.T, pub crypto.PublicKey) string {
@@ -134,34 +149,46 @@ var jobBase = PrivateKey{Format: KeyFormatPKCS8, Protection: KeyProtectionFile, 
 // Each answer completes the markers' description as it should, and only
 // with what a public key gives.
 func TestJobParseKeyProbe(t *testing.T) {
+	ossh := PrivateKey{Format: KeyFormatOpenSSH, Protection: KeyProtectionFile, Unknown: "markers"}
 	for _, k := range jobProbeKeys(t) {
 		want := jobSPKIHash(t, k.signer.Public())
 		got := jobParseKeyProbe([]byte(jobPubLine(t, k.signer)+"\n"), jobBase)
 		if got.PublicKeySHA256 != want || got.Algorithm == "" || got.SizeBits == 0 || got.SSHFingerprint == "" ||
 			got.Encrypted == nil || *got.Encrypted || got.Unknown != "" || got.Format != KeyFormatPKCS8 {
-			t.Errorf("%s PUB: %+v", k.name, got)
+			t.Errorf("%s blob: %+v", k.name, got)
 		}
 		got = jobParseKeyProbe([]byte(jobSPKILines(t, k.signer.Public())), jobBase)
 		if got.PublicKeySHA256 != want || got.Algorithm == "" || got.Encrypted == nil || *got.Encrypted {
 			t.Errorf("%s SPKI: %+v", k.name, got)
+		}
+		// An encrypted OpenSSH key: described from its clear public half,
+		// and encrypted.
+		got = jobParseKeyProbe([]byte("ENC 1\n"+jobPubLine(t, k.signer)+"\n"), ossh)
+		if got.PublicKeySHA256 != want || got.Encrypted == nil || !*got.Encrypted {
+			t.Errorf("%s encrypted openssh: %+v", k.name, got)
+		}
+		// An OpenSSH key whose cipher was not read: encrypted unknown.
+		if got = jobParseKeyProbe([]byte(jobPubLine(t, k.signer)+"\n"), ossh); got.Encrypted != nil || got.PublicKeySHA256 != want {
+			t.Errorf("%s openssh, cipher unknown: %+v", k.name, got)
 		}
 	}
 	if got := jobParseKeyProbe([]byte("ENCRYPTED\n"), jobBase); got.Encrypted == nil || !*got.Encrypted || got.Algorithm != "" {
 		t.Errorf("ENCRYPTED: %+v", got)
 	}
 	for in, want := range map[string]string{
-		"DENIED\n": "may not read", "NOTOOL\n": "neither ssh-keygen nor openssl", "FAILED\n": "could not read", "": "could not read",
-		"PUB ssh-rsa !!!\n": "could not read", "SPKI\nAAAA\n": "could not read",
+		"DENIED\n": "may not read", "NOTOOL\n": "no ssh-keygen or openssl", "FAILED\n": "cannot read", "": "cannot read",
+		"NOTKEY\n": "not a key", "TIMEUP\n": "time bound", "B !!!\nBLOBEND\n": "cannot read", "SPKI\nAAAA\n": "cannot read",
+		"B " + base64.StdEncoding.EncodeToString([]byte("not a key blob at all")) + "\nBLOBEND\n": "cannot read",
 	} {
 		if got := jobParseKeyProbe([]byte(in), jobBase); !strings.Contains(got.Unknown, want) || got.PublicKeySHA256 != "" {
 			t.Errorf("%q: %+v", in, got)
 		}
 	}
-	// A line that names one type and carries another's blob is refused.
-	ks := jobProbeKeys(t)
-	line := strings.Replace(jobPubLine(t, ks[0].signer), "ssh-rsa", "ssh-ed25519", 1)
-	if got := jobParseKeyProbe([]byte(line), jobBase); got.PublicKeySHA256 != "" {
-		t.Errorf("mismatched type accepted: %+v", got)
+	// A batch answer splits at its index lines; an index out of range is
+	// ignored, a missing one leaves its path unanswered.
+	parts := jobSplitProbeAnswers([]byte("=== 0\nNOTKEY\n=== 2\nDENIED\n=== 9\nFAILED\n"), 3)
+	if string(parts[0]) != "NOTKEY\n" || parts[1] != nil || string(parts[2]) != "DENIED\n" {
+		t.Errorf("split: %q", parts)
 	}
 }
 
@@ -181,9 +208,10 @@ func TestJobKeyProbeStoresNothingPrivate(t *testing.T) {
 			"pem after a valid line": jobPubLine(t, k.signer) + "\n" + pemKey,
 			"key DER as SPKI":        "SPKI\n" + b64 + "\nEND\n",
 			"hex after SPKI":         jobSPKILines(t, k.signer.Public()) + hexd + "\n",
-			"blob is the key":        "PUB ssh-ed25519 " + b64 + "\n",
+			"blob is the key":        "B " + b64 + "\nBLOBEND\n",
 			"private key alone":      pemKey,
-			"hex as a field":         "PUB " + hexd + " " + b64 + "\n",
+			"hex as a blob":          "B " + hexd + "\nBLOBEND\n",
+			"verdict then key":       "ENCRYPTED\n" + pemKey + "\n" + hexd,
 		} {
 			got := jobParseKeyProbe([]byte(answer), jobBase)
 			ksAssertNoSecret(t, k.name+": "+name, got, append(k.secrets, der)...)
@@ -193,7 +221,7 @@ func TestJobKeyProbeStoresNothingPrivate(t *testing.T) {
 
 func TestJobParseKeystoreProbe(t *testing.T) {
 	openssl := "I MAC: sha256, Iteration 2048\nI MAC length: 32, salt length: 8\n" +
-		"I PKCS7 Encrypted data: PBES2, PBKDF2, AES-256-CBC, Iteration 2048, PRF hmacWithSHA256\nI Certificate bag\nN server\n" +
+		"I PKCS7 Encrypted data: PBES2, PBKDF2, AES-256-CBC, Iteration 2048, PRF hmacWithSHA256\nI Certificate bag\n" +
 		"I PKCS7 Data\nI Shrouded Keybag: PBES2, PBKDF2, AES-256-CBC, Iteration 2048, PRF hmacWithSHA256\nN server\nCERT\nOPENED empty\n"
 	kc, ok := jobParseKeystoreProbe([]byte(openssl), KeystorePKCS12, false)
 	ks := kc.Keystore
@@ -260,11 +288,13 @@ type jobRecRunner struct {
 	inner *hostinventory.LocalRunner
 	mu    sync.Mutex
 	out   []byte
+	calls int
 }
 
 func (r *jobRecRunner) Run(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 	o, e, x, err := r.inner.Run(ctx, argv)
 	r.mu.Lock()
+	r.calls++
 	r.out = append(append(r.out, o...), e...)
 	r.mu.Unlock()
 	return o, e, x, err
@@ -306,63 +336,105 @@ func jobWrite(t *testing.T, dir, name string, b []byte, mode os.FileMode) string
 	return p
 }
 
-// The key probe against the real ssh-keygen and openssl of this machine:
-// every byte the tools printed holds no run of the key's private bytes, and
-// what was kept is the key's real public description.
+// jobProbeCollection is a collection over a remote target, for calling the
+// probe the way a pass does.
+func jobProbeCollection(t Target) *collection {
+	return &collection{target: t, report: newReport(Options{})}
+}
+
+// jobLibreSSL reports whether this machine's openssl is LibreSSL (macOS),
+// which cannot read an Ed25519 PKCS#8 key.
+func jobLibreSSL() bool {
+	out, _ := exec.Command("openssl", "version").Output()
+	return strings.Contains(string(out), "LibreSSL")
+}
+
+// The key probe against the real ssh-keygen and openssl of this machine,
+// every file in ONE host program: every byte the tools printed holds no run
+// of a key's private bytes; what was kept is the key's real public
+// description; an encrypted PEM key is decided from its header with no
+// tool run; an encrypted OpenSSH key and one others may read are still
+// described.
 func TestJobKeyProbeRealTools(t *testing.T) {
 	jobNeedTools(t, "ssh-keygen", "openssl")
 	dir := t.TempDir()
+	type want struct {
+		hash      string
+		encrypted bool
+		unknown   bool // nothing public could be read (and the reason says why)
+	}
+	files := map[string]want{}
+	var secrets [][]byte
 	for _, k := range jobProbeKeys(t) {
 		der, err := x509.MarshalPKCS8PrivateKey(k.signer)
 		if err != nil {
 			t.Fatal(err)
 		}
-		block, err := ssh.MarshalPrivateKey(k.signer, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		encBlock, err := ssh.MarshalPrivateKeyWithPassphrase(k.signer, "", []byte("job-probe-pass"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := jobSPKIHash(t, k.signer.Public())
-		files := map[string]struct {
-			path      string
-			encrypted bool
-		}{
-			"pkcs8":       {jobWrite(t, dir, k.name+".p8", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600), false},
-			"openssh":     {jobWrite(t, dir, k.name+".ossh", pem.EncodeToMemory(block), 0o600), false},
-			"openssh-enc": {jobWrite(t, dir, k.name+".ossh-enc", pem.EncodeToMemory(encBlock), 0o600), true},
-			"pkcs8-0644":  {jobWrite(t, dir, k.name+".open", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o644), false},
-		}
+		block, _ := ssh.MarshalPrivateKey(k.signer, "")
+		encBlock, _ := ssh.MarshalPrivateKeyWithPassphrase(k.signer, "", []byte("job-probe-pass"))
+		h := jobSPKIHash(t, k.signer.Public())
+		secrets = append(secrets, k.secrets...)
+		p8 := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		ed8 := k.name == "ed25519"
+		files[jobWrite(t, dir, k.name+".p8", p8, 0o600)] = want{h, false, ed8 && jobLibreSSL()}
+		files[jobWrite(t, dir, k.name+".p8-0644", p8, 0o644)] = want{h, false, ed8 && jobLibreSSL()}
+		files[jobWrite(t, dir, k.name+".ossh", pem.EncodeToMemory(block), 0o600)] = want{h, false, false}
+		files[jobWrite(t, dir, k.name+".ossh-0644", pem.EncodeToMemory(block), 0o644)] = want{h, false, false}
+		files[jobWrite(t, dir, k.name+".ossh-enc", pem.EncodeToMemory(encBlock), 0o600)] = want{h, true, false}
 		if r, ok := k.signer.(*rsa.PrivateKey); ok {
-			files["pkcs1"] = struct {
-				path      string
-				encrypted bool
-			}{jobWrite(t, dir, k.name+".p1", pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(r)}), 0o600), false}
+			files[jobWrite(t, dir, k.name+".p1", pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(r)}), 0o600)] = want{h, false, false}
+			//nolint:staticcheck // a legacy encrypted PEM is what the header check is for
+			eb, err := x509.EncryptPEMBlock(rand.Reader, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(r), []byte("job-pass"), x509.PEMCipherAES256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[jobWrite(t, dir, k.name+".p1-enc", pem.EncodeToMemory(eb), 0o600)] = want{"", true, true}
 		}
-		for name, f := range files {
-			rr := &jobRecRunner{inner: hostinventory.NewLocalRunner()}
-			got, ok := jobProbeRemoteKey(context.Background(), NewRemoteUnixTarget(rr, runtime.GOOS), f.path, Identity{}, jobBase)
-			if !ok {
-				t.Fatalf("%s %s: the probe did not run", k.name, name)
+	}
+	files[jobWrite(t, dir, "not-a-key.txt", []byte("hello\n"), 0o600)] = want{"", false, true}
+	var paths []string
+	for p := range files {
+		paths = append(paths, p)
+	}
+	rr := &jobRecRunner{inner: hostinventory.NewLocalRunner()}
+	c := jobProbeCollection(NewRemoteUnixTarget(rr, runtime.GOOS))
+	c.jobPrefetchKeyProbes(context.Background(), paths)
+	if rr.calls != 1 {
+		t.Fatalf("%d host programs for %d files, want one batch", rr.calls, len(paths))
+	}
+	if where := ksFindSecret(string(rr.out), secrets...); where != "" {
+		t.Fatalf("the tools printed private material: %s", where)
+	}
+	for p, w := range files {
+		base := jobBase
+		if strings.Contains(p, ".ossh") {
+			base.Format = KeyFormatOpenSSH
+		}
+		got, ok := jobProbeRemoteKey(context.Background(), c, p, Identity{}, base)
+		if !ok {
+			t.Fatalf("%s: no answer", p)
+		}
+		ksAssertNoSecret(t, p, got, secrets...)
+		name := filepath.Base(p)
+		switch {
+		case w.unknown:
+			if got.PublicKeySHA256 != "" || got.Unknown == "" {
+				t.Errorf("%s: %+v", name, got)
 			}
-			// The private scalars, not the whole encoding: a PKCS#8 key also
-			// carries the public key, which the tools rightly print.
-			if where := ksFindSecret(string(rr.out), k.secrets...); where != "" {
-				t.Fatalf("%s %s: the tools printed private material: %s", k.name, name, where)
-			}
-			ksAssertNoSecret(t, k.name+" "+name, got, k.secrets...)
-			if f.encrypted {
-				if got.Encrypted == nil || !*got.Encrypted || got.PublicKeySHA256 != "" {
-					t.Errorf("%s %s: %+v", k.name, name, got)
-				}
-				continue
-			}
-			if got.PublicKeySHA256 != want || got.Algorithm == "" || got.SizeBits == 0 || got.Encrypted == nil || *got.Encrypted {
-				t.Errorf("%s %s: %+v (tools said %q)", k.name, name, got, rr.out)
+		default:
+			if got.PublicKeySHA256 != w.hash || got.Algorithm == "" || got.SizeBits == 0 || got.Unknown != "" {
+				t.Errorf("%s: %+v", name, got)
 			}
 		}
+		if w.encrypted && (got.Encrypted == nil || !*got.Encrypted) {
+			t.Errorf("%s: not reported encrypted: %+v", name, got)
+		}
+		if !w.encrypted && !w.unknown && (got.Encrypted == nil || *got.Encrypted) {
+			t.Errorf("%s: encrypted %v", name, got.Encrypted)
+		}
+	}
+	if rr.calls != 1 {
+		t.Fatalf("the prefetched answers were not used: %d host programs", rr.calls)
 	}
 }
 
@@ -419,8 +491,12 @@ func TestJobKeystoreProbeRealOpenSSL(t *testing.T) {
 	if ks := kc.Keystore; ks.Opened != OpenedDefaultPassword || ks.DefaultPassword == nil || !*ks.DefaultPassword || *ks.EntryCount != 2 {
 		t.Fatalf("changeit with the opt-in: %+v", ks)
 	}
-	if !strings.Contains(kc.Keystore.Entries[0].Alias+kc.Keystore.Entries[1].Alias, "server") {
-		t.Errorf("friendly name not read: %+v", kc.Keystore.Entries)
+	// The friendly name OpenSSL prints with the certificate is the
+	// certificate's, not the key bag's printed before it.
+	for _, e := range kc.Keystore.Entries {
+		if (e.Kind == "certificate") != (e.Alias == "server") {
+			t.Errorf("friendly name on the wrong entry: %+v", kc.Keystore.Entries)
+		}
 	}
 }
 

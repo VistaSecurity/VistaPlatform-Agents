@@ -128,7 +128,7 @@ type outputFlags struct {
 }
 
 func (o *outputFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&o.out, "out", "-", "Write the output to this file (created 0600); - is standard output")
+	fs.StringVar(&o.out, "out", "-", "Write the output to this file (created 0600 on Linux and macOS; an existing file is replaced); - is standard output")
 	fs.StringVar(&o.format, "format", "jsonl", "Output format: jsonl, json or csv")
 	fs.BoolVar(&o.quiet, "quiet", false, "Do not print the human summary on standard error")
 }

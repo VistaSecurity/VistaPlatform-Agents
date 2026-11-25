@@ -203,6 +203,16 @@ func passSweep(ctx context.Context, c *collection) {
 		return
 	}
 	hits := sweep(ctx, c, c.opts.SweepRoots)
+	if !c.target.Local() {
+		// A remote sweep's key files are probed in batches, not one host
+		// program each (probe_remote.go); a hit that is no key answers
+		// NOTKEY at once.
+		paths := make([]string, 0, len(hits))
+		for _, h := range hits {
+			paths = append(paths, h.Info.Path)
+		}
+		c.jobPrefetchKeyProbes(ctx, paths)
+	}
 	for _, h := range hits {
 		if c.timeUp(ctx, SectionSweep) {
 			break

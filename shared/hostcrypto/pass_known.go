@@ -754,6 +754,14 @@ func (c *collection) locRunEntry(ctx context.Context, e locEntry) {
 			paths = append(paths, fi.Path)
 		}
 		c.locPrefetch(ctx, paths)
+		// The keys among them are probed in batches too (probe_remote.go).
+		var keys []string
+		for _, p := range paths {
+			if r, ok := st.pre[p]; ok && r.IdentifyErr == nil && (r.Identity.Class == ClassPrivateKey || r.Identity.Class == ClassMixed) {
+				keys = append(keys, p)
+			}
+		}
+		c.jobPrefetchKeyProbes(ctx, keys)
 	}
 	switch e.Kind {
 	case locNSS:
@@ -1252,7 +1260,7 @@ func (c *collection) locKeyFromMarkers(ctx context.Context, f *locFile) (Private
 		k.Format == KeyFormatPuTTY || k.Format == KeyFormatSSH1 {
 		return k, ok
 	}
-	if probed, ok := locRemoteKeyProbe(ctx, c.target, f.v.Path, f.id, k); ok {
+	if probed, ok := locRemoteKeyProbe(ctx, c, f.v.Path, f.id, k); ok {
 		probed.Location, probed.Role = k.Location, k.Role
 		if probed.Protection == "" {
 			probed.Protection = KeyProtectionFile

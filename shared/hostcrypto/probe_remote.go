@@ -42,179 +42,333 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
 )
 
-// jobKeyProbeScript describes one private key file ($1). Its answer is one
-// of: "PUB <type> <base64 blob>", "SPKI" then the base64 lines of a PUBLIC
-// KEY block then "END", "ENCRYPTED", "DENIED", "NOTOOL", "FAILED".
-const jobKeyProbeScript = `f=$1
-st=FAILED
-if command -v ssh-keygen >/dev/null 2>&1; then
-  if o=$(ssh-keygen -y -P '' -f "$f" </dev/null 2>/dev/null); then
-    l=$(printf '%s\n' "$o" | awk 'NR==1 && NF>=2 && $2 ~ /^[A-Za-z0-9+\/]+=*$/ {print "PUB " $1 " " $2}')
-    if [ -n "$l" ]; then printf '%s\n' "$l"; exit 0; fi
-  fi
-  e=$(ssh-keygen -y -P '' -f "$f" </dev/null 2>&1 >/dev/null)
-  case $e in
-    *passphrase*) echo ENCRYPTED; exit 0;;
-    *ermission\ denied*) st=DENIED;;
+// The key probe decides from the file's own public markers first, on the
+// host, from its first 4 KiB, before any tool runs: an OpenSSH key's cipher
+// name (in clear in its header), a PEM "ENCRYPTED PRIVATE KEY" label, or a
+// "Proc-Type: 4,ENCRYPTED" header. An encrypted PEM key is reported
+// encrypted and no tool is run on it, because a tool asked to read it could
+// wait on a passphrase. Then, for an OpenSSH key (encrypted or not, whoever
+// can read it) and an unencrypted PEM key, `ssh-keygen -e`, which prints the
+// public key only (RFC 4716) and, for an OpenSSH key, reads only the clear
+// public half; for a PEM key it cannot read (one others may read: ssh-keygen
+// then refuses it; an Ed25519 PKCS#8), `openssl pkey -pubout`. Every tool
+// run is bounded to 3 seconds where the host has `timeout` (Linux; not
+// stock macOS, where the tools are only ever run on files that cannot make
+// them wait), and on Windows always.
+//
+// One host program probes a batch of files; its answer, per file, is
+// "=== <index>" then any of: "ENC 0|1" (the OpenSSH cipher says), "B <base64
+// line>"... "BLOBEND" (the RFC 4716 public key), "SPKI" <base64 lines> "END"
+// (openssl's PUBLIC KEY block), or one of "ENCRYPTED", "DENIED", "NOTOOL",
+// "FAILED", "NOTKEY", "TIMEUP".
+
+// jobKeyProbeScript probes every path in its arguments.
+const jobKeyProbeScript = `tmo() { if command -v timeout >/dev/null 2>&1; then timeout 3 "$@"; else "$@"; fi; }
+b64d() { base64 -d 2>/dev/null || base64 -D 2>/dev/null; }
+skg=0; command -v ssh-keygen >/dev/null 2>&1 && skg=1
+osl=0; command -v openssl >/dev/null 2>&1 && osl=1
+rfc() { tmo ssh-keygen -e -f "$1" </dev/null 2>/dev/null | awk '/^---- BEGIN SSH2 PUBLIC KEY ----$/ {p=1; next} /^---- END SSH2 PUBLIC KEY ----$/ {if (p) print "BLOBEND"; exit} p && /^[A-Za-z0-9+\/=]+$/ {print "B " $0}'; }
+spki() { tmo openssl pkey -in "$1" -pubout -passin pass: </dev/null 2>/dev/null | awk '/^-----BEGIN PUBLIC KEY-----$/ {p=1; print "SPKI"; next} p && /^-----END PUBLIC KEY-----$/ {print "END"; exit} p && /^[A-Za-z0-9+\/=]+$/ {print}'; }
+n=0
+for f in "$@"; do
+  echo "=== $n"
+  n=$((n+1))
+  if [ ! -r "$f" ]; then echo DENIED; continue; fi
+  h=$(head -c 4096 "$f" 2>/dev/null | tr -d '\r')
+  case $h in
+    *"-----BEGIN OPENSSH PRIVATE KEY-----"*)
+      c=$(printf '%s\n' "$h" | sed -n '/^-----BEGIN OPENSSH PRIVATE KEY-----$/{n;p;q;}' | cut -c1-44 | b64d | tr -c 'a-z0-9-' ' ')
+      case $c in
+        *none*) echo "ENC 0";;
+        *aes*|*chacha*|*3des*|*blowfish*|*cbc*|*ctr*) echo "ENC 1";;
+      esac
+      if [ $skg = 1 ]; then o=$(rfc "$f"); else o=; fi
+      if [ -n "$o" ]; then printf '%s\n' "$o"; elif [ $skg = 1 ]; then echo FAILED; else echo NOTOOL; fi
+      ;;
+    *"-----BEGIN ENCRYPTED PRIVATE KEY-----"*|*"Proc-Type: 4,ENCRYPTED"*) echo ENCRYPTED;;
+    *"PRIVATE KEY-----"*)
+      o=
+      [ $skg = 1 ] && o=$(rfc "$f")
+      [ -z "$o" ] && [ $osl = 1 ] && o=$(spki "$f")
+      if [ -n "$o" ]; then printf '%s\n' "$o"; elif [ $skg = 1 ] || [ $osl = 1 ]; then echo FAILED; else echo NOTOOL; fi
+      ;;
+    *) echo NOTKEY;;
   esac
-else
-  st=NOTOOL
-fi
-if command -v openssl >/dev/null 2>&1; then
-  s=$(openssl pkey -in "$f" -pubout -passin pass: </dev/null 2>/dev/null | awk '/^-----BEGIN PUBLIC KEY-----$/ {p=1; print "SPKI"; next} p && /^-----END PUBLIC KEY-----$/ {print "END"; exit} p && /^[A-Za-z0-9+\/=]+$/ {print}')
-  if [ -n "$s" ]; then printf '%s\n' "$s"; exit 0; fi
-  e=$(openssl pkey -in "$f" -pubout -passin pass: </dev/null 2>&1 >/dev/null)
-  case $e in
-    *"bad decrypt"*|*"bad password"*|*"maybe wrong password"*) echo ENCRYPTED; exit 0;;
-    *ermission\ denied*) st=DENIED;;
-  esac
-  [ "$st" = NOTOOL ] && st=FAILED
-fi
-echo "$st"
+done
 `
 
-// jobKeyProbeArgv runs jobKeyProbeScript on path, the path a positional
+// jobKeyProbeArgv runs jobKeyProbeScript on paths, each a positional
 // argument and never script text.
-func jobKeyProbeArgv(path string) []string {
-	return []string{"env", "LC_ALL=C", "sh", "-c", jobKeyProbeScript, "sh", path}
+func jobKeyProbeArgv(paths []string) []string {
+	return append([]string{"env", "LC_ALL=C", "sh", "-c", jobKeyProbeScript, "sh"}, paths...)
 }
 
 // jobWinKeyProbe is the Windows key probe: ssh-keygen.exe from the
 // system's OpenSSH, started directly (no shell), standard input closed,
-// -P "" so it cannot prompt. It answers the same vocabulary, as JSON.
+// each run bounded to 3 seconds and the batch to 25, with the same
+// marker-first rule. It answers the same vocabulary, as JSON lines.
 var jobWinKeyProbe = psPrelude + `$kpExe = [System.IO.Path]::Combine([Environment]::GetFolderPath('System'), 'OpenSSH', 'ssh-keygen.exe')
-$kpPath = [string]$a.Path
-if ($kpPath.StartsWith('\\?\')) { $kpPath = $kpPath.Substring(4) }
-if (-not [System.IO.File]::Exists($kpExe)) { psOut ([pscustomobject]@{ T = 'NOTOOL' }); exit 0 }
-if ($kpPath.Contains('"')) { psOut ([pscustomobject]@{ T = 'FAILED' }); exit 0 }
-$kpPsi = New-Object System.Diagnostics.ProcessStartInfo
-$kpPsi.FileName = $kpExe
-$kpPsi.Arguments = '-y -P "" -f "' + $kpPath + '"'
-$kpPsi.UseShellExecute = $false
-$kpPsi.RedirectStandardOutput = $true
-$kpPsi.RedirectStandardError = $true
-$kpPsi.RedirectStandardInput = $true
-$kpPsi.CreateNoWindow = $true
-$kpP = [System.Diagnostics.Process]::Start($kpPsi)
-$kpP.StandardInput.Close()
-if (-not $kpP.WaitForExit(20000)) { try { $kpP.Kill() } catch { }; psOut ([pscustomobject]@{ T = 'FAILED' }); exit 0 }
-$kpO = $kpP.StandardOutput.ReadToEnd()
-$kpE = $kpP.StandardError.ReadToEnd()
-if ($kpP.ExitCode -eq 0) {
-  $kpF = (($kpO -split [string][char]10)[0]).Trim() -split ' '
-  if ($kpF.Count -ge 2 -and $kpF[1] -match '^[A-Za-z0-9+/]+=*$') { psOut ([pscustomobject]@{ T = 'PUB'; L = ($kpF[0] + ' ' + $kpF[1]) }); exit 0 }
-  psOut ([pscustomobject]@{ T = 'FAILED' }); exit 0
+$kpHave = [System.IO.File]::Exists($kpExe)
+$kpOut = New-Object 'System.Collections.Generic.List[string]'
+function kpRun([string]$kpArgs) {
+  $kpPsi = New-Object System.Diagnostics.ProcessStartInfo
+  $kpPsi.FileName = $kpExe
+  $kpPsi.Arguments = $kpArgs
+  $kpPsi.UseShellExecute = $false
+  $kpPsi.RedirectStandardOutput = $true
+  $kpPsi.RedirectStandardError = $true
+  $kpPsi.RedirectStandardInput = $true
+  $kpPsi.CreateNoWindow = $true
+  $kpP = [System.Diagnostics.Process]::Start($kpPsi)
+  $kpP.StandardInput.Close()
+  $kpTask = $kpP.StandardOutput.ReadToEndAsync()
+  if (-not $kpP.WaitForExit(3000)) { try { $kpP.Kill() } catch { }; return $null }
+  return $kpTask.Result
 }
-if ($kpE -match 'passphrase') { psOut ([pscustomobject]@{ T = 'ENCRYPTED' }); exit 0 }
-if ($kpE -match 'ermission denied|ccess is denied') { psOut ([pscustomobject]@{ T = 'DENIED' }); exit 0 }
-psOut ([pscustomobject]@{ T = 'FAILED' })
+function kpRfc([string]$kpPath) {
+  $kpO = kpRun ('-e -f "' + $kpPath + '"')
+  if ($null -eq $kpO) { return $false }
+  $kpIn = $false; $kpAny = $false
+  foreach ($kpL in ($kpO -split [string][char]10)) {
+    $kpL = $kpL.TrimEnd([char]13)
+    if ($kpL -ceq '---- BEGIN SSH2 PUBLIC KEY ----') { $kpIn = $true; continue }
+    if ($kpL -ceq '---- END SSH2 PUBLIC KEY ----') { if ($kpIn -and $kpAny) { $kpOut.Add('BLOBEND') }; return $kpAny }
+    if ($kpIn -and $kpL -match '^[A-Za-z0-9+/=]+$') { $kpOut.Add('B ' + $kpL); $kpAny = $true }
+  }
+  return $false
+}
+$kpN = 0
+foreach ($kpRaw in $a.Paths) {
+  $kpOut.Add('=== ' + $kpN); $kpN++
+  if ($vSw.Elapsed.TotalSeconds -gt 25) { $kpOut.Add('TIMEUP'); continue }
+  $kpPath = [string]$kpRaw
+  if ($kpPath.StartsWith('\\?\')) { $kpPath = $kpPath.Substring(4) }
+  if ($kpPath.Contains('"')) { $kpOut.Add('FAILED'); continue }
+  try {
+    $kpFs = [System.IO.File]::Open($kpPath, 'Open', 'Read', 'ReadWrite')
+    $kpBuf = New-Object byte[] 4096
+    $kpLen = $kpFs.Read($kpBuf, 0, 4096)
+    $kpFs.Close()
+  } catch { $kpOut.Add('DENIED'); continue }
+  $kpH = $vL1.GetString($kpBuf, 0, $kpLen).Replace($vCR, '')
+  if ($kpH.Contains('-----BEGIN OPENSSH PRIVATE KEY-----')) {
+    $kpLines = $kpH -split [string][char]10
+    $kpI = [Array]::IndexOf($kpLines, '-----BEGIN OPENSSH PRIVATE KEY-----')
+    if ($kpI -ge 0 -and $kpI + 1 -lt $kpLines.Count) {
+      $kpB = $kpLines[$kpI + 1]
+      if ($kpB.Length -ge 44) { $kpB = $kpB.Substring(0, 44) }
+      try { $kpC = $vL1.GetString([Convert]::FromBase64String($kpB)) } catch { $kpC = '' }
+      if ($kpC.Contains('none')) { $kpOut.Add('ENC 0') } elseif ($kpC -match 'aes|chacha|3des|blowfish|cbc|ctr') { $kpOut.Add('ENC 1') }
+    }
+    if (-not $kpHave) { $kpOut.Add('NOTOOL') } elseif (-not (kpRfc $kpPath)) { $kpOut.Add('FAILED') }
+  } elseif ($kpH.Contains('-----BEGIN ENCRYPTED PRIVATE KEY-----') -or $kpH.Contains('Proc-Type: 4,ENCRYPTED')) {
+    $kpOut.Add('ENCRYPTED')
+  } elseif ($kpH.Contains('PRIVATE KEY-----')) {
+    if (-not $kpHave) { $kpOut.Add('NOTOOL') } elseif (-not (kpRfc $kpPath)) { $kpOut.Add('FAILED') }
+  } else { $kpOut.Add('NOTKEY') }
+}
+psOut ([pscustomobject]@{ L = $kpOut.ToArray() })
 `
 
-// jobProbeRemoteKey is locRemoteKeyProbe.
-func jobProbeRemoteKey(ctx context.Context, t Target, path string, _ Identity, base PrivateKey) (PrivateKey, bool) {
-	switch tt := t.(type) {
-	case *RemoteUnixTarget:
-		out, _, exit, err := tt.Run(ctx, jobKeyProbeArgv(path))
-		if err != nil || exit != 0 {
-			return base, false
+// jobProbeBatch bounds one host program's paths: the argument list stays far
+// below any command-line limit, and one slow host program costs one batch.
+const jobProbeBatch = 48
+
+// jobKeyProbeMany probes paths on a remote target and returns each path's
+// answer. Paths the host did not answer for are missing from the map.
+func jobKeyProbeMany(ctx context.Context, t Target, paths []string) map[string][]byte {
+	out := map[string][]byte{}
+	for len(paths) > 0 {
+		n := min(len(paths), jobProbeBatch)
+		chunk := paths[:n]
+		paths = paths[n:]
+		var raw []byte
+		switch tt := t.(type) {
+		case *RemoteUnixTarget:
+			o, _, exit, err := tt.Run(ctx, jobKeyProbeArgv(chunk))
+			if err != nil || exit != 0 {
+				continue
+			}
+			raw = o
+		case *RemoteWindowsTarget:
+			b, err := tt.psJSON(ctx, jobWinKeyProbe, struct {
+				Paths []string `json:"Paths"`
+			}{chunk})
+			if err != nil {
+				continue
+			}
+			var r struct{ L []string }
+			if json.Unmarshal(b, &r) != nil {
+				continue
+			}
+			raw = []byte(strings.Join(r.L, "\n") + "\n")
+		default:
+			return out
 		}
-		return jobParseKeyProbe(out, base), true
-	case *RemoteWindowsTarget:
-		b, err := tt.psJSON(ctx, jobWinKeyProbe, psPathArgs{Path: path})
-		if err != nil {
-			return base, false
+		for i, ans := range jobSplitProbeAnswers(raw, len(chunk)) {
+			if ans != nil {
+				out[chunk[i]] = ans
+			}
 		}
-		var r struct{ T, L string }
-		if json.Unmarshal(b, &r) != nil {
-			return base, false
-		}
-		line := r.T
-		if r.T == "PUB" {
-			line += " " + r.L
-		}
-		return jobParseKeyProbe([]byte(line+"\n"), base), true
 	}
-	return base, false
+	return out
+}
+
+// jobSplitProbeAnswers splits a batch answer at its "=== <index>" lines.
+func jobSplitProbeAnswers(raw []byte, n int) [][]byte {
+	out := make([][]byte, n)
+	cur := -1
+	for _, l := range strings.Split(string(raw), "\n") {
+		if idx, ok := strings.CutPrefix(l, "=== "); ok {
+			i, err := strconv.Atoi(strings.TrimSpace(idx))
+			if err != nil || i < 0 || i >= n {
+				cur = -1
+				continue
+			}
+			cur = i
+			out[i] = []byte{}
+			continue
+		}
+		if cur >= 0 && len(out[cur]) < 64<<10 {
+			out[cur] = append(append(out[cur], l...), '\n')
+		}
+	}
+	return out
+}
+
+// jobPrefetchKeyProbes probes, in batches, the paths a pass is about to
+// visit, so that each key costs a share of one host program rather than a
+// program of its own. Paths already probed are not asked again.
+func (c *collection) jobPrefetchKeyProbes(ctx context.Context, paths []string) {
+	if c.target.Local() || locRemoteKeyProbe == nil {
+		return
+	}
+	var want []string
+	c.mu.Lock()
+	for _, p := range paths {
+		if _, done := c.jobKeyProbes[p]; !done {
+			want = append(want, p)
+		}
+	}
+	c.mu.Unlock()
+	if len(want) == 0 {
+		return
+	}
+	got := jobKeyProbeMany(ctx, c.target, want)
+	c.mu.Lock()
+	if c.jobKeyProbes == nil {
+		c.jobKeyProbes = map[string][]byte{}
+	}
+	for p, a := range got {
+		c.jobKeyProbes[p] = a
+	}
+	c.mu.Unlock()
+}
+
+// jobProbeRemoteKey is locRemoteKeyProbe: the prefetched answer, else a
+// probe of this one file.
+func jobProbeRemoteKey(ctx context.Context, c *collection, path string, _ Identity, base PrivateKey) (PrivateKey, bool) {
+	c.mu.Lock()
+	ans, ok := c.jobKeyProbes[path]
+	c.mu.Unlock()
+	if !ok {
+		got := jobKeyProbeMany(ctx, c.target, []string{path})
+		if ans, ok = got[path]; !ok {
+			return base, false
+		}
+	}
+	return jobParseKeyProbe(ans, base), true
 }
 
 // jobMaxProbeBlob bounds a public key blob or SPKI from a probe: larger than
 // any public key (an RSA-16384 SPKI is about 2 KiB).
 const jobMaxProbeBlob = 16 << 10
 
-// jobParseKeyProbe completes base from a key probe's answer. It keeps only
-// what it derives from a public key it could parse (algorithm, size, curve,
-// the SubjectPublicKeyInfo hash, the SSH fingerprint); the line or block
-// itself is not kept, and an answer it cannot parse is "could not read".
+// jobParseKeyProbe completes base from one file's probe answer. It keeps
+// only what it derives from a public key it could parse (algorithm, size,
+// curve, the SubjectPublicKeyInfo hash, the SSH fingerprint) and whether the
+// key is encrypted; the key's encoding itself is not kept, and an answer it
+// cannot parse is "could not read".
 func jobParseKeyProbe(out []byte, base PrivateKey) PrivateKey {
 	k := base
-	failed := func(why string) PrivateKey {
-		k.Unknown = why
-		return k
-	}
-	const cannot = "remote: ssh-keygen and openssl on the host could not read the key; size and public key not read"
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(make([]byte, 0, 4096), 64<<10)
-	if !sc.Scan() {
-		return failed(cannot)
-	}
-	first := strings.Fields(sc.Text())
-	if len(first) == 0 {
-		return failed(cannot)
-	}
-	no := false
-	switch first[0] {
-	case "PUB":
-		if len(first) != 3 || len(first[2]) > jobMaxProbeBlob {
-			return failed(cannot)
-		}
-		blob, err := base64.StdEncoding.DecodeString(first[2])
-		if err != nil {
-			return failed(cannot)
-		}
-		d, ok := keyDescribeSSHBlob(blob)
-		if !ok || d.typ != first[1] {
-			return failed(cannot)
-		}
-		k.Algorithm, k.SizeBits, k.Curve = d.algorithm, d.size, d.curve
-		k.PublicKeySHA256, k.SSHFingerprint = d.spkiSHA256, d.fingerprint
-		k.Encrypted, k.Unknown = &no, d.unknown
-		return k
-	case "SPKI":
-		var b64 strings.Builder
-		ended := false
-		for sc.Scan() {
-			l := strings.TrimSpace(sc.Text())
+	yes, no := true, false
+	const cannot = "remote: the host's ssh-keygen and openssl cannot read this key; size and public key not read"
+	var blob, spki strings.Builder
+	inSPKI, blobEnd, spkiEnd := false, false, false
+	enc := ""
+	verdict := ""
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case inSPKI:
 			if l == "END" {
-				ended = true
-				break
+				inSPKI, spkiEnd = false, true
+			} else if spki.Len()+len(l) <= jobMaxProbeBlob {
+				spki.WriteString(l)
 			}
-			if b64.Len()+len(l) > jobMaxProbeBlob {
-				return failed(cannot)
+		case l == "SPKI":
+			inSPKI = true
+		case strings.HasPrefix(l, "B "):
+			if blob.Len()+len(l) <= jobMaxProbeBlob {
+				blob.WriteString(l[2:])
 			}
-			b64.WriteString(l)
+		case l == "BLOBEND":
+			blobEnd = true
+		case l == "ENC 0" || l == "ENC 1":
+			enc = l[4:]
+		case l == "ENCRYPTED", l == "DENIED", l == "NOTOOL", l == "FAILED", l == "NOTKEY", l == "TIMEUP":
+			verdict = l
 		}
-		der, err := base64.StdEncoding.DecodeString(b64.String())
-		if !ended || err != nil {
-			return failed(cannot)
+	}
+	switch enc {
+	case "0":
+		k.Encrypted = &no
+	case "1":
+		k.Encrypted = &yes
+	}
+	described := false
+	if blobEnd {
+		if b, err := base64.StdEncoding.DecodeString(blob.String()); err == nil {
+			if d, ok := keyDescribeSSHBlob(b); ok {
+				k.Algorithm, k.SizeBits, k.Curve = d.algorithm, d.size, d.curve
+				k.PublicKeySHA256, k.SSHFingerprint, k.Unknown = d.spkiSHA256, d.fingerprint, d.unknown
+				described = true
+			}
 		}
-		info, ok := keySPKIInfo(der)
-		if !ok || info.Algorithm == "" {
-			return failed(cannot)
+	}
+	if !described && spkiEnd {
+		if der, err := base64.StdEncoding.DecodeString(spki.String()); err == nil {
+			if info, ok := keySPKIInfo(der); ok && info.Algorithm != "" {
+				k.Algorithm, k.SizeBits, k.Curve, k.PublicKeySHA256 = info.Algorithm, info.SizeBits, info.Curve, info.PublicKeySHA256
+				k.Unknown = ""
+				described = true
+			}
 		}
-		k.Algorithm, k.SizeBits, k.Curve, k.PublicKeySHA256 = info.Algorithm, info.SizeBits, info.Curve, info.PublicKeySHA256
-		k.Encrypted, k.Unknown = &no, ""
+	}
+	if described {
+		if k.Encrypted == nil && k.Format != KeyFormatOpenSSH {
+			// A PEM key is only ever probed when its markers say it is not
+			// encrypted.
+			k.Encrypted = &no
+		}
 		return k
+	}
+	switch verdict {
 	case "ENCRYPTED":
-		yes := true
 		k.Encrypted = &yes
 		k.Unknown = "remote: encrypted; size and public key are not read without the passphrase"
-		return k
 	case "DENIED":
-		return failed("remote: the account may not read the key file; size and public key not read")
+		k.Unknown = "remote: the account may not read the key file; size and public key not read"
 	case "NOTOOL":
-		return failed("remote: neither ssh-keygen nor openssl is installed on the host; size and public key not read")
+		k.Unknown = "remote: no ssh-keygen or openssl on the host; size and public key not read"
+	case "TIMEUP":
+		k.Unknown = "remote: not probed: the host program's time bound ran out"
+	case "NOTKEY":
+		k.Unknown = "remote: the file's first bytes are not a key this probe reads"
+	default:
+		k.Unknown = cannot
 	}
-	return failed(cannot)
+	return k
 }
 
 // jobKeystoreProbeScript lists one keystore ($1, of type $2). With $3 = 1
@@ -358,6 +512,7 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 	var opened string
 	unverified := false
 	count := -1
+	pendingName := ""
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	sc.Buffer(make([]byte, 0, 4096), 64<<10)
 	tag := func(s, p string) (string, bool) {
@@ -384,7 +539,17 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 		case "V 1":
 			unverified = true
 		case "CERT":
-			// A certificate the listing printed: already counted by its bag.
+			// A certificate the listing printed: its bag is counted already,
+			// and the attributes printed just before it are its own (openssl
+			// prints them with the certificate, after the key bags), so the
+			// friendly name goes to the first certificate still unnamed.
+			for i := range ks.Entries {
+				if ks.Entries[i].Kind == "certificate" && ks.Entries[i].Alias == "" {
+					ks.Entries[i].Alias = pendingName
+					break
+				}
+			}
+			pendingName = ""
 		default:
 			if v, ok := tag(l, "I "); ok {
 				switch {
@@ -406,9 +571,7 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 					protection = jobAppendOnce(protection, "certificates "+strings.TrimPrefix(v, "PKCS7 Encrypted data: "))
 				}
 			} else if v, ok := tag(l, "N "); ok {
-				if n := len(ks.Entries); n > 0 && ks.Entries[n-1].Alias == "" {
-					ks.Entries[n-1].Alias = jobProbeName(v)
-				}
+				pendingName = jobProbeName(v)
 			} else if v, ok := tag(l, "C "); ok {
 				if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 					count = n
@@ -496,7 +659,7 @@ func jobAppendOnce(list []string, s string) []string {
 // jobProbeCommands are the probes' command texts, for the guard tests.
 func jobProbeCommands() map[string]string {
 	return map[string]string{
-		"key-probe":      strings.Join(jobKeyProbeArgv("PATH"), " "),
+		"key-probe":      strings.Join(jobKeyProbeArgv([]string{"PATH"}), " "),
 		"keystore-probe": strings.Join(jobKeystoreProbeArgv("PATH", "TYPE", true), " "),
 		"win-key-probe":  jobWinKeyProbe,
 	}
@@ -509,7 +672,7 @@ func jobProbeCommands() map[string]string {
 // password in arguments; ssh-keygen's key conversions; klist's -K.
 var jobProbeForbiddenWords = []string{
 	" -text", "-nodes", "-nocerts", "-passout", " -out ", "-outform", "-traditional", "pkcs8",
-	"-list -v", "-v -list", " -rfc", "-storepass", "-keypass", "-exportcert", " -e ", " -K", "-dump", "pass:changeit",
+	"-list -v", "-v -list", " -rfc", "-storepass", "-keypass", "-exportcert", " -K", "-dump", "pass:changeit", " -y ",
 }
 
 // jobProbeForbidden returns the first forbidden word in s, or "".

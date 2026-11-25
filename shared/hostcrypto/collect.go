@@ -370,6 +370,10 @@ type collection struct {
 	// followed. Created by the first of them; nil until then.
 	loc *locState
 
+	// jobKeyProbes are the remote key probes' answers, by path
+	// (probe_remote.go), filled in batches before a pass visits the files.
+	jobKeyProbes map[string][]byte
+
 	// runCtx is the run's context, and callerBound the caller's deadline
 	// when it is earlier than MaxDuration (0 otherwise): what a limit names.
 	runCtx         context.Context
