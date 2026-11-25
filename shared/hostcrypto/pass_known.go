@@ -300,15 +300,16 @@ func (st *locState) count(section string, ok bool) {
 	}
 }
 
-// remoteNote records, once per run, a sentence about what remote mode leaves
-// out, so a reader sees why a field is empty.
+// locRemoteNote records, once per run, a sentence about what remote mode
+// leaves out, so a reader sees why a field is empty, and marks the section
+// partial: the answer is not the whole one.
 func (c *collection) locRemoteNote(section, msg string) {
 	st := c.locSt()
 	if st.remoteNotes[section+"\x00"+msg] {
 		return
 	}
 	st.remoteNotes[section+"\x00"+msg] = true
-	c.note(section, errors.New(msg))
+	c.partial(section, errors.New(msg))
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,10 +1557,7 @@ func (c *collection) locAuthorizedKeys(ctx context.Context, f *locFile) locResul
 		}
 		// Not an error, but not the whole answer: who may log in is known,
 		// with what restrictions is not.
-		if !c.locSt().remoteNotes[SectionSSH+"\x00authorized_keys"] {
-			c.locSt().remoteNotes[SectionSSH+"\x00authorized_keys"] = true
-			c.partial(SectionSSH, errors.New("remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known"))
-		}
+		c.locRemoteNote(SectionSSH, "remote: authorized_keys options do not cross; restrictions and cert-authority markers are not known")
 	}
 	a.Keys = keys
 	if malformed > 0 {
@@ -1588,7 +1586,7 @@ func (c *collection) locKnownHosts(ctx context.Context, f *locFile) locResult {
 	}
 	if !c.target.Local() {
 		f.prod.known = append(f.prod.known, k)
-		c.partial(SectionSSH, errors.New("remote: known_hosts files are not read (their lines name other hosts); entries and hashing are not known"))
+		c.locRemoteNote(SectionSSH, "remote: known_hosts files are not read (their lines name other hosts); entries and hashing are not known")
 		return locRead
 	}
 	if !c.locReadable(f) {
