@@ -18,8 +18,9 @@ import (
 // host. A remote sweep therefore misses the key called backup.txt, which is
 // what the design says the remote sweep is: by name and size.
 //
-// This file is the engine. It returns hits; dispatching them to the parsers
-// is the next slice's.
+// sweep is the engine and returns hits; passSweep (below) dispatches each
+// through pass 1's dispatcher. A hit is charged to the file budget twice
+// (listed, then visited).
 
 // sweepMaxDepth bounds how deep the sweep descends below a root.
 const sweepMaxDepth = 32
@@ -185,4 +186,21 @@ func sweepIdentify(ctx context.Context, t Target, local bool, path string) (Iden
 		return id, false, false
 	}
 	return id, true, false
+}
+
+// passSweep is pass 4: each sweep hit is visited through pass 1's
+// dispatcher (locVisit) with FoundBy sweep, so a file the sweep finds gets
+// the same record, and meets the same remote rules, as one found anywhere
+// else; then the records go to the registry, which merges a hit some
+// earlier pass already found.
+func passSweep(ctx context.Context, c *collection) {
+	hits := sweep(ctx, c, c.opts.SweepRoots)
+	for _, h := range hits {
+		if c.timeUp(ctx, SectionSweep) {
+			break
+		}
+		info := h.Info
+		c.locVisit(ctx, locVisit{Path: info.Path, Kind: locMaterial, FoundBy: FoundBySweep, Section: SectionSweep, Info: &info})
+	}
+	c.locFlushRecords()
 }

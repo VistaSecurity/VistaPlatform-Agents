@@ -2,6 +2,7 @@ package hostcrypto
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -80,9 +81,7 @@ func platRealHost(t *testing.T, env, platform string) {
 	} else {
 		target = NewRemoteUnixTarget(r, platform)
 	}
-	saved := passes
-	passes = []pass{platPass, platRunningPass}
-	defer func() { passes = saved }()
+	// Every pass, in the collector's order.
 	rep, err := Collect(context.Background(), target, Options{Platform: platform, HomeDirectories: os.Getenv("HOSTCRYPTO_PLAT_HOME") == "1"})
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +90,7 @@ func platRealHost(t *testing.T, env, platform string) {
 	if os.Getenv("HOSTCRYPTO_PLAT_DUMP") == "1" {
 		t.Logf("%s", b)
 	}
-	for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens, SectionLibraries, SectionProcesses} {
+	for _, s := range []string{SectionDiskEncryption, SectionTPM, SectionSecureBoot, SectionTokens, SectionFIPSMode, SectionLibraries, SectionProcesses} {
 		if rep.Sections[s] == "" || rep.Sections[s] == SectionFailed {
 			t.Errorf("%s: %q", s, rep.Sections[s])
 		}
@@ -112,4 +111,89 @@ func TestPlatRealDarwinHost(t *testing.T) {
 
 func TestPlatRealWindowsHost(t *testing.T) {
 	platRealHost(t, "HOSTCRYPTO_PLAT_SSH_WINDOWS", hostinventory.PlatformWindows)
+}
+
+// TestPlatRealWindowsCommandLine starts, on the Windows host, a PowerShell
+// process of its own in a temp directory of its own: it listens on
+// 127.0.0.1 and was started with a password, a keystore path and a Java
+// keystore password on its command line. The running program then runs in
+// the same session, the process is stopped by its id and the directory is
+// deleted. Nothing that crosses may hold either password; the keystore path
+// must cross.
+func TestPlatRealWindowsCommandLine(t *testing.T) {
+	host := os.Getenv("HOSTCRYPTO_PLAT_SSH_WINDOWS")
+	if host == "" {
+		t.Skip("set HOSTCRYPTO_PLAT_SSH_WINDOWS to run against a real host")
+	}
+	full, err := psScript(platPSPrelude+platPSRunning, struct {
+		Max int `json:"Max"`
+	}{platMaxProcesses})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := `$plTd = Join-Path ([System.IO.Path]::GetTempPath()) ('vista-plat-' + [Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Path $plTd)
+$plLs = Join-Path $plTd 'listen.ps1'
+Set-Content -LiteralPath $plLs -Value '$plL = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); $plL.Start(); Start-Sleep -Seconds 90'
+$plKs = Join-Path $plTd 'store.p12'
+$plP = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $plLs, '--password=hunter2', '--keystore', $plKs, '-Djavax.net.ssl.keyStorePassword=hunter3') -PassThru -WindowStyle Hidden
+Start-Sleep -Seconds 5
+[Console]::Out.WriteLine('K:' + $plKs)
+try {
+  $plProg = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + base64.StdEncoding.EncodeToString([]byte(full)) + `'))
+  [Console]::Out.WriteLine('E:' + [string]$plP.Id)
+  $plAns = & ([scriptblock]::Create($plProg))
+  [Console]::Out.WriteLine('')
+} finally {
+  Stop-Process -Id $plP.Id -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+  Remove-Item -LiteralPath $plTd -Recurse -Force -ErrorAction SilentlyContinue
+  [Console]::Out.WriteLine('G:' + [string](Test-Path -LiteralPath $plTd))
+}
+`
+	r := platSSHExec{host: host, windows: true}
+	out, stderr, exit, err := r.RunInput(t.Context(), psStdinArgv, psStdin(runner))
+	if err != nil || exit != 0 {
+		t.Fatalf("exit %d %v: %s", exit, err, stderr)
+	}
+	ks, ans, gone := "", "", ""
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "K:"):
+			ks = line[2:]
+		case strings.HasPrefix(line, "J:"):
+			ans = line
+		case strings.HasPrefix(line, "G:"):
+			gone = line[2:]
+		}
+	}
+	if gone != "False" {
+		t.Errorf("the temp directory was not deleted: %q", gone)
+	}
+	kind, b, err := psDecode([]byte(ans))
+	if err != nil || kind != 'J' {
+		t.Fatalf("answer: %v %q", err, ans)
+	}
+	for _, blob := range []string{string(out), string(stderr), string(b)} {
+		if strings.Contains(blob, "hunter2") || strings.Contains(blob, "hunter3") {
+			t.Fatal("a password crossed the connection")
+		}
+	}
+	rr, err := platParseWindowsRunning(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range rr.procs {
+		for _, a := range p.args {
+			if strings.EqualFold(a, ks) {
+				found = true
+				t.Logf("process %s: args %v listeners %d", p.name, p.args, len(p.listeners))
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the keystore path %q did not cross: %s", ks, b)
+	}
 }

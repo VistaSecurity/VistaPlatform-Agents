@@ -45,8 +45,6 @@ import (
 // them the section says partial and how many processes it could not look
 // at.
 
-func init() { passes = append(passes, platRunningPass) }
-
 // platMaxProcesses bounds the processes pass 3 describes.
 const platMaxProcesses = 512
 
@@ -197,7 +195,7 @@ func platParseUnixRunning(b []byte) platRunning {
 				continue
 			}
 			if addr, port, ok := platProcNetAddr(f[2]); ok {
-				listen[f[1]] = Usage{Kind: "listener", Address: addr, Port: port, Transport: f[0]}
+				listen[f[1]] = platListener("", addr, port, f[0])
 			}
 		case "P":
 			pid, name, _ := strings.Cut(rest, " ")
@@ -223,7 +221,7 @@ func platParseUnixRunning(b []byte) platRunning {
 			}
 			ino := strings.TrimSpace(rest)
 			if u, ok := listen[ino]; ok {
-				u.Process = cur.name
+				u.Process, u.Product = cur.name, cur.name
 				cur.listeners = append(cur.listeners, u)
 				owned[ino] = true
 			}
@@ -236,7 +234,7 @@ func platParseUnixRunning(b []byte) platRunning {
 				continue
 			}
 			if addr, port, ok := platLsofAddr(f[1]); ok {
-				cur.listeners = append(cur.listeners, Usage{Kind: "listener", Process: cur.name, Address: addr, Port: port, Transport: f[0]})
+				cur.listeners = append(cur.listeners, platListener(cur.name, addr, port, f[0]))
 			}
 		case "M":
 			if cur != nil && platAbsPath(rest, false) {
@@ -267,6 +265,13 @@ func platParseUnixRunning(b []byte) platRunning {
 	}
 	// On macOS the listeners are named directly (N), so none is unowned.
 	return r
+}
+
+// platListener is a "listener" usage: the process, and its socket. Product
+// is the process (what uses the item) and Context the port it listens on,
+// as a configuration usage names its product and server block.
+func platListener(process, addr string, port int, transport string) Usage {
+	return Usage{Kind: "listener", Process: process, Product: process, Address: addr, Port: port, Transport: transport, Context: strconv.Itoa(port)}
 }
 
 // platProcName keeps a process name: printable, one line, short.
@@ -475,7 +480,7 @@ func platParseWindowsRunning(b []byte) (platRunning, error) {
 			}
 			continue
 		}
-		p.listeners = append(p.listeners, Usage{Kind: "listener", Process: p.name, Address: addr, Port: l.Port, Transport: l.Proto})
+		p.listeners = append(p.listeners, platListener(p.name, addr, l.Port, l.Proto))
 	}
 	return r, nil
 }
@@ -551,7 +556,7 @@ func platApplyRunning(ctx context.Context, c *collection, r platRunning, windows
 		if p.name == "" {
 			continue
 		}
-		usages := append([]Usage{{Kind: "process", Process: p.name}}, p.listeners...)
+		usages := append([]Usage{{Kind: "process", Process: p.name, Product: p.name}}, p.listeners...)
 		for _, f := range append(append([]string(nil), p.files...), p.args...) {
 			u, ok := paths[f]
 			if !ok {
@@ -582,6 +587,7 @@ func platApplyRunning(ctx context.Context, c *collection, r platRunning, windows
 		}
 		platVisitPath(ctx, c, f, platDedupeUsage(paths[f].usages), windows)
 	}
+	c.locFlushRecords()
 }
 
 func platDedupeUsage(in []Usage) []Usage {
@@ -675,130 +681,14 @@ func (r *registry) platAttach(p string, usages []Usage, windows bool) bool {
 	return hit
 }
 
-// platLocation is a file's Location as pass 3 found it.
-func platLocation(fi FileInfo, usages []Usage) Location {
-	l := Location{
-		Path: fi.Path, Owner: fi.Owner, Group: fi.Group,
-		WorldReadable: fi.WorldReadable, GroupReadable: fi.GroupReadable,
-		SizeBytes: fi.Size, ModifiedAt: fi.ModifiedAt,
-		FoundBy: FoundByProcess, UsedBy: usages,
-	}
-	if fi.Mode != 0 {
-		l.Mode = fmt.Sprintf("%04o", fi.Mode&0o7777)
-	}
-	return l
-}
-
-// platVisitPath records what a running process holds or names. An item the
-// other passes already found gets the usages; a new path is identified and
-// recorded:
-//
-//   - certificates: read (a remote target returns certificates only) and
-//     parsed;
-//   - a private key: parsed in memory on a LOCAL target; on a remote one
-//     it is not read at all and is recorded from its PEM label, with the
-//     reason;
-//   - a keystore: its type, not opened.
-//
-// This is a narrow dispatcher of pass 3's own; the full one is pass 1's.
+// platVisitPath records what a running process holds or names. An item an
+// earlier pass already registered gets the usages; a new path is visited
+// through pass 1's dispatcher (locVisit) with FoundBy process, so it gets the
+// same record, and meets the same remote rules (a private key file is never
+// read remotely), as a file found in a known location.
 func platVisitPath(ctx context.Context, c *collection, p string, usages []Usage, windows bool) {
 	if c.registry.platAttach(p, usages, windows) {
 		return
 	}
-	fi, err := c.target.Stat(ctx, p)
-	if err != nil {
-		if !errors.Is(err, ErrNotExist) {
-			c.note(SectionProcesses, fmt.Errorf("%s: %w", p, err))
-		}
-		return
-	}
-	if fi.IsDir || c.files(SectionProcesses, 1) == 0 {
-		return
-	}
-	id, err := c.target.Identify(ctx, p)
-	if err != nil {
-		c.note(SectionProcesses, fmt.Errorf("%s: %w", p, err))
-		return
-	}
-	loc := platLocation(fi, usages)
-	local := c.target.Local()
-	switch id.Class {
-	case ClassCertificate, ClassMixed, ClassPrivateKey:
-		if id.Class != ClassCertificate && !local {
-			c.registry.addPrivateKey(platRemoteKey(loc, id))
-			return
-		}
-		b, err := c.target.ReadFile(ctx, p)
-		if err != nil {
-			c.note(SectionProcesses, fmt.Errorf("%s: %w", p, err))
-			return
-		}
-		platRecordFile(c, loc, id, b, local)
-	case ClassKeystore:
-		c.registry.addKeystore(Keystore{Location: loc, Type: id.KeystoreType, Opened: OpenedNot})
-	}
-}
-
-// platRemoteKey describes a private key file on a remote host from its PEM
-// label alone: no byte of it is read.
-func platRemoteKey(loc Location, id Identity) PrivateKey {
-	k := PrivateKey{Location: loc, Protection: KeyProtectionFile, Unknown: "remote: the key file was not read"}
-	for _, l := range id.PEMLabels {
-		switch l {
-		case "ENCRYPTED PRIVATE KEY":
-			k.Format, k.Encrypted = KeyFormatPKCS8, platBoolPtr(true)
-		case "PRIVATE KEY":
-			k.Format = KeyFormatPKCS8
-		case "RSA PRIVATE KEY":
-			k.Format, k.Algorithm = KeyFormatPKCS1, "RSA"
-		case "EC PRIVATE KEY":
-			k.Format, k.Algorithm = KeyFormatSEC1, "ECDSA"
-		case "DSA PRIVATE KEY":
-			k.Format, k.Algorithm = KeyFormatDSA, "DSA"
-		case "OPENSSH PRIVATE KEY":
-			k.Format = KeyFormatOpenSSH
-		default:
-			continue
-		}
-		break
-	}
-	if k.Format == "" {
-		k.Format = KeyFormatPKCS8
-	}
-	return k
-}
-
-// platRecordFile parses a certificate or (local only) key file's bytes and
-// records what it holds. The bytes are not kept.
-func platRecordFile(c *collection, loc Location, id Identity, b []byte, local bool) {
-	if len(id.PEMLabels) == 0 {
-		if cert, err := ParseCertificateDER(b); err == nil {
-			cert.Location = loc
-			c.registry.addCertificate(cert)
-		} else if local {
-			if k, ok := ParsePrivateKeyDER(b); ok {
-				k.Location = loc
-				if k.Protection == "" {
-					k.Protection = KeyProtectionFile
-				}
-				c.registry.addPrivateKey(k)
-			}
-		}
-		return
-	}
-	pc := ParsePEMFile(b, PEMLimits{})
-	for _, cert := range pc.Certificates {
-		cert.Location = loc
-		c.registry.addCertificate(cert)
-	}
-	if !local {
-		return
-	}
-	for _, k := range pc.PrivateKeys {
-		k.Location = loc
-		if k.Protection == "" {
-			k.Protection = KeyProtectionFile
-		}
-		c.registry.addPrivateKey(k)
-	}
+	c.locVisit(ctx, locVisit{Path: p, Kind: locMaterial, FoundBy: FoundByProcess, UsedBy: usages, Section: SectionProcesses})
 }

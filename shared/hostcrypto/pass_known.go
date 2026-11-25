@@ -559,12 +559,6 @@ func (c *collection) locFollow(ctx context.Context, p string, fi FileInfo) (File
 // Pass 1
 // ---------------------------------------------------------------------------
 
-func init() {
-	// Both passes register here, in order, so their order does not depend on
-	// the order Go runs the init functions of pass_config.go and this file.
-	passes = append(passes, passKnownLocations, passFollowConfiguration)
-}
-
 // passKnownLocations is pass 1.
 func passKnownLocations(ctx context.Context, c *collection) {
 	st := c.locSt()
@@ -1369,11 +1363,9 @@ func (c *collection) locKnownHosts(ctx context.Context, f *locFile) locResult {
 // Flush and outcomes
 // ---------------------------------------------------------------------------
 
-// locFlush hands every record of passes 1 and 2 to the registry and decides
-// their sections' outcomes. A section ends failed when it could look at
-// nothing it tried, partial when something was recorded as missing from it,
-// and ok otherwise.
-func (c *collection) locFlush() {
+// locFlushRecords hands every visited file's records to the registry and
+// forgets them. Pass 3 and the sweep call it after their own visits.
+func (c *collection) locFlushRecords() {
 	st := c.locSt()
 	for _, real := range st.order {
 		p := st.visited[real]
@@ -1394,6 +1386,15 @@ func (c *collection) locFlush() {
 		}
 	}
 	st.visited, st.order = map[string]*locProduced{}, nil
+}
+
+// locFlush hands every record of passes 1 and 2 to the registry and decides
+// their sections' outcomes. A section ends failed when it could look at
+// nothing it tried, partial when something was recorded as missing from it,
+// and ok otherwise.
+func (c *collection) locFlush() {
+	st := c.locSt()
+	c.locFlushRecords()
 
 	secs := make([]string, 0, len(st.unidentified))
 	for s := range st.unidentified {

@@ -51,7 +51,7 @@ func TestPlatParseUnixRunning(t *testing.T) {
 		t.Fatalf("procs: %d", len(r.procs))
 	}
 	p := r.procs[0]
-	if p.name != "nginx" || len(p.listeners) != 2 || p.listeners[0] != (Usage{Kind: "listener", Process: "nginx", Address: "127.0.0.1", Port: 8080, Transport: "tcp"}) ||
+	if p.name != "nginx" || len(p.listeners) != 2 || p.listeners[0] != (Usage{Kind: "listener", Process: "nginx", Product: "nginx", Context: "8080", Address: "127.0.0.1", Port: 8080, Transport: "tcp"}) ||
 		p.listeners[1].Address != "::1" || p.listeners[1].Port != 443 {
 		t.Fatalf("nginx: %+v", p)
 	}

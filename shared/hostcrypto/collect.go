@@ -349,14 +349,21 @@ func (c *collection) readConfig(ctx context.Context, path string, product string
 	return text, err
 }
 
-// pass is one of the collector's passes. Passes register in the files that
-// define them (pass_*.go, os_*.go) by appending to passes in an init, in the
-// order they must run: known locations, configuration, running system, sweep.
+// pass is one of the collector's passes.
 type pass func(ctx context.Context, c *collection)
 
-// passes is empty in this slice: the passes register in later files. A
-// collection with no passes is a valid, empty Report.
-var passes []pass
+// passes are the collector's passes, in the order they run. This list is the
+// ONE place the order is set (no pass registers itself), because it matters:
+//
+//  1. known locations (pass_known.go): each platform's table of places;
+//  2. the platform (pass_platform.go): certificate stores and keychains,
+//     disk encryption, TPM, Secure Boot, FIPS mode, tokens, libraries;
+//  3. following the configuration (pass_config.go), which also hands the
+//     files passes 1 and 2 found to the registry;
+//  4. the running system (pass_running.go), which adds its sightings to
+//     what is already registered, so it runs after the configuration;
+//  5. the sweep (pass_sweep.go), last: it only adds what nothing else found.
+var passes = []pass{passKnownLocations, platPass, passFollowConfiguration, platRunningPass, passSweep}
 
 // newReport starts a Report for opts: timestamp, mode, platform, the agent id
 // in local mode only, the scope asked for, and an empty Sections map.

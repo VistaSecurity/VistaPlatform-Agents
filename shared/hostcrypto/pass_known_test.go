@@ -177,6 +177,11 @@ func locLinuxTree(t *testing.T, local bool) *tgtFakeTarget {
 
 func locCollect(t *testing.T, tgt Target, opts Options) *Report {
 	t.Helper()
+	// Passes 1 and 2 only: the platform and running passes run commands
+	// these fakes do not script, and are tested in their own files.
+	saved := passes
+	passes = []pass{passKnownLocations, passFollowConfiguration}
+	defer func() { passes = saved }()
 	if opts.Now == nil {
 		opts.Now = tgtNow
 	}

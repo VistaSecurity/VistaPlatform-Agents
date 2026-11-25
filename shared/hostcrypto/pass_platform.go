@@ -31,8 +31,6 @@ import (
 // dump, a recovery password) are refused by platForbiddenWords, which a test
 // runs over every script and argv in these files.
 
-func init() { passes = append(passes, platPass) }
-
 // platPass runs the platform part of pass 1.
 func platPass(ctx context.Context, c *collection) {
 	switch c.opts.Platform {
