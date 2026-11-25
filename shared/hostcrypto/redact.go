@@ -7,6 +7,9 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"strings"
+
+	"golang.org/x/crypto/cryptobyte"
+	cbasn1 "golang.org/x/crypto/cryptobyte/asn1"
 )
 
 // The text rules: what a file's public content is (publicContent, the remote
@@ -429,11 +432,64 @@ func certificateDER(label string, body []string) ([]byte, bool) {
 		}
 		der = der[:n]
 	}
+	if !certEnvelope(der) {
+		return nil, false
+	}
 	c, err := x509.ParseCertificate(der)
 	if err != nil {
 		return nil, false
 	}
+	// The envelope, rebuilt from the parser's own TBS and the algorithm and
+	// signature that follow it, must be the input exactly: nothing beside
+	// the three elements, nothing hidden in a length.
+	in := cryptobyte.String(der)
+	var outer cryptobyte.String
+	var alg, sig []byte
+	if !in.ReadASN1(&outer, cbasn1.SEQUENCE) || !outer.Skip(len(c.RawTBSCertificate)) {
+		return nil, false
+	}
+	alg, sig = derNext(&outer), derNext(&outer)
+	var b cryptobyte.Builder
+	b.AddASN1(cbasn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		b.AddBytes(c.RawTBSCertificate)
+		b.AddBytes(alg)
+		b.AddBytes(sig)
+	})
+	rebuilt, err := b.Bytes()
+	if err != nil || !bytes.Equal(rebuilt, der) || !bytes.Equal(c.Raw, der) {
+		return nil, false
+	}
 	return c.Raw, true
+}
+
+// derNext reads the next whole DER element of s, or nil.
+func derNext(s *cryptobyte.String) []byte {
+	var e cryptobyte.String
+	if !s.ReadAnyASN1Element(&e, nil) {
+		return nil
+	}
+	return e
+}
+
+// certEnvelope is the strict DER envelope of a certificate, checked before
+// any parser sees it, the same on every host (vDer in the PowerShell): a
+// SEQUENCE with a definite, minimal length equal to the rest of the input,
+// holding exactly a SEQUENCE (the TBS), a SEQUENCE (the algorithm) and a BIT
+// STRING (the signature), each with a definite, minimal length, and nothing
+// after them. A fourth element, a long-form or indefinite length, or a
+// trailing byte is refused: .NET hands back its input verbatim as RawData,
+// and Go's parser takes the certificate's Raw as the outer element, so
+// either would let a key appended inside the envelope cross.
+// cryptobyte's ReadASN1 refuses any length that is not minimal DER.
+func certEnvelope(der []byte) bool {
+	in := cryptobyte.String(der)
+	var outer, tbs, alg cryptobyte.String
+	var sig cryptobyte.String
+	if !in.ReadASN1(&outer, cbasn1.SEQUENCE) || !in.Empty() {
+		return false
+	}
+	return outer.ReadASN1Element(&tbs, cbasn1.SEQUENCE) && outer.ReadASN1Element(&alg, cbasn1.SEQUENCE) &&
+		outer.ReadASN1Element(&sig, cbasn1.BIT_STRING) && outer.Empty()
 }
 
 // certificatePEM is the canonical PEM of a certificate's DER: the label
@@ -593,6 +649,14 @@ const (
 // larger than its input ("a;" becomes "a;\n").
 const maxConfigOutput = 6000000
 
+// maxPhysicalLine bounds one physical line (the bytes between two line
+// feeds, after a leading byte-order mark): a longer one makes the read
+// ErrFileTooLarge before anything is tokenised. busybox and macOS awk took
+// past the 90-second command timeout over a 5.9 MB one-line nginx file; at
+// this bound every awk answers in seconds. No parser reads a logical line
+// past 64 KiB.
+const maxPhysicalLine = 256 << 10
+
 // Bounds of the rule. A statement or continuation past them is dropped, never
 // returned in part.
 const (
@@ -721,6 +785,9 @@ func ruleLines(b []byte, split bool) ([]string, bool) {
 			seg, b = b[:i], b[i+1:]
 		} else {
 			seg, b = b, nil
+		}
+		if len(seg) > maxPhysicalLine {
+			return nil, false
 		}
 		seg = bytes.TrimSuffix(seg, []byte{'\r'})
 		if split {
@@ -860,7 +927,8 @@ func openingTag(tr string) (string, bool) {
 //  4. @statements: the text is read as statements, honouring single and
 //     double quotes (a backslash escapes the quote or a backslash inside
 //     them), a backslash outside quotes (it makes the next byte part of the
-//     word, so "\;" and "\}" end nothing, as in nginx) and "#" comments,
+//     word, so "\;" and "\}" end nothing, as in nginx), "${name}" variables
+//     (any other "${" is a "$" and a block opener) and "#" comments,
 //     as the nginx parser tokenises: a statement ends at ";", or at "{" (it
 //     opens a block), and "}" closes a block. A statement is kept iff its
 //     first word is in keep; a block opener likewise, and a dropped opener
@@ -978,6 +1046,10 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 			// starts none; it is a dropped logical line.
 			bsCont, dropCont, prevKept = false, false, false
 			haveLogical, logicalKept, contN = true, false, 0
+			if withSections && strings.HasPrefix(tr, "[") {
+				dropSection = true // an unlisted header: drop its section
+				continue
+			}
 			if tr != "" && tr[len(tr)-1] == '{' {
 				dropBrace, dropDepth = true, 1
 			} else if name, ok := openingTag(tr); ok && ks.tags {
@@ -1055,12 +1127,14 @@ func filterLines(lines []string, ks keepSet, emit func(string)) {
 }
 
 // filterStatements is the @statements mode of filterConfig (rule 4). The
-// tokens are those of the nginx parser (cfgNgxTokens): blanks (a lone "\r"
-// among them) and line ends
-// separate words; "#" at the start of a token comments to the end of the
-// line; a quote at the start of a token opens a quoted word, in which a
-// backslash before the quote or a backslash is an escape; inside a word, "{"
-// after "$" opens a "${...}" that runs to "}" or the line end.
+// tokens are those of the nginx parser (cfgNgxTokens), with nginx's escapes:
+// blanks (a lone "\r" among them) and line ends separate words; "#" at the
+// start of a token comments to the end of the line; a quote at the start of
+// a token opens a quoted word, in which a backslash before the quote or a
+// backslash is an escape; outside quotes a backslash makes the next byte
+// part of the word; inside a word, "${name}" (name [A-Za-z0-9_]+) is a
+// variable and part of the word, and any other "{" opens a block, so a ";"
+// inside "${...}" still ends its statement.
 func filterStatements(lines []string, ks keepSet, emit func(string)) {
 	text := strings.Join(lines, "\n") + "\n"
 	var buf []byte
@@ -1168,14 +1242,17 @@ func filterStatements(lines []string, ks keepSet, emit func(string)) {
 					break
 				}
 				if d == '{' {
+					// "${name}" is a variable, part of the word; any other
+					// "{" opens a block, so "${x;}" cannot hide a ";".
 					if j > i && text[j-1] == '$' {
-						for j < len(text) && text[j] != '}' && text[j] != '\n' {
-							j++
+						k := j + 1
+						for k < len(text) && (isASCIIAlnum(text[k]) || text[k] == '_') {
+							k++
 						}
-						if j < len(text) && text[j] == '}' {
-							j++
+						if k > j+1 && k < len(text) && text[k] == '}' {
+							j = k + 1
+							continue
 						}
-						continue
 					}
 					break
 				}

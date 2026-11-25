@@ -453,21 +453,13 @@ func TestRemoteParity(t *testing.T) {
 			for name, b := range r.text {
 				p := filepath.Join(dir, "text", name)
 				for kname, keep := range map[string][]string{"realistic": tgtRealisticKeep, "broad": tgtBroadKeep} {
-					want, wn, st := filterConfig(b, keep)
 					got, n, err := rt.ReadText(ctx, p, keep)
 					lgot, ln, lerr := lt.ReadText(ctx, p, keep)
-					switch st {
-					case configOK:
-						if err != nil || string(got) != string(want) || n != wn {
-							t.Errorf("%s/%s: remote differs (%v):\nremote %q (%d)\n    go %q (%d)", name, kname, err, tgtShort(got), n, tgtShort(want), wn)
-						}
-						if lerr != nil || string(lgot) != string(want) || ln != wn {
-							t.Errorf("%s/%s: local differs (%v)", name, kname, lerr)
-						}
-					default:
-						if !errors.Is(err, ErrNotPublic) || !errors.Is(lerr, ErrNotPublic) {
-							t.Errorf("%s/%s: refusal: remote %v, local %v", name, kname, err, lerr)
-						}
+					if msg := fxCheckText(b, keep, got, n, err); msg != "" {
+						t.Errorf("%s/%s: remote: %s", name, kname, msg)
+					}
+					if msg := fxCheckText(b, keep, lgot, ln, lerr); msg != "" {
+						t.Errorf("%s/%s: local: %s", name, kname, msg)
 					}
 					if kname == "realistic" {
 						if what := tgtCrossed(got, r); what != "" {

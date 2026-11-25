@@ -160,10 +160,72 @@ function redact(s,   o) {
   while (match(s, RUN)) { o = o substr(s, 1, RSTART - 1) "` + RedactedMarker + `"; s = substr(s, RSTART + RLENGTH); NRED++ }
   return o s
 }
+function b64dec(s,   n, i, c, v, acc, bits, nb, pad) {
+  split("", DB); nb = 0; acc = 0; bits = 0; pad = 0
+  n = length(s)
+  if (n % 4) return -1
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (c == "=") { pad++; continue }
+    if (pad) return -1
+    v = index(B64, c) - 1
+    if (v < 0) return -1
+    acc = acc * 64 + v; bits += 6
+    if (bits >= 8) { bits -= 8; DB[nb++] = int(acc / POW2[bits]); acc = acc % POW2[bits] }
+  }
+  if (pad > 2) return -1
+  return nb
+}
+function derend(p, e,   l, h, k, m) {
+  if (p + 2 > e) return -1
+  l = DB[p + 1]; h = 2
+  if (l >= 128) {
+    m = l - 128
+    if (m < 1 || m > 4 || p + 2 + m > e || DB[p + 2] == 0) return -1
+    l = 0
+    for (k = 0; k < m; k++) l = l * 256 + DB[p + 2 + k]
+    if (l < 128) return -1
+    h += m
+  }
+  if (p + h + l > e) return -1
+  return p + h + l
+}
+function derfirst(n,   l, h, k, m) {
+  if (n < 2 || DB[0] != 48) return -1
+  l = DB[1]; h = 2
+  if (l >= 128) {
+    m = l - 128
+    if (m < 1 || m > 4 || n < 2 + m) return -1
+    l = 0
+    for (k = 0; k < m; k++) l = l * 256 + DB[2 + k]
+    h += m
+  }
+  if (h + l > n) return -1
+  return h + l
+}
+function derok(n,   p, k, t) {
+  if (n < 2 || DB[0] != 48 || derend(0, n) != n) return 0
+  p = 2
+  if (DB[1] >= 128) p += DB[1] - 128
+  for (k = 1; k <= 3; k++) {
+    t = (k == 3) ? 3 : 48
+    if (p >= n || DB[p] != t) return 0
+    p = derend(p, n)
+    if (p < 0) return 0
+  }
+  return p == n
+}
+function certok(lab, b,   n) {
+  n = b64dec(b)
+  if (n < 0) return 0
+  if (lab == "TRUSTED CERTIFICATE") { n = derfirst(n); if (n < 0) return 0 }
+  return derok(n)
+}
 function bodyline(s) { return length(s) >= 1 && length(s) <= ` + strconv.Itoa(maxPEMBodyLine) + ` && s ~ /^[A-Za-z0-9+\/=]+$/ }
 function emit(s) {
   if (DROP) { if (isend(s)) DROP = 0; return }
   if (isbegin(s)) { NRED++; if (!isend(s)) DROP = 1; return }
+  while (match(s, /\001[A-Za-z0-9_]+\001/)) s = substr(s, 1, RSTART - 1) "{" substr(s, RSTART + 1, RLENGTH - 2) "}" substr(s, RSTART + RLENGTH)
   OUT[++NO] = redact(s)
   OUTB += length(OUT[NO]) + 1
 }
@@ -211,6 +273,7 @@ function lline(s,   t, tr, w, nm, hdr) {
   if (DROPSEC && !hdr) return
   if (index(s, "\r")) {
     BSC = 0; DROPC = 0; PREVK = 0; HAVEL = 1; LKEPT = 0; CONTN = 0
+    if ((OPTSEC || OPTANYSEC) && substr(tr, 1, 1) == "[") { DROPSEC = 1; return }
     if (tr != "" && substr(tr, length(tr)) == "{") { DROPB = 1; DDEPTH = 1 }
     else if ((nm = opentag(tr)) != "" && OPTTAGS) { DROPT = nm; DDEPTH = 1 }
     return
@@ -264,13 +327,11 @@ function sttok(e) {
     if (e == "\r") { qadd(" "); return }
     qadd(e); return
   }
-  if (DOLLAR) { if (e == "}") { wadd(e); DOLLAR = 0; return }; if (e != "\n") { wadd(e); return }; DOLLAR = 0 }
   if (WESC) { WESC = 0; if (e != "\n") { wadd(e); return } }
   if (e == "\n") { wflush(); SEP = 1; if (STARTED && !OVER) { STNL++; if (STNL >= ` + strconv.Itoa(maxStatementLines) + `) { OVER = 1; BUF = "" } }; return }
   if (e == " " || e == "\t" || e == "\014" || e == "\013" || e == "\r") { wflush(); SEP = 1; return }
   if (e == ";") { wflush(); if (stkept()) emit(BUF ";"); streset(); return }
   if (e == "{") {
-    if (INW && WLAST == "$") { wadd(e); DOLLAR = 1; return }
     wflush(); DEPTH++
     if (stkept() && DEPTH <= ` + strconv.Itoa(maxBlockDepth) + `) emit(BUF " {"); else if (!DROPAT) DROPAT = DEPTH
     streset(); return
@@ -281,7 +342,13 @@ function sttok(e) {
   if (e == "\\") WESC = 1
   wadd(e)
 }
-function stline(s,   n, A, k) {
+function stline(s,   n, A, k, v) {
+  # ${name}: a variable, part of its word. Its braces become \001 (a byte a
+  # text file never holds) so the split below passes them by; emit()
+  # turns them back.
+  v = ""
+  while (match(s, /\$\{[A-Za-z0-9_]+\}/)) { v = v substr(s, 1, RSTART) "\001" substr(s, RSTART + 2, RLENGTH - 3) "\001"; s = substr(s, RSTART + RLENGTH) }
+  s = v s
   gsub(SPECIAL, "\n&\n", s)
   n = split(s, A, "\n")
   for (k = 1; k <= n; k++) if (A[k] != "") sttok(A[k])
@@ -306,6 +373,9 @@ BEGIN {
   for (i = 0; i < ` + strconv.Itoa(RedactRunLength) + `; i++) RUN = RUN "[A-Za-z0-9+/=]"
   RUN = RUN "[A-Za-z0-9+/=]*"
   OSSL = "openssl x509 -outform PEM 2>/dev/null"
+  B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  POW2[0] = 1
+  for (k = 1; k <= 8; k++) POW2[k] = POW2[k - 1] * 2
   na = split("` + strings.Join(certificateLabels, "|") + `", CL, "|")
   for (k = 1; k <= na; k++) CERTL[CL[k]] = 1
   na = split("` + strings.Join(publicPEMLabels, "|") + `", AL, "|")
@@ -332,6 +402,7 @@ mode == "text" {
     if (magic(r) || substr(r, 1, 2) == "\377\376" || substr(r, 1, 2) == "\376\377") BAD = 1
     if (substr(r, 1, 3) == "\357\273\277") { r = substr(r, 4); if (magic(r)) BAD = 1 }
   }
+  if (length(r) > ` + strconv.Itoa(maxPhysicalLine) + `) TOOMANY = 1
   if (index(r, "\001")) BAD = 1
   if (HAVE) tproc(PREV)
   PREV = r; HAVE = 1
@@ -355,6 +426,9 @@ mode == "public" {
     if (s == BE) {
       INB = 0
       if (!BOK || !(LAB in CERTL) || substr(s, 1, 5) != "-----") next
+      b = ""
+      for (i = 2; i <= BN; i++) b = b BB[i]
+      if (!certok(LAB, b)) { NDROP++; next }
       BB[++BN] = s; c = ""
       for (i = 1; i <= BN; i++) c = c BB[i] "\n"
       PUB[++NP] = c; PKIND[NP] = "C"; NCERT++

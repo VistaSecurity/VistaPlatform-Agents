@@ -74,7 +74,15 @@ decides on the host, from ONE read of the file, before anything is printed:
   -outform PEM` on Unix; on Windows `X509Certificate2.GetCertContentType`
   must say `Cert` before anything is constructed, then `RawData`), and what
   crosses is the parser's re-encoding of the certificate, never the file's
-  bytes. A block the parser refuses is dropped. No pattern over a block's
+  bytes. Before any parser sees it, the block must pass a strict DER
+  envelope check, the same on every host and again in Go: one SEQUENCE with
+  a definite, minimal length equal to the rest of the block, holding exactly
+  the TBS SEQUENCE, the algorithm SEQUENCE and the signature BIT STRING, each
+  with a minimal definite length, and nothing after them (a TRUSTED
+  CERTIFICATE's trust settings are cut off first). .NET hands back its input
+  as `RawData` and Go's parser takes the outer element as the certificate,
+  so without the envelope check a key appended inside the SEQUENCE would
+  cross. A block the check or the parser refuses is dropped. No pattern over a block's
   bytes can tell a certificate from a private key written under a
   certificate's label; a parser can. Public keys, requests, revocation
   lists and parameters do not cross (no record needs them from a remote
@@ -93,10 +101,12 @@ decides on the host, from ONE read of the file, before anything is printed:
   from what is kept.
 
 Both refuse a file whose modification or change time is within 3 seconds of
-the host's clock, and both take the file's identity (device, inode, size,
+the host's clock or later than it, and both take the file's identity (device, inode, size,
 times) before and after the read and print nothing if it changed: a file
 rewritten in place while it is read could otherwise join a kept word of one
-version to a secret of the other. `Identify` returns only markers (size, the
+version to a secret of the other. Windows also reads the file twice through
+one handle and refuses the read when the two differ: it has no change time
+that .NET Framework reads, and a writer can set the last-write time back. `Identify` returns only markers (size, the
 first eight bytes, PEM labels, rule flags), and a remote `ReadFile` is
 refused before any content command is sent unless the identity is a
 certificate or SSH key file. Go checks everything that arrives.
@@ -106,8 +116,18 @@ certificate or SSH key file. Go checks everything that arrives.
 - An SSH certificate line can carry about a kilobyte of free text in its key
   ID and principals (`*-cert-v01@openssh.com`, bounded at 4,096 characters).
 - An RFC 4716 (`---- BEGIN SSH2 PUBLIC KEY ----`) file is not read remotely.
-- A certificate is a certificate: its extensions can hold any bytes its
-  issuer put there, and they cross with it.
+- A certificate is a certificate: a deliberately crafted one can carry any
+  bytes inside its TBS (an extension), and they cross with it. The guarantee
+  is for honest files, for mislabelled files (a key under a certificate's
+  label), and for anything the strict envelope rejects.
+- An SSH key line is checked on the host by its type, the encoded type
+  prefix of its blob, the blob's length bound and the base64 alphabet, not
+  by decoding it: a crafted line can carry up to the bound of bytes that are
+  not a key. Go refuses such a line after it has crossed.
+- On Windows a writer who controls the file and resets its times can still
+  race a read: the double read narrows the window to a rewrite that changes
+  nothing between two reads microseconds apart, but does not close it.
+- A physical configuration line over 256 KiB makes the whole read too large.
 - OpenSSL 3 takes the first certificate of a `CERTIFICATE` block that has
   bytes after it; LibreSSL, .NET and Go refuse such a block. What crosses is
   still only that certificate's encoding.

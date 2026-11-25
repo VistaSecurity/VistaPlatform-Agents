@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostinventory"
+	"golang.org/x/crypto/cryptobyte"
+	cbasn1 "golang.org/x/crypto/cryptobyte/asn1"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -109,6 +111,7 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"no headers or tags without an option", "[Interface]\n\n  \n};\n</VirtualHost>\n}\nPrivateKey = x\n", []string{"address", "interface", "virtualhost"}, "\n  \n};\n}\n", 0, true},
 		{"reviewer: @sections crosses only listed names", "a = 0\n[libdefaults]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[pass:word/x]\na = S3cr3t2\n[realms]\na = S3cr3t3\n[ LibDefaults ]\na = 2\n",
 			[]string{"a", "libdefaults", sec}, "a = 0\n[libdefaults]\na = 1\n[ LibDefaults ]\na = 2\n", 0, true},
+		{"reviewer: a [ line dropped for a lone CR drops its section", "[libdefaults]\na = 1\n[x\r]\na = S3cr3t\n[libdefaults]\na = 2\n", []string{"a", "libdefaults", sec}, "[libdefaults]\na = 1\n[libdefaults]\na = 2\n", 0, true},
 		{"@anysections crosses any name of the shape", "[ ssl_sect ]\na = 1\n[hunter2 STRUCT]\na = S3cr3t\n[S3cr3t-section!]\na = S3cr3t2\n[ \"S3cr3t\", \"tok\" ]\na = S3\n[x.y-z_1]\na = 2\n[" + strings.Repeat("a", 65) + "]\na = S4\n",
 			[]string{"a", anysec}, "[ ssl_sect ]\na = 1\n[x.y-z_1]\na = 2\n", 0, true},
 		{"reviewer: @tags crosses only listed closing tags", "</VirtualHost> S3cr3t\n</VirtualHost>\n</Directory>\n</S3cr3t>\n", []string{"virtualhost", tags}, "</VirtualHost>\n", 0, true},
@@ -187,6 +190,9 @@ func TestFilterConfigRuleTable(t *testing.T) {
 		{"PEM inside a kept statement", "ssl_certificate -----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----;\nssl_ciphers a;\n", []string{"ssl_certificate", "ssl_ciphers", st}, "ssl_ciphers a;\n", 1, true},
 		{"a run in a statement", "ssl_ciphers " + q + ";\n", []string{"ssl_ciphers", st}, "ssl_ciphers " + RedactedMarker + ";\n", 1, true},
 		{"empty statements", ";;{}\nssl_ciphers a;\n", []string{"ssl_ciphers", st}, "ssl_ciphers a;\n", 0, true},
+		{"reviewer: ${ hides no ;", "server_name ${x;} secret_key hunter2;\nssl_ciphers ok;\n", []string{"server_name", "ssl_ciphers", st}, "server_name $ {\n}\nssl_ciphers ok;\n", 0, true},
+		{"${name} is part of its word", "server_name a${host_1}b c;\n", []string{"server_name", st}, "server_name a${host_1}b c;\n", 0, true},
+		{"an unclosed ${ is a $ and an opener", "server_name ${x\nssl_ciphers S3cr3t;\n}\nssl_ciphers ok;\n", []string{"server_name", "ssl_ciphers", st}, "server_name $ {\n}\nssl_ciphers ok;\n", 0, true},
 		{"reviewer: an escaped ; does not end a statement", "ssl_password_file /x\\; ssl_ciphers hunter2;\nssl_ciphers ok;\n", []string{"ssl_ciphers", st}, "ssl_ciphers ok;\n", 0, true},
 		{"reviewer: an escaped } does not close a dropped block", "location / { a \\} ; ssl_ciphers S3cr3t; }\nssl_ciphers ok;\n", []string{"ssl_ciphers", st}, "ssl_ciphers ok;\n", 0, true},
 		{"escapes in a kept statement", "ssl_ciphers a\\ b\\{c \\\\;\n", []string{"ssl_ciphers", st}, "ssl_ciphers a\\ b\\{c \\\\;\n", 0, true},
@@ -212,14 +218,22 @@ func TestFilterConfigRuleTable(t *testing.T) {
 	if _, _, st := filterConfig([]byte(strings.Repeat("a\r", maxConfigLines+1)), []string{"a", KeepOptCR}); st != configTooManyLines {
 		t.Fatalf("line bound counts @cr lines: %v", st)
 	}
+	// A physical line past the bound is too large, before any tokenising.
+	if _, _, st := filterConfig([]byte("ssl_ciphers "+strings.Repeat("a", maxPhysicalLine)+";\n"), []string{"ssl_ciphers", KeepOptStatements}); st != configTooManyLines {
+		t.Fatalf("physical line bound: %v", st)
+	}
+	if _, _, st := filterConfig([]byte("\xef\xbb\xbf"+strings.Repeat("a", maxPhysicalLine)+"\n"), []string{"a"}); st != configOK {
+		t.Fatalf("at the physical line bound: %v", st)
+	}
 	// Output past the bound is too large, never cut: @statements output
 	// grows ("a;" becomes "a;\n").
-	big := []byte(strings.Repeat("a;", maxConfigOutput/3+1))
-	if _, _, st := filterConfig(big, []string{"a", KeepOptStatements}); st != configTooManyLines {
+	line := strings.Repeat("a;", 1000) + "\n" // 2,001 bytes in, 3,000 out
+	lines := maxConfigOutput / 3000
+	if _, _, st := filterConfig([]byte(strings.Repeat(line, lines+1)), []string{"a", KeepOptStatements}); st != configTooManyLines {
 		t.Fatalf("output bound: %v", st)
 	}
-	if _, _, st := filterConfig(big[:2*(maxConfigOutput/3-1)], []string{"a", KeepOptStatements}); st != configOK {
-		t.Fatalf("under the output bound: %v", st)
+	if _, _, st := filterConfig([]byte(strings.Repeat(line, lines)), []string{"a", KeepOptStatements}); st != configOK {
+		t.Fatalf("at the output bound: %v", st)
 	}
 }
 
@@ -254,6 +268,71 @@ func TestPublicContentCertificatesOnly(t *testing.T) {
 type fxCertCase struct {
 	in, want []byte
 	secrets  [][]byte
+}
+
+// fxDERLen encodes a DER length n: minimal, or with pad extra leading zero
+// bytes (a non-minimal long form), or in the long form even when n < 128
+// (long81).
+func fxDERLen(n, pad int, long81 bool) []byte {
+	if n < 128 && pad == 0 && !long81 {
+		return []byte{byte(n)}
+	}
+	var b []byte
+	for v := n; v > 0; v >>= 8 {
+		b = append([]byte{byte(v)}, b...)
+	}
+	if len(b) == 0 {
+		b = []byte{0}
+	}
+	for i := 0; i < pad; i++ {
+		b = append([]byte{0}, b...)
+	}
+	return append([]byte{0x80 | byte(len(b))}, b...)
+}
+
+// fxTLV is tag, the length of content as fxDERLen encodes it, content.
+func fxTLV(tag byte, content []byte, pad int, long81 bool) []byte {
+	return append(append([]byte{tag}, fxDERLen(len(content), pad, long81)...), content...)
+}
+
+// fxEnvelopeVariants bends a certificate's envelope: a fourth element (the
+// key, raw or in an OCTET STRING), non-minimal lengths on the outer
+// SEQUENCE and on each element (0x81 for a length under 128, padded 0x82,
+// 0x83 and 0x84 forms), an indefinite outer length, and the key after the
+// certificate.
+func fxEnvelopeVariants(t *testing.T, cert, key []byte) map[string][]byte {
+	t.Helper()
+	in := cryptobyte.String(cert)
+	var outer cryptobyte.String
+	var tbs, alg, sig cryptobyte.String
+	if !in.ReadASN1(&outer, cbasn1.SEQUENCE) || !outer.ReadASN1Element(&tbs, cbasn1.SEQUENCE) ||
+		!outer.ReadASN1Element(&alg, cbasn1.SEQUENCE) || !outer.ReadASN1Element(&sig, cbasn1.BIT_STRING) {
+		t.Fatal("not a certificate")
+	}
+	body := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	inner := func(e []byte) []byte { // the content of a minimal element
+		s := cryptobyte.String(e)
+		var c cryptobyte.String
+		var tag cbasn1.Tag
+		s.ReadAnyASN1(&c, &tag)
+		return c
+	}
+	v := map[string][]byte{
+		"fourth element raw":    fxTLV(0x30, body(tbs, alg, sig, key), 0, false),
+		"fourth element octets": fxTLV(0x30, body(tbs, alg, sig, fxTLV(0x04, key, 0, false)), 0, false),
+		"outer padded once":     fxTLV(0x30, body(tbs, alg, sig), 1, false),
+		"outer padded twice":    fxTLV(0x30, body(tbs, alg, sig), 2, false),
+		"algorithm 0x81":        fxTLV(0x30, body(tbs, fxTLV(0x30, inner(alg), 0, true), sig), 0, false),
+		"algorithm padded":      fxTLV(0x30, body(tbs, fxTLV(0x30, inner(alg), 1, false), sig), 0, false),
+		"signature padded":      fxTLV(0x30, body(tbs, alg, fxTLV(0x03, inner(sig), 1, false)), 0, false),
+		"tbs padded":            fxTLV(0x30, body(fxTLV(0x30, inner(tbs), 1, false), alg, sig), 0, false),
+		"indefinite outer":      body([]byte{0x30, 0x80}, tbs, alg, sig, []byte{0, 0}),
+		"trailing key":          body(cert, key),
+	}
+	if len(inner(sig)) < 128 {
+		v["signature 0x81"] = fxTLV(0x30, body(tbs, alg, fxTLV(0x03, inner(sig), 0, true)), 0, false)
+	}
+	return v
 }
 
 // fxPEMWrapped is a PEM block of der under label with its body lines cut at
@@ -326,6 +405,22 @@ func fxCertCases(t *testing.T) map[string]fxCertCase {
 	aux, _ := asn1.Marshal(struct{ Trust []asn1.ObjectIdentifier }{[]asn1.ObjectIdentifier{{1, 3, 6, 1, 5, 5, 7, 3, 1}}})
 	cases["trusted certificate"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "TRUSTED CERTIFICATE", Bytes: append(append([]byte(nil), cert...), aux...)}), want: []byte(certificatePEM(cert))}
 	cases["X509 CERTIFICATE label"] = fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: "X509 CERTIFICATE", Bytes: cert}), want: []byte(certificatePEM(cert))}
+	// The fifth review: a real certificate's envelope bent to carry a key.
+	// .NET's RawData is its input and Go's c.Raw is the outer element, so
+	// only the strict envelope stops these.
+	for _, cn := range []string{"certificate RSA 4096", "certificate EC P-256", "certificate tiny"} {
+		for vn, der := range fxEnvelopeVariants(t, public[cn], rsaKey) {
+			for _, label := range certificateLabels {
+				c := fxCertCase{in: pem.EncodeToMemory(&pem.Block{Type: label, Bytes: der}), secrets: [][]byte{rsaKey[len(rsaKey)/2:]}}
+				if vn == "trailing key" && label == "TRUSTED CERTIFICATE" {
+					// Trust settings follow the certificate in this form: the
+					// certificate crosses, what follows it never.
+					c.want = []byte(certificatePEM(public[cn]))
+				}
+				cases["envelope "+cn+" "+vn+" under "+label] = c
+			}
+		}
+	}
 	// Public blocks that are not certificates do not cross.
 	for _, n := range []string{"SPKI RSA 2048", "RSA PUBLIC KEY 2048", "DH PARAMETERS 256", "CSR RSA", "CRL"} {
 		label := map[string]string{"SPKI RSA 2048": "PUBLIC KEY", "RSA PUBLIC KEY 2048": "RSA PUBLIC KEY", "DH PARAMETERS 256": "DH PARAMETERS", "CSR RSA": "CERTIFICATE REQUEST", "CRL": "X509 CRL"}[n]
@@ -731,7 +826,7 @@ func fxGenerated(n int) [][]byte {
 		"\xe9\xff", "=", ":", "ssl_ciphers", "\\", "\"", "'", "{x}", "<", ">", "</", "kept", "KEPT=1", "secret", "if ($a) {", "} else {",
 		"ssl_ciphers \"a\nb\";", "\xef\xbb\xbf", "[ok]", "  [ok]  ", "<IfModule x>", "</IfModule>",
 		"\\;", "\\}", "\\{", "\\\\", "x\\\r", "[libdefaults]", "[ libdefaults ]", "[hunter2 STRUCT]", "[pass:word/x]", "[ ssl_sect ]",
-		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {"}
+		"</VirtualHost>", "</Directory>", "password LEAK \\", "EXAMPLE.COM = {", "${x;}", "${a b}", "$${y}", "\\${z}", "${ok_1}"}
 	seps := []string{" ", "", "\t", ";", "{", "}", " # ", "\"", "\\"}
 	ends := []string{"\n", "\n", "\n", "\n", "\r\n", "\r", "\r\r\n", "\\\n", "\\\\\n"}
 	rnd := mrand.New(mrand.NewPCG(2026, 11))
@@ -909,6 +1004,41 @@ func TestFilterAwkParity(t *testing.T) {
 	}
 }
 
+// TestReadTextLongLinesAnswerQuickly is the fifth review's 5.9 MB one-line
+// nginx file, which busybox and macOS awk took past the 90-second command
+// timeout: a line at the physical-line bound, dense with the bytes the
+// tokeniser splits on, answers in seconds under every awk installed, and a
+// line one byte longer is too large.
+func TestReadTextLongLinesAnswerQuickly(t *testing.T) {
+	if !tgtRealToolsAvailable() {
+		t.Skip("POSIX tools not available")
+	}
+	unit := "ssl_ciphers a\\;b{c}\"d;e\" ${v} #x;\t'q';"
+	dense := strings.Repeat(unit, maxPhysicalLine/len(unit))
+	dense += strings.Repeat("a", maxPhysicalLine-len(dense))
+	dir := t.TempDir()
+	tgtWrite(t, dir, "at.conf", []byte(dense+"\nssl_ciphers ok;\n"), 0o644)
+	tgtWrite(t, dir, "over.conf", []byte(dense+"a\nssl_ciphers ok;\n"), 0o644)
+	fxSettle()
+	keep := []string{"ssl_ciphers", KeepOptStatements}
+	for impl, runner := range tgtAwks(t) {
+		rt := NewRemoteUnixTarget(runner, runtime.GOOS)
+		start := time.Now()
+		got, n, err := rt.ReadText(context.Background(), filepath.Join(dir, "at.conf"), keep)
+		d := time.Since(start)
+		if msg := fxCheckText([]byte(dense+"\nssl_ciphers ok;\n"), keep, got, n, err); msg != "" {
+			t.Errorf("%s: %s", impl, msg)
+		}
+		if d > 20*time.Second {
+			t.Errorf("%s: a line at the bound took %s", impl, d)
+		}
+		t.Logf("%s: %s", impl, d)
+		if _, _, err := rt.ReadText(context.Background(), filepath.Join(dir, "over.conf"), keep); !errors.Is(err, ErrFileTooLarge) {
+			t.Errorf("%s: a line past the bound: %v", impl, err)
+		}
+	}
+}
+
 // fxFileCorpus is every file the public-content parity tests run: the
 // second review's files, the deny objects under public labels, and SSH key
 // lines of every type, form and bound.
@@ -965,7 +1095,14 @@ func TestPublicAwkParity(t *testing.T) {
 				p := filepath.Join(dir, filepath.FromSlash(name))
 				want, ok := publicContent(b)
 				out, _, exit, _ := runner.Run(ctx, rt.scriptArgv(readScript, p, remoteUnixReadMax))
-				if ok != (exit == 0) || (ok && !bytes.Equal(out, want)) {
+				libreTrusted := ok && exit == 8 && runtime.GOOS == "darwin" && strings.Contains(name, "trailing_key_under_TRUSTED")
+				switch {
+				case libreTrusted:
+					// LibreSSL reads what follows a TRUSTED CERTIFICATE as its
+					// trust settings and refuses the block when that is not
+					// what they are: stricter than Go, and nothing crosses.
+					t.Logf("%s: LibreSSL refused trailing bytes that are not trust settings", name)
+				case ok != (exit == 0) || (ok && !bytes.Equal(out, want)):
 					t.Errorf("%s: host exit %d, Go ok=%v; %s", name, exit, ok, fxFirstDiff(out, want))
 				}
 				for _, secret := range secrets[name] {
@@ -1139,6 +1276,25 @@ func fxTornRun(t *testing.T, x, y []byte, cycles int, read func(string) ([]byte,
 	}
 }
 
+// TestRemoteUnixFutureTime: a file stamped ahead of the host's clock is a
+// file still being written as far as the quiescence rule is concerned.
+func TestRemoteUnixFutureTime(t *testing.T) {
+	if !tgtRealToolsAvailable() {
+		t.Skip("POSIX tools not available")
+	}
+	dir := t.TempDir()
+	tgtWrite(t, dir, "f.conf", []byte("ssl_ciphers a;\n"), 0o644)
+	ahead := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, "f.conf"), ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+	fxSettle()
+	rt := NewRemoteUnixTarget(hostinventory.NewLocalRunner(), runtime.GOOS)
+	if _, _, err := rt.ReadText(context.Background(), filepath.Join(dir, "f.conf"), []string{"ssl_ciphers"}); !errors.Is(err, errChanged) {
+		t.Errorf("a file an hour ahead: %v", err)
+	}
+}
+
 // TestReadTextCalledOnlyByReadConfig: configuration reaches a parser only
 // through readConfig, so every read carries the parser's own keep list. A
 // call of ReadText anywhere else in the package's source fails, except inside
@@ -1160,6 +1316,7 @@ func TestReadTextCalledOnlyByReadConfig(t *testing.T) {
 // or "Func"; "" outside any function).
 func fxCallersOf(t *testing.T, name string) []string {
 	t.Helper()
+	fxNeedSource(t)
 	paths, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1204,4 +1361,14 @@ func fxCallersOf(t *testing.T, name string) []string {
 		})
 	}
 	return out
+}
+
+// fxNeedSource skips a test that reads the package's source when the test
+// binary runs away from it (a cross-compiled binary copied to a host): the
+// guard is then not run, and says so, rather than failing.
+func fxNeedSource(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("redact.go"); err != nil {
+		t.Skip("the package source is not beside the test binary (run it from shared/hostcrypto to include this guard)")
+	}
 }

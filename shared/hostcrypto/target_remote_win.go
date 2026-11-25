@@ -174,9 +174,9 @@ const psOddBackslashes = `$fK = $fS.Length - 1
 // to exactly one alternative, so the matches are contiguous. Blanks (a lone
 // CR among them), a line end, ";", "{", "}", a "#" comment, a double- or
 // single-quoted word (a backslash escapes the quote or a backslash), and a
-// word, in which "{" right after "$" opens a "${...}" running to "}" or the
-// line end.
-const psStatementToken = `[ \t\f\v\r]+|\n|[;{}]|#[^\n]*|"(?:\\["\\]|[^"])*"?|''(?:\\[''\\]|[^''])*''?|(?:\\[^\n]|[^ \t\f\v\r\n;{}]|(?<=\$)\{[^}\n]*\}?)+`
+// word, in which a backslash escapes the next byte and "${name}" is a
+// variable (any other "{" ends the word).
+const psStatementToken = `[ \t\f\v\r]+|\n|[;{}]|#[^\n]*|"(?:\\["\\]|[^"])*"?|''(?:\\[''\\]|[^''])*''?|(?:\\[^\n]|[^ \t\f\v\r\n;{}]|(?<=\$)\{[A-Za-z0-9_]+\})+`
 
 // psPrelude decodes the arguments and defines the helpers every script uses.
 // psErr turns an exception into "not_found", "denied" or "other"; psAcl
@@ -218,9 +218,10 @@ function psErr($peX) {
   return 'other'
 }
 function psOut($poX) { [Console]::Out.Write('J:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 4 -InputObject $poX)))) }
-function psAcl([string]$paPath) {
+function psAcl([string]$paPath, [bool]$paDir) {
   try {
-    $paAcl = Get-Acl -LiteralPath $paPath
+    if ($paDir) { $paAcl = [System.IO.Directory]::GetAccessControl($paPath) } else { $paAcl = [System.IO.File]::GetAccessControl($paPath) }
+    try { $paOwner = [string]$paAcl.GetOwner([System.Security.Principal.NTAccount]).Value } catch { $paOwner = [string]$paAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value }
     $paAllow = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $paDeny = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($paRule in $paAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
@@ -233,24 +234,59 @@ function psAcl([string]$paPath) {
     }
     $paBroad = $false
     foreach ($paK in $paAllow) { if (-not $paDeny.Contains($paK)) { $paBroad = $true } }
-    return [pscustomobject]@{ Owner = [string]$paAcl.Owner; Broad = $paBroad; Ok = $true }
+    return [pscustomobject]@{ Owner = $paOwner; Broad = $paBroad; Ok = $true }
   } catch {
     return [pscustomobject]@{ Owner = ''; Broad = $false; Ok = $false }
   }
 }
 function psLink($plI) { return ($plI.LinkType -ceq 'SymbolicLink' -or $plI.LinkType -ceq 'Junction') }
 function psTime($ptI) { return $ptI.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') }
-function vLong([string]$lpP) {
-  if (-not $vWin -or $lpP.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $lpP }
-  if ($lpP.StartsWith('\\', [StringComparison]::Ordinal)) { return '\\?\UNC\' + $lpP.Substring(2) }
-  return '\\?\' + $lpP
+function vPath([string]$npIn) {
+  if (-not $vWin) { return $npIn }
+  $npP = $npIn.Replace([char]47, [char]92)
+  if ($npP.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $npP }
+  if ($npP.StartsWith('\\', [StringComparison]::Ordinal)) {
+    $npParts = $npP.Substring(2).Split([char]92)
+    if ($npParts.Length -lt 2) { return $npP }
+    $npRoot = '\\?\UNC\' + $npParts[0] + '\' + $npParts[1]
+    $npFirst = 2
+  } elseif ($npP.Length -ge 3 -and $npP[1] -ceq [char]58 -and $npP[2] -ceq [char]92) {
+    $npRoot = '\\?\' + $npP.Substring(0, 2)
+    $npParts = $npP.Substring(3).Split([char]92)
+    $npFirst = 0
+  } elseif ($npP.StartsWith('\', [StringComparison]::Ordinal)) {
+    $npRoot = '\\?\' + [System.IO.Path]::GetPathRoot([Environment]::CurrentDirectory).TrimEnd([char]92)
+    $npParts = $npP.Substring(1).Split([char]92)
+    $npFirst = 0
+  } else {
+    return vPath ([System.IO.Path]::GetFullPath($npP))
+  }
+  $npSegs = New-Object 'System.Collections.Generic.List[string]'
+  for ($npI = $npFirst; $npI -lt $npParts.Length; $npI++) {
+    $npS = $npParts[$npI]
+    if ($npS.Length -eq 0 -or $npS -ceq '.') { continue }
+    if ($npS -ceq '..') { if ($npSegs.Count -gt 0) { $npSegs.RemoveAt($npSegs.Count - 1) }; continue }
+    $npSegs.Add($npS)
+  }
+  return $npRoot + '\' + [string]::Join('\', $npSegs.ToArray())
+}
+function vLinkInfo([string]$liP) {
+  try {
+    $liI = Get-Item -LiteralPath $liP -Force
+    if ($null -eq $liI) { return [pscustomobject]@{ Link = $true; Target = '' } }
+    $liL = psLink $liI
+    $liT = ''
+    if ($liL) { $liT = [string](@($liI.Target)[0]) }
+    return [pscustomobject]@{ Link = $liL; Target = $liT }
+  } catch { return [pscustomobject]@{ Link = $true; Target = '' } }
 }
 function vShort([string]$spP) {
   if ($spP.StartsWith('\\?\UNC\', [StringComparison]::Ordinal)) { return '\\' + $spP.Substring(8) }
   if ($spP.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $spP.Substring(4) }
   return $spP
 }
-function vRead([string]$vrPath, [int64]$vrMax) {
+function vRead([string]$vrIn, [int64]$vrMax) {
+  $vrPath = vPath $vrIn
   if ([System.IO.Directory]::Exists($vrPath)) { return [pscustomobject]@{ Error = 'directory' } }
   $vrT0 = [System.IO.File]::GetLastWriteTimeUtc($vrPath).Ticks
   $vrFs = [System.IO.File]::Open($vrPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
@@ -260,11 +296,17 @@ function vRead([string]$vrPath, [int64]$vrMax) {
     $vrBuf = New-Object byte[] $vrCount
     $vrOff = 0
     while ($vrOff -lt $vrCount) { $vrGot = $vrFs.Read($vrBuf, $vrOff, $vrCount - $vrOff); if ($vrGot -le 0) { break }; $vrOff += $vrGot }
+    [void]$vrFs.Seek(0, [System.IO.SeekOrigin]::Begin)
+    $vrBuf2 = New-Object byte[] $vrCount
+    $vrOff2 = 0
+    while ($vrOff2 -lt $vrCount) { $vrGot = $vrFs.Read($vrBuf2, $vrOff2, $vrCount - $vrOff2); if ($vrGot -le 0) { break }; $vrOff2 += $vrGot }
     $vrLen1 = $vrFs.Length
   } finally { $vrFs.Close() }
   $vrT1 = [System.IO.File]::GetLastWriteTimeUtc($vrPath).Ticks
-  if ($vrLen1 -ne $vrLen0 -or $vrT1 -ne $vrT0) { return [pscustomobject]@{ Error = 'changed' } }
-  if ($vQuiet -and [Math]::Abs([DateTime]::UtcNow.Ticks - $vrT1) -lt 30000000) { return [pscustomobject]@{ Error = 'changed' } }
+  if ($vrLen1 -ne $vrLen0 -or $vrT1 -ne $vrT0 -or $vrOff2 -ne $vrOff) { return [pscustomobject]@{ Error = 'changed' } }
+  $vrSha = [System.Security.Cryptography.SHA256]::Create()
+  if (-not [string]::Equals([Convert]::ToBase64String($vrSha.ComputeHash($vrBuf, 0, $vrOff)), [Convert]::ToBase64String($vrSha.ComputeHash($vrBuf2, 0, $vrOff2)), [StringComparison]::Ordinal)) { return [pscustomobject]@{ Error = 'changed' } }
+  if ($vQuiet -and $vrT1 -gt [DateTime]::UtcNow.Ticks - 30000000) { return [pscustomobject]@{ Error = 'changed' } }
   return [pscustomobject]@{ Error = ''; Size = [int64]$vrLen0; Buf = $vrBuf; N = $vrOff }
 }
 function vParse([string]$vpS) {
@@ -353,6 +395,32 @@ function vPublic([byte[]]$pcB, [int]$pcN) {
   if (-not $pcAny) { return $null }
   return $pcOut.ToString()
 }
+function vDerEnd([byte[]]$dlB, [int]$dlPos, [int]$dlEnd) {
+  if ($dlPos + 2 -gt $dlEnd) { return -1 }
+  $dlL = [int64]$dlB[$dlPos + 1]; $dlH = 2
+  if ($dlL -ge 128) {
+    $dlN = [int]$dlL - 128
+    if ($dlN -lt 1 -or $dlN -gt 4 -or $dlPos + 2 + $dlN -gt $dlEnd -or $dlB[$dlPos + 2] -eq 0) { return -1 }
+    $dlL = [int64]0
+    for ($dlK = 0; $dlK -lt $dlN; $dlK++) { $dlL = $dlL * 256 + $dlB[$dlPos + 2 + $dlK] }
+    if ($dlL -lt 128) { return -1 }
+    $dlH += $dlN
+  }
+  if ($dlPos + $dlH + $dlL -gt $dlEnd) { return -1 }
+  return [int]($dlPos + $dlH + $dlL)
+}
+function vDer([byte[]]$dvB) {
+  $dvN = $dvB.Length
+  if ($dvN -lt 2 -or $dvB[0] -ne 0x30 -or (vDerEnd $dvB 0 $dvN) -ne $dvN) { return $false }
+  $dvP = 2
+  if ($dvB[1] -ge 128) { $dvP += $dvB[1] - 128 }
+  foreach ($dvT in @(0x30, 0x30, 0x03)) {
+    if ($dvP -ge $dvN -or $dvB[$dvP] -ne $dvT) { return $false }
+    $dvP = vDerEnd $dvB $dvP $dvN
+    if ($dvP -lt 0) { return $false }
+  }
+  return ($dvP -eq $dvN)
+}
 function vCert([string]$ceLabel, [string]$ceBody) {
   try { $ceDer = [Convert]::FromBase64String($ceBody) } catch { return '' }
   if ($ceLabel -ceq 'TRUSTED CERTIFICATE') {
@@ -370,6 +438,7 @@ function vCert([string]$ceLabel, [string]$ceBody) {
     [Array]::Copy($ceDer, $ceFirst, $ceFirst.Length)
     $ceDer = $ceFirst
   }
+  if (-not (vDer $ceDer)) { return '' }
   try {
     if ([System.Security.Cryptography.X509Certificates.X509Certificate2]::GetCertContentType($ceDer) -ne [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert) { return '' }
     $ceCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,$ceDer)
@@ -417,6 +486,7 @@ function vFilter([byte[]]$fB, [int]$fN, [string[]]$fKeep) {
   $fLines = New-Object 'System.Collections.Generic.List[string]'
   for ($fI = 0; $fI -lt $fL.Count; $fI++) {
     $fG = $fL.Parts[$fI]
+    if ($fG.Length -gt ` + strconv.Itoa(maxPhysicalLine) + `) { return [pscustomobject]@{ Status = 'too_large' } }
     if ($fG.EndsWith($vCR, [StringComparison]::Ordinal)) { $fG = $fG.Substring(0, $fG.Length - 1) }
     if ($fCrOpt -and -not $fSt -and $fG.IndexOf([char]13) -ge 0) { $fLines.AddRange([string[]]$fG.Split([char]13)) }
     else { $fLines.Add($fG) }
@@ -508,6 +578,7 @@ function vFilter([byte[]]$fB, [int]$fN, [string[]]$fKeep) {
     if ($fDropSec -and -not $fHdr) { continue }
     if ($fHasCR) {
       $fBsc = $false; $fDropC = $false; $fPrevK = $false; $fHaveL = $true; $fLKept = $false; $fContN = 0
+      if ($fWithSec -and $fTr.StartsWith('[', [StringComparison]::Ordinal)) { $fDropSec = $true; continue }
       if ($fTr.Length -gt 0 -and $fTr[$fTr.Length - 1] -ceq [char]123) { $fDropB = $true; $fDepth = 1 }
       elseif ($fTags) {
         $fOm = $vOpenRx.Match($fTr)
@@ -609,16 +680,20 @@ const psQuietLine = "$vQuiet = $true\n"
 const remoteWindowsTextBudget = 45
 
 // psStat describes one path: Get-Item, then psAcl.
-var psStat = psPrelude + `try { $stItem = Get-Item -LiteralPath $a.Path -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-$stAcl = psAcl $stItem.FullName
-$stLink = psLink $stItem
-$stTarget = ''
-if ($stLink) { $stTarget = [string](@($stItem.Target)[0]) }
+var psStat = psPrelude + `try {
+  $stP = vPath ([string]$a.Path)
+  $stAttr = [System.IO.File]::GetAttributes($stP)
+} catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+$stDirBit = (($stAttr -band [System.IO.FileAttributes]::Directory) -ne 0)
+if ($stDirBit) { $stInfo = New-Object System.IO.DirectoryInfo $stP } else { $stInfo = New-Object System.IO.FileInfo $stP }
+$stLink = $false; $stTarget = ''
+if (($stAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $stLi = vLinkInfo $stP; $stLink = [bool]$stLi.Link; $stTarget = $stLi.Target }
+$stAcl = psAcl $stP $stDirBit
 $stSize = 0
-if (-not $stItem.PSIsContainer) { $stSize = [int64]$stItem.Length }
+if (-not $stDirBit) { $stSize = [int64]$stInfo.Length }
 psOut ([pscustomobject]@{
-  Path = $stItem.FullName; Size = $stSize; Modified = (psTime $stItem)
-  IsDir = [bool]($stItem.PSIsContainer -and -not $stLink); IsLink = [bool]$stLink; Target = $stTarget
+  Path = (vShort $stInfo.FullName); Size = $stSize; Modified = (psTime $stInfo)
+  IsDir = [bool]($stDirBit -and -not $stLink); IsLink = [bool]$stLink; Target = $stTarget
   Owner = $stAcl.Owner; AclOk = $stAcl.Ok; Broad = $stAcl.Broad
 })`
 
@@ -667,7 +742,7 @@ if ($rtF.Status -cne 'ok') { psOut ([pscustomobject]@{ Error = $rtF.Status }); e
 // name is treated as a link, never followed. ACLs are not read here (a
 // Get-Acl per file is too slow for a sweep); the sweep Stats the files it
 // keeps.
-var psList = psPrelude + `$lsRoot = [string]$a.Root
+var psList = psPrelude + `$lsRoot = vPath ([string]$a.Root)
 $lsMaxDepth = [int]$a.Depth; $lsMax = [int]$a.Max; $lsMaxSize = [int64]$a.MaxSize; $lsCap = [int64]$a.ByteCap; $lsCross = [bool]$a.Cross
 $lsExcl = @(); if ($a.Exclude) { $lsExcl = @($a.Exclude) }
 $lsNames = @(); if ($a.Names) { $lsNames = @($a.Names) }
@@ -680,28 +755,21 @@ function lsNameOk([string]$noN) {
   foreach ($noG in $lsNames) { if ($noN -ilike $noG) { return $true } }
   return $false
 }
-function lsLinkInfo([string]$liP) {
-  try {
-    $liI = Get-Item -LiteralPath (vLong $liP) -Force
-    $liL = psLink $liI
-    $liT = ''
-    if ($liL) { $liT = [string](@($liI.Target)[0]) }
-    return [pscustomobject]@{ Link = $liL; Target = $liT }
-  } catch { return [pscustomobject]@{ Link = $true; Target = '' } }
-}
 $lsFiles = New-Object 'System.Collections.Generic.List[object]'
 $lsDenied = New-Object 'System.Collections.Generic.List[string]'
 $lsDeniedCount = 0; $lsUnreadable = 0; $lsOversize = 0; $lsTrunc = $false; $lsBytes = 0
 $lsBudget = [double]$a.Budget
-try { $lsRi = Get-Item -LiteralPath $lsRoot -Force } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
-$lsRootFull = vShort $lsRi.FullName
+try { $lsRA = [System.IO.File]::GetAttributes($lsRoot) } catch { psOut ([pscustomobject]@{ Error = (psErr $_.Exception) }); exit 0 }
+$lsRootFull = vShort $lsRoot
 $lsRootVol = [System.IO.Path]::GetPathRoot($lsRootFull)
-if (-not $lsRi.PSIsContainer -or (psLink $lsRi)) {
+$lsRootDir = (($lsRA -band [System.IO.FileAttributes]::Directory) -ne 0)
+$lsRl = $false; $lsRt = ''
+if (($lsRA -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $lsRli = vLinkInfo $lsRoot; $lsRl = [bool]$lsRli.Link; $lsRt = $lsRli.Target }
+if (-not $lsRootDir -or $lsRl) {
+  if ($lsRootDir) { $lsRi = New-Object System.IO.DirectoryInfo $lsRoot } else { $lsRi = New-Object System.IO.FileInfo $lsRoot }
   if (lsNameOk $lsRi.Name) {
-    $lsRl = psLink $lsRi
-    if ($lsRl -or $lsRi.Length -le $lsMaxSize) {
-      $lsRt = ''; if ($lsRl) { $lsRt = [string](@($lsRi.Target)[0]) }
-      $lsSz = 0; if (-not $lsRi.PSIsContainer) { $lsSz = [int64]$lsRi.Length }
+    $lsSz = 0; if (-not $lsRootDir) { $lsSz = [int64]$lsRi.Length }
+    if ($lsRl -or $lsSz -le $lsMaxSize) {
       $lsFiles.Add([pscustomobject]@{ Path = $lsRootFull; Size = $lsSz; Modified = (psTime $lsRi); IsLink = [bool]$lsRl; Target = $lsRt })
     } else { $lsOversize++ }
   }
@@ -711,7 +779,7 @@ if (-not $lsRi.PSIsContainer -or (psLink $lsRi)) {
   while ($lsStack.Count -gt 0 -and -not $lsTrunc) {
     if ($vSw.Elapsed.TotalSeconds -ge $lsBudget) { $lsTrunc = $true; break }
     $lsItem = $lsStack.Pop(); $lsDir = [string]$lsItem[0]; $lsDepth = [int]$lsItem[1]
-    try { $lsKids = ([System.IO.DirectoryInfo]::new((vLong $lsDir))).GetFileSystemInfos() } catch {
+    try { $lsKids = ([System.IO.DirectoryInfo]::new((vPath $lsDir))).GetFileSystemInfos() } catch {
       if ((psErr $_.Exception) -ceq 'denied') {
         $lsDeniedCount++
         if ($lsDenied.Count -lt 100) { $lsDenied.Add($lsDir) }
@@ -725,7 +793,7 @@ if (-not $lsRi.PSIsContainer -or (psLink $lsRi)) {
         $lsAttr = $lsC.Attributes
         $lsIsDir = (($lsAttr -band [System.IO.FileAttributes]::Directory) -ne 0)
         $lsLink = $false; $lsTarget = ''
-        if (($lsAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $lsInfo = lsLinkInfo $lsPath; $lsLink = $lsInfo.Link; $lsTarget = $lsInfo.Target }
+        if (($lsAttr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $lsInfo = vLinkInfo (vPath $lsPath); $lsLink = $lsInfo.Link; $lsTarget = $lsInfo.Target }
         if ($lsIsDir -and -not $lsLink) {
           if ($lsDepth -lt $lsMaxDepth -and ($lsCross -or [string]::Equals([System.IO.Path]::GetPathRoot($lsPath), $lsRootVol, [StringComparison]::OrdinalIgnoreCase))) { $lsStack.Push(@($lsPath, ($lsDepth + 1))) }
           continue
@@ -866,24 +934,6 @@ func (t *RemoteWindowsTarget) psJSON(ctx context.Context, script string, args an
 	return b, nil
 }
 
-// winLongPath gives every absolute path the \\?\ form, so the Windows API
-// neither cuts it at MAX_PATH nor rewrites it: without the prefix "nul.conf",
-// "COM1.conf" and "aux" name devices, and a trailing dot or space is
-// stripped, so the file asked for is not the file read. A relative path is
-// left alone (it cannot take the prefix).
-func winLongPath(p string) string {
-	if strings.HasPrefix(p, `\\?\`) {
-		return p
-	}
-	if strings.HasPrefix(p, `\\`) {
-		return `\\?\UNC\` + p[2:]
-	}
-	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') && isASCIIAlnum(p[0]) {
-		return `\\?\` + strings.ReplaceAll(p, "/", `\`)
-	}
-	return p
-}
-
 // psError maps a script's Error word to the sentinels.
 func psError(path, word string) error {
 	switch word {
@@ -926,7 +976,7 @@ type psStatResult struct {
 // "can Everyone, Users or Authenticated Users read it?". Mode stays 0 and
 // GroupReadable nil: Windows has no group permission class.
 func (t *RemoteWindowsTarget) Stat(ctx context.Context, path string) (FileInfo, error) {
-	out, err := t.psJSON(ctx, psStat, psPathArgs{Path: winLongPath(path)})
+	out, err := t.psJSON(ctx, psStat, psPathArgs{Path: path})
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -978,7 +1028,7 @@ type psIdentifyResult struct {
 // host did not return is an error, never a default that could make a file
 // public.
 func (t *RemoteWindowsTarget) identify(ctx context.Context, path string) (inspection, error) {
-	out, err := t.psJSON(ctx, psIdentify, psPathArgs{Path: winLongPath(path), Max: t.maxBytes})
+	out, err := t.psJSON(ctx, psIdentify, psPathArgs{Path: path, Max: t.maxBytes})
 	if err != nil {
 		return inspection{}, err
 	}
@@ -1055,7 +1105,7 @@ func (t *RemoteWindowsTarget) ReadFile(ctx context.Context, path string) ([]byte
 	if !identityFrom(path, in).Public() {
 		return nil, fmt.Errorf("%s: %w", path, ErrNotPublic)
 	}
-	kind, out, err := t.psRun(ctx, psRead, psPathArgs{Path: winLongPath(path), Max: readCap})
+	kind, out, err := t.psRun(ctx, psRead, psPathArgs{Path: path, Max: readCap})
 	if err != nil {
 		return nil, err
 	}
@@ -1088,7 +1138,7 @@ func (t *RemoteWindowsTarget) ReadText(ctx context.Context, path string, keep []
 	if err != nil {
 		return nil, 0, fmt.Errorf("%s: %w", path, err)
 	}
-	kind, out, err := t.psRun(ctx, psReadText, psPathArgs{Path: winLongPath(path), Max: t.readCap(), Keep: strings.Fields(words)})
+	kind, out, err := t.psRun(ctx, psReadText, psPathArgs{Path: path, Max: t.readCap(), Keep: strings.Fields(words)})
 	if err != nil {
 		return nil, 0, err
 	}

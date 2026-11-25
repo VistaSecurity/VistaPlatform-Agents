@@ -451,6 +451,154 @@ func TestRemoteWindowsRealDeviceNames(t *testing.T) {
 	}
 }
 
+// TestRemoteWindowsRealPathForms: the host normalises every path before it
+// gives it the \\?\ form (vPath), so "..", forward slashes, a root-relative
+// path, a trailing dot and a device name all reach the file they name, and
+// Stat answers not-found for a missing path (fifth review: Get-Item on the
+// \\?\ form returned null and Stat failed with a null-method error).
+func TestRemoteWindowsRealPathForms(t *testing.T) {
+	r := fxPSRunner(t)
+	if runtime.GOOS != "windows" {
+		t.Skip("path forms are Windows paths")
+	}
+	dir := t.TempDir()
+	conf := []byte("ssl_ciphers HIGH;\npassword S3cr3t;\n")
+	for _, n := range []string{`m\aux`, `m\nul.conf`, `m\COM1.conf`, `m\trail.`, `m\plain.conf`} {
+		p := `\\?\` + filepath.Join(dir, n)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, conf, 0o644); err != nil {
+			t.Fatalf("%q: %v", n, err)
+		}
+	}
+	fxSettle()
+	rt := NewRemoteWindowsTarget(r)
+	keep := []string{"ssl_ciphers", KeepOptStatements}
+	forms := []string{
+		dir + `\m\..\m\aux`, dir + `\m\.\nul.conf`, strings.ReplaceAll(dir, `\`, "/") + "/m/COM1.conf",
+		dir + `\m\trail.`, dir[2:] + `\m\plain.conf`, dir + `\m\\plain.conf`,
+	}
+	for _, f := range forms {
+		got, _, err := rt.ReadText(context.Background(), f, keep)
+		if err != nil || string(got) != "ssl_ciphers HIGH;\n" {
+			t.Errorf("ReadText %q: %q, %v", f, got, err)
+		}
+		fi, err := rt.Stat(context.Background(), f)
+		if err != nil || fi.Size != int64(len(conf)) || fi.IsDir {
+			t.Errorf("Stat %q: %+v, %v", f, fi, err)
+		}
+	}
+	for _, f := range []string{dir + `\m\missing.conf`, dir + `\nosuch\x`, dir + `\m\..\..\` + filepath.Base(dir) + `\m\none`} {
+		if _, err := rt.Stat(context.Background(), f); !errors.Is(err, ErrNotExist) {
+			t.Errorf("Stat %q: %v, want not found", f, err)
+		}
+	}
+	if fi, err := rt.Stat(context.Background(), dir+`\m\..`); err != nil || !fi.IsDir {
+		t.Errorf("Stat of a directory by ..: %+v, %v", fi, err)
+	}
+}
+
+// TestRemoteWindowsRealTornReadsTimeReset is the fifth review's writer: it
+// rewrites the file in place and sets its last-write time back each time, so
+// neither the quiescence rule nor the before/after times can see it (Windows
+// has no change time .NET Framework reads). The double read must: two reads
+// of one handle that differ refuse the read.
+func TestRemoteWindowsRealTornReadsTimeReset(t *testing.T) {
+	r := fxPSRunner(t)
+	reads := 200
+	if testing.Short() {
+		reads = 40
+	}
+	text := fxReview3Text()
+	a, b := text["race_a.conf"], text["race_b.conf"]
+	keep := []string{"ssl_ciphers", "ssl_protocols", KeepOptStatements}
+	wa, _, _ := FilterConfigText(a, keep)
+	wb, _, _ := FilterConfigText(b, keep)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "swap.conf")
+	tgtWrite(t, dir, "swap.conf", a, 0o644)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fxSettle()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			f, err := os.OpenFile(p, os.O_WRONLY, 0)
+			if err != nil {
+				continue
+			}
+			src := a
+			if i%2 == 1 {
+				src = b
+			}
+			for off := 0; off < len(src); off += 4096 {
+				_, _ = f.WriteAt(src[off:min(off+4096, len(src))], int64(off))
+				time.Sleep(50 * time.Microsecond)
+			}
+			_ = f.Close()
+			_ = os.Chtimes(p, old, old)
+			time.Sleep(time.Duration(i%4) * 5 * time.Millisecond) // gaps, so some reads succeed
+		}
+	}()
+	rt := NewRemoteWindowsTarget(r)
+	ok, changed, torn := 0, 0, 0
+	for i := 0; i < reads; i++ {
+		out, _, err := rt.ReadText(context.Background(), p, keep)
+		switch {
+		case err == nil:
+			ok++
+			if !bytes.Equal(out, wa) && !bytes.Equal(out, wb) {
+				torn++
+				t.Errorf("read %d returned neither version: %s", i, fxFirstDiff(out, wa))
+			}
+		case errors.Is(err, errChanged):
+			changed++
+		}
+	}
+	close(stop)
+	<-done
+	t.Logf("ok=%d changed=%d torn=%d of %d", ok, changed, torn, reads)
+	if ok == 0 {
+		t.Error("no read succeeded: the test proves nothing")
+	}
+}
+
+// TestRemoteWindowsRealFutureTime: a file stamped an hour ahead is refused
+// (fifth review: the absolute difference let it through), and an hour-old
+// one is read.
+func TestRemoteWindowsRealFutureTime(t *testing.T) {
+	r := fxPSRunner(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.conf")
+	tgtWrite(t, dir, "f.conf", []byte("ssl_ciphers a;\n"), 0o644)
+	ahead := time.Now().Add(time.Hour)
+	if err := os.Chtimes(p, ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+	fxSettle()
+	rt := NewRemoteWindowsTarget(r)
+	if _, _, err := rt.ReadText(context.Background(), p, []string{"ssl_ciphers"}); !errors.Is(err, errChanged) {
+		t.Errorf("a file an hour ahead: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := rt.ReadText(context.Background(), p, []string{"ssl_ciphers"}); err != nil || string(got) != "ssl_ciphers a;\n" {
+		t.Errorf("a file an hour old: %q, %v", got, err)
+	}
+}
+
 // psScripts are the programs a Windows host runs, by name.
 func psScripts() map[string]string {
 	return map[string]string{"psStat": psStat, "psIdentify": psIdentify, "psRead": psRead, "psReadText": psReadText, "psList": psList}

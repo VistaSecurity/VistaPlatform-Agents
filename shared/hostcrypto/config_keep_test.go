@@ -610,6 +610,7 @@ var (
 
 func keepFunc(t *testing.T, name string) *ast.FuncDecl {
 	t.Helper()
+	fxNeedSource(t)
 	keepSrcOnce.Do(func() {
 		keepSrcFuncs = map[string]*ast.FuncDecl{}
 		paths, err := filepath.Glob("*.go")
@@ -831,6 +832,7 @@ func TestKeepSlicesMatchTheParsers(t *testing.T) {
 // when a test that parses through cfgT or keepCPBackend is not run by
 // keepCollect, so a new fixture cannot escape the parity test.
 func TestKeepFixtureTestsAreAllListed(t *testing.T) {
+	fxNeedSource(t)
 	paths, err := filepath.Glob("config_*_test.go")
 	if err != nil {
 		t.Fatal(err)
