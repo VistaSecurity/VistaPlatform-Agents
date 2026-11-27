@@ -39,7 +39,7 @@
         { "os": "windows", "arch": "amd64", "runner": "ubuntu-24.04", "cgo": false, "requires": [] }
       ],
       "installers": { "linux": "install-device-agent.sh", "darwin": "install-device-agent-macos.sh", "windows": "install-device-agent.ps1" },
-      "capabilities": ["device_discovery", "kubernetes_inventory_v1"],
+      "capabilities": ["device_discovery", "host_crypto_v1", "kubernetes_inventory_v1"],
       "image": {
         "name": "vista-device-agent",
         "build_tags": "container",
