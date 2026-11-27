@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 )
 
 // The registration key is single use: the control plane spends it the moment
@@ -15,10 +20,26 @@ import (
 // sensor proves it can store the result BEFORE anything is sent, and treats a
 // failed save after registration as the fatal event it is.
 
+// enrolledConfigFileName is the file a sensor configured by its environment
+// alone (a container: no config file, DATA_PATH on a volume) records its
+// enrollment in, under the data path. It is the first place
+// findDefaultConfigFile looks, so the next start reads it and does not try the
+// spent registration key again. The device agent's equivalent is
+// agent-config.yaml.
+const enrolledConfigFileName = "sensor-config.yaml"
+
+// enrolledConfigPath is where an environment-configured sensor records its
+// enrollment.
+func enrolledConfigPath(dataPath string) string {
+	return filepath.Join(dataPath, enrolledConfigFileName)
+}
+
 // checkEnrollmentWritable reports whether this process can write the
 // certificate directory under dataPath and, when configPath is named, the
-// existing config file there. It creates what is missing (the same directories
-// the save would create) and probes each with a file it removes again.
+// existing config file there; with no config file, the data path itself, where
+// the enrollment is then recorded (enrolledConfigPath). It creates what is
+// missing (the same directories the save would create) and probes each with a
+// file it removes again.
 func checkEnrollmentWritable(dataPath, configPath string) error {
 	certs := filepath.Join(dataPath, "certs")
 	if err := os.MkdirAll(certs, 0o700); err != nil {
@@ -28,7 +49,7 @@ func checkEnrollmentWritable(dataPath, configPath string) error {
 		return err
 	}
 	if configPath == "" {
-		return nil
+		return probeWritable(dataPath)
 	}
 	// The config file is rewritten atomically (temp file + rename in its own
 	// directory), so the directory must be writable, and the file must exist.
@@ -76,8 +97,11 @@ func enrollmentLostMessage(sensorID, path string, err error) string {
 }
 
 // persistEnrollment writes the certificates and then the sensor ID and
-// certificate paths to the config file. The returned error already names the
-// path and says the key is spent.
+// certificate paths to the config file. A sensor configured by its environment
+// alone has no config file: it records its enrollment instead in
+// enrolledConfigPath, in one complete write (writeEnvironmentEnrollment), and
+// uses that file from then on. The returned error already names the path and
+// says the key is spent.
 func (s *Sensor) persistEnrollment() error {
 	certsDir := filepath.Join(s.config.Storage.DataPath, "certs")
 	if err := saveCertificates(s.config); err != nil {
@@ -86,7 +110,12 @@ func (s *Sensor) persistEnrollment() error {
 	log.Printf("✅ Certificates saved to: %s", certsDir)
 
 	if s.configPath == "" {
-		log.Printf("⚠️  No config file is in use, so the sensor ID and certificate paths are not recorded; a restart needs the same environment configuration")
+		path := enrolledConfigPath(s.config.Storage.DataPath)
+		if err := writeEnvironmentEnrollment(path, s.config); err != nil {
+			return errors.New(enrollmentLostMessage(s.config.SensorID, path, err))
+		}
+		s.configPath = path
+		log.Printf("💾 No config file was in use: the enrollment is recorded in %s; every start reads it and takes all other settings from the environment", path)
 		return nil
 	}
 	if err := s.saveConfigFile(); err != nil {
@@ -94,4 +123,64 @@ func (s *Sensor) persistEnrollment() error {
 	}
 	log.Printf("💾 Configuration saved to file with sensor ID")
 	return nil
+}
+
+// environmentEnrollment is the whole of what a sensor configured by its
+// environment records about itself (config.ConfigFile's
+// environmentEnrollment). Settings are not in it: they come from the
+// environment on every start (config.loadEnvironmentEnrollment). Nor is the
+// registration key, only its fingerprint; the certificate and keys are files
+// of their own under certs/.
+type environmentEnrollment struct {
+	EnvironmentEnrollment bool   `yaml:"environmentEnrollment"`
+	SensorID              string `yaml:"sensorId"`
+	ControlPlaneURL       string `yaml:"controlPlaneUrl"`
+	RegistrationKeySHA256 string `yaml:"registrationKeySha256,omitempty"`
+	Security              struct {
+		ClientCertPath   string `yaml:"clientCertPath"`
+		ClientKeyPath    string `yaml:"clientKeyPath"`
+		ServerCACertPath string `yaml:"serverCACertPath"`
+		AgentSecretPath  string `yaml:"agentSecretPath,omitempty"`
+		UseTLS           bool   `yaml:"useTLS"`
+	} `yaml:"security"`
+}
+
+// writeEnvironmentEnrollment writes the enrollment record in one atomic,
+// owner-only (0600) write, complete from the start: a sensor that stops at any
+// point after it finds either no record (certificates only, as before) or all
+// of it. The raw registration key is never written: the fingerprint stands in
+// for it (managed protocol 1 always issues the agent secret that replaces it),
+// and the key, while it is still needed, is in the environment.
+func writeEnvironmentEnrollment(path string, cfg *config.Config) error {
+	var r environmentEnrollment
+	r.EnvironmentEnrollment = true
+	r.SensorID = cfg.SensorID
+	r.ControlPlaneURL = cfg.ControlPlaneURL
+	r.RegistrationKeySHA256 = cfg.RegistrationKeyFingerprint()
+	r.Security.ClientCertPath = cfg.Security.ClientCertPath
+	r.Security.ClientKeyPath = cfg.Security.ClientKeyPath
+	r.Security.ServerCACertPath = cfg.Security.ServerCACertPath
+	r.Security.AgentSecretPath = cfg.Security.AgentSecretPath
+	r.Security.UseTLS = true
+
+	var root yaml.Node
+	if err := root.Encode(&r); err != nil {
+		return fmt.Errorf("encode enrollment: %w", err)
+	}
+	doc := &yaml.Node{
+		Kind:        yaml.DocumentNode,
+		Content:     []*yaml.Node{&root},
+		HeadComment: "Vista Platform Network Sensor: enrollment of a sensor configured by its environment.\nWritten by the sensor. Its settings come from the environment on every start.",
+	}
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	// Two-space indent, as the line-based updates (saveConfigFile) expect.
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return fmt.Errorf("encode enrollment: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("encode enrollment: %w", err)
+	}
+	return writeSecretConfigFile(path, out.Bytes())
 }
