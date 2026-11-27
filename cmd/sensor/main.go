@@ -198,6 +198,10 @@ func (s *Sensor) applyHeartbeatReply(commands *models.SensorCommands) {
 // immediately regardless of this — see shouldReportHost.
 const hostReportInterval = time.Hour
 
+// reportOwnHost is ownHostReported (false only in the container image, see
+// own_host_container.go); a variable so the tests can run both builds' path.
+var reportOwnHost = ownHostReported
+
 // shouldReportHost decides whether this beat's Host block should be attached.
 // Read-only: it does NOT commit the throttle state, because that must happen
 // only after the heartbeat actually sends successfully — see
@@ -348,7 +352,12 @@ func (s *Sensor) capturePreflight() error {
 // no interface, needs no capture privileges, and does everything else a
 // sensor does: it enrolls, heartbeats and runs the platform's scan jobs.
 func (s *Sensor) captureOff() bool {
-	return !capture.Built || (s.config != nil && s.config.Capture.Disabled)
+	return captureOffFor(s.config)
+}
+
+// captureOffFor is captureOff for a configuration not yet given to a Sensor.
+func captureOffFor(cfg *config.Config) bool {
+	return !capture.Built || (cfg != nil && cfg.Capture.Disabled)
 }
 
 // startupStateLine is the line the sensor prints once it is up. It reports what
@@ -636,7 +645,11 @@ func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
 	log.Printf("  Registration Key: %s", maskString(cfg.RegistrationKey))
 	log.Printf("  Reporting Interval: %v", cfg.ReportingInterval)
 	log.Printf("  Data Path: %s", cfg.Storage.DataPath)
-	log.Printf("  Interfaces: %v", cfg.Capture.Interfaces)
+	if captureOffFor(cfg) {
+		log.Printf("  Interfaces: none (passive capture is off)")
+	} else {
+		log.Printf("  Interfaces: %v", cfg.Capture.Interfaces)
+	}
 
 	// Unattended trust bootstrap. With --ca-fingerprint and no CA already in
 	// config, fetch the control plane's CA, verify it hashes to the expected
@@ -748,7 +761,11 @@ func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
 	defer unregisteredWarnTicker.Stop()
 
 	log.Println(sensor.startupStateLine("Sensor"))
-	log.Println("📡 Monitoring network traffic for cryptographic configurations...")
+	if sensor.captureOff() {
+		log.Println("🔎 Running the platform's scan jobs (passive capture is off)")
+	} else {
+		log.Println("📡 Monitoring network traffic for cryptographic configurations...")
+	}
 	log.Printf("🔄 Reporting interval: %v", cfg.ReportingInterval)
 	if host.logToStderr {
 		log.Println("💡 Press Ctrl+C to stop the sensor")
@@ -1481,9 +1498,11 @@ func (s *Sensor) sendHeartbeat() {
 	// is cheap — no DNS) so the throttle always compares against current
 	// reality, not a stale snapshot. The throttle state itself is committed
 	// only after the heartbeat carrying it actually sends (see below).
+	// Never in the container image, whose host is its own pod
+	// (own_host_container.go).
 	hostBlock := hostid.Build(primaryIP)
 	hostHash := hostid.Hash(hostBlock)
-	reportHost := s.shouldReportHost(hostHash, health.Timestamp)
+	reportHost := reportOwnHost && s.shouldReportHost(hostHash, health.Timestamp)
 	if reportHost {
 		health.Host = hostBlock
 	}
@@ -3037,7 +3056,11 @@ func startSensorWithConfig(verbose bool) {
 	log.Printf("  Registration Key: %s", maskString(cfg.RegistrationKey))
 	log.Printf("  Reporting Interval: %v", cfg.ReportingInterval)
 	log.Printf("  Data Path: %s", cfg.Storage.DataPath)
-	log.Printf("  Interfaces: %v", cfg.Capture.Interfaces)
+	if captureOffFor(cfg) {
+		log.Printf("  Interfaces: none (passive capture is off)")
+	} else {
+		log.Printf("  Interfaces: %v", cfg.Capture.Interfaces)
+	}
 	if cfg.TestMode {
 		log.Println("🧪 Running in TEST MODE - discoveries will be logged to file instead of control plane")
 	}
@@ -3128,7 +3151,11 @@ func startSensorWithConfig(verbose bool) {
 	defer unregisteredWarnTicker.Stop()
 
 	log.Println(sensor.startupStateLine("Sensor"))
-	log.Println("📡 Monitoring network traffic for cryptographic configurations...")
+	if sensor.captureOff() {
+		log.Println("🔎 Running the platform's scan jobs (passive capture is off)")
+	} else {
+		log.Println("📡 Monitoring network traffic for cryptographic configurations...")
+	}
 	log.Printf("🔄 Reporting interval: %v", cfg.ReportingInterval)
 	log.Println("💡 Press Ctrl+C to stop the sensor")
 
