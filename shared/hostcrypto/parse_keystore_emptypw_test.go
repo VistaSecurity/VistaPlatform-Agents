@@ -375,6 +375,44 @@ func TestPKCS12NoAnswerWhenAPartWasNotTried(t *testing.T) {
 	}
 }
 
+// TestPKCS12UnreadablePartWasDecrypted: a part the empty password decrypts
+// to contents that are not a list of entries was opened by it. Without a MAC
+// that is no_password; when the MAC refuses every candidate the store is not
+// opened, without claiming it needs a password, and whether a default opens
+// it is not known.
+func TestPKCS12UnreadablePartWasDecrypted(t *testing.T) {
+	malformed := ksEncryptedPart(t, "", 1, ksEmptyPwMalformedBag(t))
+	for _, try := range []bool{false, true} {
+		got, err := ParsePKCS12(ksBuildPFX(t, nil, malformed), try)
+		ks := got.Keystore
+		if err != nil || ks.Opened != OpenedWithoutPassword || !strings.Contains(ks.Unknown, "not a list of entries") || (try && (ks.DefaultPassword == nil || *ks.DefaultPassword)) {
+			t.Errorf("no MAC (opt-in %v): %v %+v", try, err, ks)
+		}
+		got, err = ParsePKCS12(ksBuildPFX(t, ksStr("Real-Pass-7"), malformed), try)
+		ks = got.Keystore
+		wantNotTried := ""
+		if try {
+			wantNotTried = ksNotTriedUnreadable
+		}
+		if err != nil || ks.Opened != OpenedNot || ks.DefaultPassword != nil || got.DefaultsNotTried != wantNotTried ||
+			strings.Contains(ks.Unknown, "needs a password") || !strings.Contains(ks.Unknown, "not a list of entries") {
+			t.Errorf("MAC refused (opt-in %v): %v %q %+v", try, err, got.DefaultsNotTried, ks)
+		}
+	}
+}
+
+// TestPKCS12LockedReasonNamesTheOpenedParts: the MAC refuses every candidate
+// but a part opens; Unknown says that part is listed.
+func TestPKCS12LockedReasonNamesTheOpenedParts(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "a", false)
+	got, err := ParsePKCS12(ksBuildPFX(t, ksStr("Real-Pass-7"), ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))), false)
+	ks := got.Keystore
+	if err != nil || ks.Opened != OpenedNot || len(got.Certificates) != 1 ||
+		!strings.HasSuffix(ks.Unknown, "; what its unencrypted parts state and the parts that opened are listed") {
+		t.Errorf("%v %+v", err, ks)
+	}
+}
+
 // TestPKCS12UncomputableMACIsNotOpened: a MAC this code does not compute
 // cannot be stood in for by a part that decrypts: not opened, and why.
 func TestPKCS12UncomputableMACIsNotOpened(t *testing.T) {

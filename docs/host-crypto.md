@@ -247,10 +247,12 @@ of a private key file crosses the connection:
   `sha1sum`, `shasum` or `openssl`; otherwise `unknown` says it was not
   checked). The defaults come after that, only if you opt in: they are sent
   on the command's standard input, never in its arguments, so they never
-  appear in the host's process list. One difference from this machine: a
+  appear in the host's process list. Two differences from this machine: a
   PKCS#12 keystore that no password opens is listed remotely only when
   nothing in it is encrypted (its clear certificates, read without checking
-  its MAC); otherwise its entries are not read, and `unknown` says so.
+  its MAC), otherwise its entries are not read and `unknown` says so; and
+  for such a keystore `default_password` is absent, because openssl cannot
+  try a default on one encrypted part apart from the MAC.
   Windows keystores are not listed remotely (Windows has no built-in tool
   that lists one without being able to print its keys), nor are keytabs.
 - Configuration is filtered **on the host** to the named directives before

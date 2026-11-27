@@ -275,9 +275,16 @@ func TestJobParseKeystoreProbe(t *testing.T) {
 	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword || len(ks.Entries) != 2 || !strings.Contains(ks.Unknown, "unencrypted parts") {
 		t.Fatalf("locked clear: %+v", ks)
 	}
+	// A PKCS#12 the MAC locks, with an encrypted part: openssl cannot try a
+	// part apart from the MAC, so whether a default opens one is not known.
 	kc, _ = jobParseKeystoreProbe([]byte("LOCKED\n"), KeystorePKCS12, true)
-	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword || len(ks.Entries) != 0 {
-		t.Fatalf("locked: %+v", ks)
+	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword != nil || kc.DefaultsNotTried != jobNotTriedRemoteParts || len(ks.Entries) != 0 {
+		t.Fatalf("locked: %q %+v", kc.DefaultsNotTried, ks)
+	}
+	// keytool refusing every password is an answer for the whole store.
+	kc, _ = jobParseKeystoreProbe([]byte("LOCKED\n"), KeystoreJKS, true)
+	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword {
+		t.Fatalf("locked jks: %+v", ks)
 	}
 	for _, in := range []string{"DENIED\n", "NOTOOL\n"} {
 		if kc, ok := jobParseKeystoreProbe([]byte(in), KeystoreJKS, false); !ok || kc.Keystore.Unknown == "" || kc.Keystore.Opened != OpenedNot {
@@ -528,8 +535,8 @@ func TestJobKeystoreProbeRealOpenSSL(t *testing.T) {
 		t.Fatalf("empty password with the opt-in: %+v", ks)
 	}
 	kc, _ = run(mk("real.p12", "Real-Pass-7"), true)
-	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword {
-		t.Fatalf("a real password with the opt-in: %+v", ks)
+	if ks := kc.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword != nil || kc.DefaultsNotTried != jobNotTriedRemoteParts {
+		t.Fatalf("a real password with the opt-in: %q %+v", kc.DefaultsNotTried, ks)
 	}
 	// The friendly name OpenSSL prints with the certificate is the
 	// certificate's, not the key bag's printed before it.
@@ -616,6 +623,18 @@ func TestJobKeystoreProbeJKSDigest(t *testing.T) {
 		{"changeit", true, OpenedDefaultPassword, boolPtrEmptyPw(true)},
 	} {
 		path := jobWrite(t, dir, "s-"+tc.password+".jks", ksMakeJKSFixture(t, ksMagicJKS, 2, tc.password).store, 0o600)
+		if tc.password == "" && !tc.tries {
+			// A zero-entry store is exactly 32 bytes; its digest is checked too.
+			empty := ksBuildJKS(ksMagicJKS, 2, "")
+			if len(empty) != 32 {
+				t.Fatalf("a zero-entry store is %d bytes", len(empty))
+			}
+			p := jobWrite(t, dir, "s-.zero.jks", empty, 0o600)
+			kc, ok := jobProbeRemoteKeystore(context.Background(), NewRemoteUnixTarget(&jobRecRunner{inner: fxLocalRunner()}, runtime.GOOS), p, KeystoreJKS, false)
+			if !ok || kc.Keystore.Opened != OpenedWithoutPassword {
+				t.Errorf("zero-entry store: %v %+v", ok, kc.Keystore)
+			}
+		}
 		rr := &jobRecRunner{inner: fxLocalRunner()}
 		kc, ok := jobProbeRemoteKeystore(context.Background(), NewRemoteUnixTarget(rr, runtime.GOOS), path, KeystoreJKS, tc.tries)
 		if !ok {

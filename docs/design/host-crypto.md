@@ -326,7 +326,10 @@ Off unless the operator says otherwise:
   listing is unverified, so the host computes the JKS digest itself and
   sends only whether it matches. A PKCS#12 that no password opens is listed
   remotely only when nothing in it is encrypted (`-nokeys -nomacver` with
-  the random value), where locally its plain parts are always listed.
+  the random value), where locally its plain parts are always listed; and,
+  having an encrypted part, it leaves `default_password` absent ("parts are
+  not tried separately over a remote connection"), where locally each part
+  is tried.
 
 ## Rules for anyone adding to it
 

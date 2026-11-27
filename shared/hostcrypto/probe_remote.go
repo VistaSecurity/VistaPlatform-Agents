@@ -443,7 +443,7 @@ kt() {
 }
 jdig() {
   n=$(wc -c < "$f" | tr -d ' ')
-  [ "$n" -gt 32 ] 2>/dev/null || return 0
+  [ "$n" -ge 32 ] 2>/dev/null || return 0
   if command -v sha1sum >/dev/null 2>&1; then h="sha1sum"
   elif command -v shasum >/dev/null 2>&1; then h="shasum -a 1"
   elif command -v openssl >/dev/null 2>&1; then h="openssl dgst -sha1 -r"
@@ -563,6 +563,10 @@ func jobProbeRemoteKeystore(ctx context.Context, t Target, path, typ string, try
 	}
 	return kc, true
 }
+
+// jobNotTriedRemoteParts is DefaultsNotTried for a remote PKCS#12 that no
+// password opens and that has an encrypted part.
+const jobNotTriedRemoteParts = "parts are not tried separately over a remote connection"
 
 // jobLongRun is a run a name has no business holding: forty or more base64
 // or hexadecimal characters, the redaction rule of ReadText.
@@ -735,10 +739,18 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 	case "locked":
 		ks.Unknown = "remote: the keystore needs a password that is " + notEmpty + "; entries not read (a locked keystore is listed remotely only when nothing in it is encrypted)"
 		ks.Entries = nil
-		if tried {
-			ks.DefaultPassword = &no
+		kc := KeystoreContents{Keystore: ks}
+		switch {
+		case tried && typ == KeystorePKCS12:
+			// openssl refused every default for the whole file, but it
+			// cannot try a part apart from the MAC, and this file has an
+			// encrypted part (its clear listing failed): whether a default
+			// opens a part is not known.
+			kc.DefaultsNotTried = jobNotTriedRemoteParts
+		case tried:
+			kc.Keystore.DefaultPassword = &no
 		}
-		return KeystoreContents{Keystore: ks}, true
+		return kc, true
 	default:
 		return KeystoreContents{}, false
 	}

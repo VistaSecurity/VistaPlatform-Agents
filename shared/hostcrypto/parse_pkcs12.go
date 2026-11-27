@@ -377,6 +377,7 @@ const (
 	ksNotTriedScheme       = "a part uses protection the collector does not try"
 	ksNotTriedNoCheck      = "nothing in the file can verify a password"
 	ksNotTriedMAC          = "the MAC uses an algorithm the collector does not compute"
+	ksNotTriedUnreadable   = "part decrypted to contents that are not a list of entries"
 )
 
 // ksMulCost multiplies two non-negative costs, saturating instead of
@@ -435,11 +436,12 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	entries, certs, truncated := ksP12Build(st.bags, maxEntries)
 	out.Keystore.Entries, out.Certificates = entries, certs
 	out.Truncated = truncated || st.maxed
-	hidden := false
+	hidden, partOpened := false, false
 	for _, p := range st.parts {
 		if !p.opened {
 			hidden = true
 		}
+		partOpened = partOpened || (p.encrypted && p.opened)
 	}
 	if !hidden && !st.signed && !out.Truncated {
 		out.Keystore.EntryCount = ksIntPtr(len(entries))
@@ -453,7 +455,7 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	case empty, unprotected:
 		out.Keystore.Opened = OpenedWithoutPassword
 	default:
-		out.Keystore.Unknown = ksP12LockedReason(tr, defaultsTried, hidden)
+		out.Keystore.Unknown = ksP12LockedReason(tr, defaultsTried, hidden, partOpened)
 	}
 	// A part that stayed shut keeps what it holds: Opened says how the rest
 	// was read, EntryCount stays nil, and Unknown says why the listing is
@@ -465,10 +467,13 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 }
 
 // ksP12LockedReason is the Unknown of a store no candidate opened: why, in
-// words true of what was tried, and what the listing holds.
-func ksP12LockedReason(tr ksP12Trial, defaults, hidden bool) string {
+// words true of what was tried, and what the listing holds. partOpened says
+// an encrypted part opened (the MAC refused every candidate, a part did not).
+func ksP12LockedReason(tr ksP12Trial, defaults, hidden, partOpened bool) string {
 	var why string
 	switch {
+	case tr.notTried == ksNotTriedUnreadable:
+		why = "the store's MAC refused every password tried, and part of it decrypted to contents that are not a list of entries"
 	case tr.res == ksP12LockedDefaultPart:
 		why = "the store's MAC needs a password that is neither empty nor a well-known default, though a well-known default opens part of it"
 	case !tr.emptyTried && tr.notTried == ksNotTriedSigned:
@@ -482,8 +487,13 @@ func ksP12LockedReason(tr ksP12Trial, defaults, hidden bool) string {
 	default:
 		why = "the store needs a password that is not empty"
 	}
-	if hidden {
+	switch {
+	case hidden && partOpened:
+		return why + "; the parts that opened are listed, the entries of the others are not"
+	case hidden:
 		return why + "; the entries of its encrypted parts are not listed"
+	case partOpened:
+		return why + "; what its unencrypted parts state and the parts that opened are listed"
 	}
 	return why + "; only what its unencrypted parts state is listed"
 }
@@ -1078,7 +1088,9 @@ func (st *ksP12Structure) trial(maxEntries int, defaults bool) ksP12Trial {
 		return true
 	}
 	// tryAll tries every candidate whose key is not in tried on o, paying
-	// each try from left when pay is set, and returns the one that opened it.
+	// each try from left when pay is set, and returns the one that opened it,
+	// or that decrypted it to a list of bags the walk cannot read (the part
+	// is then unreadable, and that candidate is its password).
 	tryAll := func(o ksP12Opener, tried map[string]bool, pay bool) (by *ksP12Password, cut bool) {
 		for i := range cands {
 			k := o.key(cands[i])
@@ -1097,7 +1109,7 @@ func (st *ksP12Structure) trial(maxEntries int, defaults bool) ksP12Trial {
 				return &cands[i], false
 			}
 			if st.parts[o.idx].unreadable {
-				return nil, false
+				return &cands[i], false
 			}
 		}
 		st.parts[o.idx].refused = true
@@ -1168,14 +1180,23 @@ func (st *ksP12Structure) trial(maxEntries int, defaults bool) ksP12Trial {
 	for _, o := range openers {
 		left = ksAddCost(left, o.cost)
 	}
-	anyDefault, cut := false, false
+	anyDefault, unreadable, cut := false, false, false
 	for _, o := range openers {
 		by, c := tryAll(o, map[string]bool{}, true)
-		anyDefault = anyDefault || (by != nil && !by.empty)
+		if st.parts[o.idx].unreadable {
+			unreadable = true
+		} else {
+			anyDefault = anyDefault || (by != nil && !by.empty)
+		}
 		cut = cut || c
 	}
-	if anyDefault {
+	switch {
+	case anyDefault:
 		return ksP12Trial{res: ksP12LockedDefaultPart, emptyTried: true}
+	case unreadable:
+		// A candidate decrypted a part to contents the walk cannot read:
+		// whether a default opens the store is not known.
+		return ksP12Trial{res: ksP12NotOpened, notTried: ksNotTriedUnreadable, emptyTried: true}
 	}
 	return answer(ksP12NotOpened, cut)
 }
