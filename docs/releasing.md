@@ -207,8 +207,11 @@ Applied by an administrator; GitHub, not this repository, enforces them.
   first push belongs to the organisation and is private until an administrator
   changes its visibility.
 - **Environments.** `release` deployable from `v*` tags only; `nightly` and
-  `compatibility` from `main` only. Required reviewers where the plan offers
-  them. No environment holds a secret: signing is keyless.
+  `compatibility` from `main` only. `release` has no required reviewer: a
+  pushed `v*` tag publishes without a manual approval, and who may release is
+  controlled by the tag ruleset above, which limits creating a `v*` tag to
+  repository administrators. `compatibility` requires a reviewer; `nightly`
+  has none. No environment holds a secret: signing is keyless.
 - **Actions.** GitHub-owned and verified-creator actions only, pinned to a full
   commit SHA; default token read-only; fork pull requests need approval.
 - **Branch ruleset on `main`.** Pull request with code-owner review, the
