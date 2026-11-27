@@ -284,22 +284,32 @@ Off unless the operator says otherwise:
 
 - **Home directories**: per-user SSH keys, GnuPG homes, NSS databases,
   per-user keychains and stores.
-- **Default keystore passwords**: trying the empty password, as a step of its
-  own, and the well-known defaults (`changeit`, `changeme`, `password`)
-  against JKS, JCEKS and PKCS#12 files. Locally the empty password is tried
-  first, then the defaults; a PKCS#12 part the first password that passes
-  does not open is tried with each of the others. Remotely the probe sends
-  the defaults first and tries the empty password last. A store the empty
-  password opens is one that needs no password: `opened: no_password`,
-  `default_password: false`, contents listed. A well-known default that
-  opens the store or any part of it gives `default_password: true`, and which
-  one is never recorded (it would be the store's password); the empty
-  password is kept apart because a store without a password is a fact to
-  record, not a guessed password. A part that nothing opens keeps
-  `entry_count` absent and says why in `unknown`. Locally, without the
-  opt-in no password is tried. Remotely the empty password is tried either
-  way (the probe lists with it), as before; the defaults only with the
-  opt-in.
+- **Default keystore passwords**: trying the well-known defaults
+  (`changeit`, `changeme`, `password`) against JKS, JCEKS and PKCS#12 files,
+  besides the empty password. Locally the empty password is tried first,
+  then the defaults; a PKCS#12 part the first password that passes does not
+  open is tried with each of the others. Remotely the probe sends the
+  defaults first and tries the empty password last. A well-known default
+  that opens the store or any part of it gives `default_password: true`, and
+  which one is never recorded (it would be the store's password). Without
+  the opt-in no default is tried and `default_password` is absent.
+
+  The empty password is NOT behind the opt-in: it is no guess, and is tried
+  locally and remotely either way (for PKCS#12 in both of its encodings, a
+  terminated empty BMPString and no bytes). It is kept apart from the
+  defaults because a store without a password is a fact to record, not a
+  guessed password: a store it opens is `opened: no_password`
+  (`default_password: false` with the opt-in), contents listed. For PKCS#12,
+  `no_password` means the empty password verified the MAC or decrypted an
+  encrypted part, or nothing in the file is protected by a password (no
+  MAC, no encrypted part, no shrouded key). What a plain part states in
+  clear (OpenSSL 3 and keytool keep the shrouded key bag's alias there, and
+  `-certpbe NONE` the certificates) is listed whatever the password, but
+  never by itself makes the store `no_password`: a file whose MAC or
+  encrypted parts the empty password does not open is `not_opened`, with
+  the reason in `unknown`. A part that nothing opens keeps `entry_count`
+  absent and says why in `unknown`. A JKS or JCEKS lists its aliases and
+  certificates in clear by design, and is `no_password` as before.
 
 ## Rules for anyone adding to it
 

@@ -13,7 +13,8 @@ import (
 // needing none (no_password, DefaultPassword false); only a well-known
 // default (changeit) is default_password/true; a real password is
 // DefaultPassword false and opens nothing it would need a password for.
-// Every store is generated here. Without the opt-in nothing is tried.
+// Every store is generated here. Without the opt-in only the empty password
+// is tried (owner, 2026-11-26), and DefaultPassword stays nil.
 func TestEmptyPasswordIsNotADefault(t *testing.T) {
 	type want struct {
 		opened  string
@@ -36,7 +37,7 @@ func TestEmptyPasswordIsNotADefault(t *testing.T) {
 		{"pkcs12", func(pw string) (KeystoreContents, error) { return ParsePKCS12(mkP12(pw), true) }, map[string]want{
 			"":            {OpenedWithoutPassword, false, 1},
 			"changeit":    {OpenedDefaultPassword, true, 1},
-			"Real-Pass-7": {OpenedWithoutPassword, false, 0}, // the key bag's plain part only
+			"Real-Pass-7": {OpenedNot, false, 0}, // the key bag's plain part is listed; the store is not opened
 		}},
 		{"jks", func(pw string) (KeystoreContents, error) {
 			return ParseJKS(ksMakeJKSFixture(t, ksMagicJKS, 2, pw).store, true)
@@ -70,11 +71,18 @@ func TestEmptyPasswordIsNotADefault(t *testing.T) {
 			}
 		}
 	}
-	// Without the opt-in the empty password is not tried: an encrypted
-	// PKCS#12 lists only its plain part, and DefaultPassword is nil.
-	off, err := ParsePKCS12(mkP12(""), false)
-	if err != nil || off.Keystore.DefaultPassword != nil || len(off.Certificates) != 0 {
-		t.Fatalf("without the opt-in: %v %+v", err, off.Keystore)
+	// Without the opt-in the empty password is still tried: it opens the
+	// store whose password is empty and lists its certificate; a store under
+	// a default or a real password stays not_opened. DefaultPassword is nil.
+	for pw, w := range map[string]want{
+		"":            {OpenedWithoutPassword, false, 1},
+		"changeit":    {OpenedNot, false, 0},
+		"Real-Pass-7": {OpenedNot, false, 0},
+	} {
+		off, err := ParsePKCS12(mkP12(pw), false)
+		if err != nil || off.Keystore.DefaultPassword != nil || off.Keystore.Opened != w.opened || len(off.Certificates) != w.entries {
+			t.Fatalf("without the opt-in %q: %v %+v", pw, err, off.Keystore)
+		}
 	}
 	// The default list holds no empty password; it is its own step.
 	for _, pw := range DefaultKeystorePasswords {

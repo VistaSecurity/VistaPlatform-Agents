@@ -124,15 +124,23 @@ takes them from its configuration file.
   browser key databases (NSS), keychains and certificate stores. Off, the
   report's `home_directories` section says `skipped`.
 - **Default keystore passwords** (`host_crypto_default_keystore_passwords`,
-  `--default-keystore-passwords`): try the empty password and the
-  well-known defaults (`changeit`, `changeme`, `password`) against Java and
-  PKCS#12 keystores: on this machine the empty password first, then the
-  defaults; on a remote host the defaults first and the empty password last.
-  A keystore the empty password opens is reported as needing no password
-  (`opened: no_password`, `default_password: false`) and its contents are
-  listed; only a default gives `opened: default_password` and
-  `default_password: true`, also when it opens only a part of the keystore.
-  Which default worked is never recorded.
+  `--default-keystore-passwords`): also try the well-known defaults
+  (`changeit`, `changeme`, `password`) against Java and PKCS#12 keystores:
+  on this machine after the empty password, on a remote host before it.
+  Only a default gives `opened: default_password` and
+  `default_password: true`, also when it opens only a part of the keystore;
+  which default worked is never recorded. Without the opt-in
+  `default_password` is absent.
+
+  The empty password is not a guess, so it is tried with the opt-in on or
+  off. A keystore it opens is reported as needing no password
+  (`opened: no_password`, with the opt-in `default_password: false`) and its
+  contents are listed. A PKCS#12 file reads `no_password` only when the
+  empty password verifies its integrity MAC or decrypts its encrypted parts,
+  or when nothing in it is protected by a password; names and certificates
+  it keeps in an unencrypted part are listed either way, but do not by
+  themselves make it `no_password`. A file whose protection the empty
+  password does not open reads `opened: not_opened`, and `unknown` says why.
 
 ## Directories it sweeps
 

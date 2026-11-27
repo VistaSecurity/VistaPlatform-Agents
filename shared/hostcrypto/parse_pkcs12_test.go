@@ -81,7 +81,9 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 
 			// Without the opt-in: protection, and the key bag the library
 			// keeps in a plain part (no alias: the library writes none). The
-			// certificates are encrypted, so none is listed.
+			// empty password is tried all the same: it opens the store whose
+			// password is empty, and no other. A store it does not open is
+			// not_opened, although its plain part lists the key bag.
 			off, err := ParsePKCS12(p12, false)
 			if err != nil {
 				t.Fatalf("%s: %v", label, err)
@@ -89,8 +91,14 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 			if off.Keystore.Protection != tc.prot {
 				t.Errorf("%s: protection\n got %q\nwant %q", label, off.Keystore.Protection, tc.prot)
 			}
-			if off.Keystore.Opened != OpenedWithoutPassword || off.Keystore.DefaultPassword != nil || off.DefaultsNotTried != "" ||
-				len(off.Keystore.Entries) != 1 || len(off.Certificates) != 0 || off.Keystore.EntryCount != nil {
+			if off.Keystore.DefaultPassword != nil || off.DefaultsNotTried != "" {
+				t.Errorf("%s: without the opt-in, default %v (%q)", label, off.Keystore.DefaultPassword, off.DefaultsNotTried)
+			}
+			if pw.password == "" {
+				if off.Keystore.Opened != OpenedWithoutPassword || len(off.Certificates) != 2 || off.Keystore.EntryCount == nil || *off.Keystore.EntryCount != 2 {
+					t.Errorf("%s: without the opt-in: %+v", label, off.Keystore)
+				}
+			} else if off.Keystore.Opened != OpenedNot || len(off.Keystore.Entries) != 1 || len(off.Certificates) != 0 || off.Keystore.EntryCount != nil {
 				t.Errorf("%s: without the opt-in: %+v", label, off.Keystore)
 			}
 
@@ -103,7 +111,7 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 				t.Errorf("%s: DefaultPassword %v (%q), want %v", label, ks.DefaultPassword, on.DefaultsNotTried, pw.isDef)
 			}
 			if !pw.isDef && pw.password != "" {
-				if ks.Opened != OpenedWithoutPassword || len(on.Certificates) != 0 || ks.EntryCount != nil {
+				if ks.Opened != OpenedNot || len(on.Certificates) != 0 || ks.EntryCount != nil {
 					t.Errorf("%s: listed with a wrong password: %+v", label, ks)
 				}
 				continue
@@ -396,12 +404,13 @@ func TestParsePKCS12_KeytoolLayout(t *testing.T) {
 		leaf, _ := ksCertificate(leafX.Raw)
 		trusted, _ := ksCertificate(trustedX.Raw)
 
-		// Defaults off: the key entry and its alias from the clear attributes.
+		// Defaults off: the key entry and its alias from the clear
+		// attributes, and the store not opened.
 		off, err := ParsePKCS12(b, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if off.Keystore.Opened != OpenedWithoutPassword || len(off.Keystore.Entries) != 1 || off.Keystore.Entries[0].Alias != "rsakey" ||
+		if off.Keystore.Opened != OpenedNot || len(off.Keystore.Entries) != 1 || off.Keystore.Entries[0].Alias != "rsakey" ||
 			off.Keystore.Entries[0].Kind != "private_key" || off.Keystore.EntryCount != nil || len(off.Certificates) != 0 {
 			t.Errorf("mac=%v off: %+v", mac, off.Keystore)
 		}
@@ -438,7 +447,7 @@ func TestParsePKCS12_KeytoolLayout(t *testing.T) {
 		// encrypted part's padding and structure.
 		bad, _, _ := ksKeytoolPFX(t, "S3cret-Other", mac, secret)
 		got, _ := ParsePKCS12(bad, true)
-		if got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword || got.Keystore.Opened != OpenedWithoutPassword {
+		if got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword || got.Keystore.Opened != OpenedNot {
 			t.Errorf("mac=%v wrong password: %q %+v", mac, got.DefaultsNotTried, got.Keystore)
 		}
 	}
@@ -491,11 +500,14 @@ func TestParsePKCS12_SignedDataIsNotCheckable(t *testing.T) {
 }
 
 // Nothing can prove a password right or wrong: no MAC, no encrypted part,
-// only a shrouded key (which is never decrypted). DefaultPassword is nil.
+// only a shrouded key (which is never decrypted). DefaultPassword is nil, and
+// the key's alias is listed from the plain part, but the store is not opened:
+// the key is protected by a password nothing could check.
 func TestParsePKCS12_NothingToCheck(t *testing.T) {
 	b := ksBuildPFX(t, nil, ksDataPart(t, ksShroudedSafeBag(t, 2048, make([]byte, 32), ksAttrName(t, "k"))))
 	got, err := ParsePKCS12(b, true)
-	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedNoCheck || got.Keystore.Opened != OpenedWithoutPassword {
+	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedNoCheck || got.Keystore.Opened != OpenedNot ||
+		len(got.Keystore.Entries) != 1 || got.Keystore.Entries[0].Alias != "k" {
 		t.Errorf("%v %q %+v", err, got.DefaultsNotTried, got.Keystore)
 	}
 }

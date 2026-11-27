@@ -29,11 +29,21 @@ import (
 // encrypted and with which scheme and iteration count. All of that is in the
 // clear by design. Whatever sits in a plain part is listed: certificates
 // (Java trust stores, OpenSSL's "-certpbe NONE") and the aliases of the key
-// bags (keytool keeps its shrouded keys in a plain part, with the alias and
-// key id in clear attributes). That read is [OpenedWithoutPassword].
+// bags (keytool and OpenSSL 3 keep their shrouded keys in a plain part, with
+// the alias and key id in clear attributes).
 //
-// With tryDefaults each of [DefaultKeystorePasswords] is tried, by this file's
-// own code and under a fixed budget of key-derivation work:
+// Reading a plain part is NOT opening the store. The store is
+// [OpenedWithoutPassword] only when the empty password actually opens what
+// the file protects (its MAC verifies with it, or, without a MAC, an
+// encrypted part decrypts with it), or when nothing in the file is protected
+// by a password at all (no MAC, no encrypted part, no shrouded key). A store
+// whose MAC or encrypted parts the empty password does not open is
+// [OpenedNot], whatever its plain parts list.
+//
+// The empty password is always tried, in both of its PKCS#12 encodings: it
+// is no guess. With tryDefaults each of [DefaultKeystorePasswords] is tried
+// too. Every candidate is tried by this file's own code and under a fixed
+// budget of key-derivation work:
 //
 //   - with a MAC, by verifying the MAC (the RFC 7292 appendix B key
 //     derivation and HMAC, or PBMAC1);
@@ -399,12 +409,13 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 		return out, err
 	}
 
-	found, empty := false, false
+	// The empty password is tried whatever tryDefaults says; the defaults
+	// only with it. An empty password is no default: the store needs none.
+	res, reason := st.trial(maxEntries, tryDefaults)
+	found, empty := res == ksP12OpenedByDefault, res == ksP12OpenedByEmpty
+	unprotected := reason == ksNotTriedUnprotected
 	if tryDefaults {
-		res, reason := st.trial(maxEntries)
 		out.DefaultsNotTried = reason
-		// An empty password is no default: the store needs none.
-		found, empty = res == ksP12OpenedByDefault, res == ksP12OpenedByEmpty
 		if reason == "" {
 			out.Keystore.DefaultPassword = &found
 		}
@@ -423,19 +434,45 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 	if !hidden && !st.signed && !out.Truncated {
 		out.Keystore.EntryCount = ksIntPtr(len(entries))
 	}
+	// Opened says what opened the store's protection, never only that a
+	// plain part could be read: aliases and certificates in a plain part are
+	// listed either way, as facts the file states in clear.
 	switch {
 	case found:
 		out.Keystore.Opened = OpenedDefaultPassword
-	case empty, len(entries) > 0 || len(certs) > 0:
+	case empty, unprotected:
 		out.Keystore.Opened = OpenedWithoutPassword
+	default:
+		out.Keystore.Unknown = ksP12LockedReason(reason, tryDefaults, hidden)
 	}
 	// A part that stayed shut keeps what it holds: Opened says how the rest
 	// was read, EntryCount stays nil, and Unknown says why the listing is
 	// short, in words true of what the trial did to each such part.
 	if (found || empty) && hidden {
-		out.Keystore.Unknown = st.hiddenReason()
+		out.Keystore.Unknown = st.hiddenReason(tryDefaults)
 	}
 	return out, nil
+}
+
+// ksP12LockedReason is the Unknown of a store no candidate opened: why, in
+// words true of what was tried, and what the listing holds.
+func ksP12LockedReason(notTried string, defaults, hidden bool) string {
+	var why string
+	switch notTried {
+	case "":
+		why = "the store needs a password that is not empty"
+		if defaults {
+			why = "the store needs a password that is neither empty nor a well-known default"
+		}
+	case ksNotTriedSigned:
+		why = "the store's integrity is by signature, which no password opens"
+	default:
+		why = "no password was tried: " + notTried
+	}
+	if hidden {
+		return why + "; the entries of its encrypted parts are not listed"
+	}
+	return why + "; only what its unencrypted parts state is listed"
 }
 
 // hiddenReason says, for every part that stayed shut, only what the trial
@@ -444,7 +481,7 @@ func ksParsePKCS12(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents
 // its retries were cut for cost, or that it was not tried at all
 // (public-key encrypted, an algorithm not decrypted here). Each reason that
 // applies is given.
-func (st *ksP12Structure) hiddenReason() string {
+func (st *ksP12Structure) hiddenReason(defaults bool) string {
 	var refused, unreadable, costly, untried bool
 	for _, p := range st.parts {
 		switch {
@@ -461,13 +498,21 @@ func (st *ksP12Structure) hiddenReason() string {
 	}
 	var why []string
 	if refused {
-		why = append(why, "part of the store needs a password that is neither empty nor a well-known default")
+		if defaults {
+			why = append(why, "part of the store needs a password that is neither empty nor a well-known default")
+		} else {
+			why = append(why, "part of the store needs a password that is not empty")
+		}
 	}
 	if unreadable {
 		why = append(why, "part of the store decrypted to contents that are not a list of entries")
 	}
 	if costly {
-		why = append(why, "part of the store was not tried with every default password: its iteration count is above the limit")
+		if defaults {
+			why = append(why, "part of the store was not tried with every default password: its iteration count is above the limit")
+		} else {
+			why = append(why, "part of the store was not tried with every encoding of the empty password: its iteration count is above the limit")
+		}
 	}
 	if untried {
 		why = append(why, "part of the store is protected in a way the collector does not try")
@@ -841,11 +886,15 @@ const (
 	ksP12OpenedByDefault
 )
 
-// ksP12Candidates lists the empty password first, as its own step, then the
-// defaults. The empty password is tried both as a terminated empty BMPString
-// and as no bytes at all, because writers differ.
-func ksP12Candidates() []ksP12Password {
+// ksP12Candidates lists the empty password first, as its own step, then,
+// with defaults, the well-known defaults. The empty password is tried both as
+// a terminated empty BMPString and as no bytes at all, because writers
+// differ.
+func ksP12Candidates(defaults bool) []ksP12Password {
 	out := []ksP12Password{{bmp: []byte{0, 0}, utf8: []byte{}, empty: true}, {bmp: nil, utf8: nil, empty: true}}
+	if !defaults {
+		return out
+	}
 	for _, pw := range DefaultKeystorePasswords {
 		var bmp []byte
 		for _, c := range utf16.Encode([]rune(pw)) {
@@ -863,11 +912,12 @@ type ksP12Check struct {
 	test func(pw ksP12Password) bool
 }
 
-// trial tries the empty password, then the defaults. It returns which
-// opened the file (ksP12OpenedByEmpty, ksP12OpenedByDefault) or
-// ksP12NotOpened, or a reason it was not tried. On success the encrypted
-// parts that the password opens are walked into st.bags.
-func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
+// trial tries the empty password, then, with defaults, the well-known
+// defaults. It returns which opened the file (ksP12OpenedByEmpty,
+// ksP12OpenedByDefault) or ksP12NotOpened, or a reason it was not tried. On
+// success the encrypted parts that the password opens are walked into
+// st.bags.
+func (st *ksP12Structure) trial(maxEntries int, defaults bool) (res int, notTried string) {
 	if st.signed {
 		return ksP12NotOpened, ksNotTriedSigned
 	}
@@ -939,7 +989,7 @@ func (st *ksP12Structure) trial(maxEntries int) (res int, notTried string) {
 	// password does not open is retried with the other candidates only from
 	// what is left of the budget; a retry past it is not run and the part
 	// says so (cut), so a store that fitted before still gets its answer.
-	cands := ksP12Candidates()
+	cands := ksP12Candidates(defaults)
 	total := ksMulCost(check.cost, len(cands))
 	for j, o := range openers {
 		if j != verifier {
