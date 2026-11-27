@@ -43,6 +43,10 @@
       "type": "boolean",
       "description": "Send certificate_pem with each certificate. Default true."
     },
+    "traefik": {
+      "type": "boolean",
+      "description": "Also read Traefik's IngressRoutes, IngressRouteTCPs, TLSOptions and TLSStores (traefik.io and traefik.containo.us) and answer the traefik section. Default false: without it the result has no Traefik member, so a platform that does not know them is sent what it always was. An agent that does not know this parameter ignores it and sends no traefik section."
+    },
     "extra_label_keys": {
       "type": "array",
       "items": {

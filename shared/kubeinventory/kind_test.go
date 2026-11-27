@@ -83,6 +83,10 @@ func TestKindCollection(t *testing.T) {
 	for _, class := range []string{ClassCertManager, ClassGateways, ClassMeshIstio, ClassMeshLinkerd, ClassMeshCilium} {
 		section(t, inv, class, StatusUnsupported, ReasonNotInstalled)
 	}
+	// The script asks for Traefik, which kind does not have: the role lets
+	// the agent ask (a refusal would be failed, not_permitted) and the API
+	// server says the API is not there.
+	section(t, inv, SectionTraefik, StatusUnsupported, ReasonNotInstalled)
 
 	if inv.Cluster.ID == "" || inv.Cluster.Distribution != "kubeadm" || !strings.HasPrefix(inv.Cluster.KubernetesVersion, "v1.") ||
 		inv.Cluster.NodeCount == nil || *inv.Cluster.NodeCount < 1 || len(inv.Cluster.CACertificates) == 0 || len(inv.Cluster.APIEndpoints) == 0 {

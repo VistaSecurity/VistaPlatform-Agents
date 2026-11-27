@@ -640,6 +640,23 @@ func TestStandaloneKubernetesInventory(t *testing.T) {
 		}
 	}
 
+	// Traefik only on request.
+	if strings.Contains(res.stdout, "traefik") {
+		t.Error("Traefik is in the record without --traefik")
+	}
+	env, _ = kubeEnv(t, nil)
+	res = runCmd(t, env, "kubernetes-inventory", "--no-kubelet-probe", "--traefik")
+	outputschema.ValidateJSONL(t, []byte(res.stdout))
+	if res.code != 0 || !strings.Contains(res.stdout, `"traefik_ingress_routes"`) || !strings.Contains(res.stdout, `"traefik":{"count":10,"status":"ok"}`) {
+		t.Errorf("--traefik: exit %d\n%s", res.code, res.stderr)
+	}
+	env, cl = kubeEnv(t, nil)
+	cl.SetStatus("/apis/traefik.io/v1alpha1/ingressroutes", 403)
+	res = runCmd(t, env, "kubernetes-inventory", "--no-kubelet-probe", "--traefik")
+	if res.code != 2 || !strings.Contains(res.stderr, "traefik (not_permitted)") {
+		t.Errorf("--traefik, forbidden: exit = %d; stderr:\n%s", res.code, res.stderr)
+	}
+
 	// A class the role does not grant: the run is partial and says which.
 	env, cl = kubeEnv(t, nil)
 	cl.SetStatus("/apis/apps/v1/deployments", 403)

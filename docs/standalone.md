@@ -242,6 +242,10 @@ kubelets serve. What is read, and the record field by field:
   Kubernetes cannot limit to certificates or to that type. The agent asks the
   API server for TLS Secrets only and never decodes a private key.
 - Labels are reported from a short built-in list; `--label-key KEY` adds one.
+- `--traefik` adds Traefik's IngressRoutes, IngressRouteTCPs, TLSOptions and
+  TLSStores and their `traefik` section (the service account needs `list` on
+  them in `traefik.io` and `traefik.containo.us`, which the manifest grants).
+  It reads no Secret.
 - `--no-certificate-pem` writes each certificate's parsed fields without its
   PEM; `--timeout` bounds the whole run (default 10 minutes).
 

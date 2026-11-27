@@ -370,7 +370,7 @@ func TestCollectFullCluster(t *testing.T) {
 func TestNothingButTheProjectionLeavesTheCluster(t *testing.T) {
 	_, c := fullCluster(t)
 	for _, optIn := range []bool{false, true} {
-		inv := collect(t, c, Options{ReadTLSSecrets: optIn, ExtraLabelKeys: []string{"team"}})
+		inv := collect(t, c, Options{ReadTLSSecrets: optIn, ExtraLabelKeys: []string{"team"}, Traefik: optIn})
 		doc, _ := json.Marshal(inv)
 		if i := bytes.Index(doc, []byte("secret-value")); i >= 0 {
 			t.Errorf("opt-in %v: a value the collector must not carry is in the result: ...%s...", optIn, doc[max(0, i-120):min(len(doc), i+40)])
@@ -534,6 +534,7 @@ func TestProjectionsHoldNoOpenValues(t *testing.T) {
 		serviceCIDRObject{}, gatewayClassObject{}, gatewayObject{}, routeObject{}, cmCertificateObject{}, cmIssuerObject{}, cmRequestObject{},
 		csrObject{}, peerAuthenticationObject{}, destinationRuleObject{}, linkerdServerObject{}, linkerdAuthorizationPolicyObject{},
 		webhookConfigurationObject{}, apiServiceObject{},
+		traefikRouteObject{}, traefikTLSOptionObject{}, traefikTLSStoreObject{},
 	} {
 		walk(reflect.TypeOf(v).Name(), reflect.TypeOf(v))
 	}
@@ -750,7 +751,7 @@ func TestRequestsAreExactlyTheDeclaredCalls(t *testing.T) {
 	pathRE := regexp.MustCompile(`^(?:/api/v1|/apis/([^/]+)/([^/]+))(?:/namespaces/([^/]+))?/([a-z]+)(?:/([^/]+))?$`)
 	for _, optIn := range []bool{false, true} {
 		_, c := fullCluster(t)
-		collect(t, c, Options{ReadTLSSecrets: optIn})
+		collect(t, c, Options{ReadTLSSecrets: optIn, Traefik: true})
 		declared := append([]Resource{}, Calls(false)...)
 		if optIn {
 			declared = append(declared, Calls(true)...)
@@ -900,14 +901,14 @@ func TestParseParameters(t *testing.T) {
 	p, err := ParseParameters(map[string]any{
 		"classes": []any{"services", "pods"}, "probe_kubelets": false, "include_certificate_pem": false,
 		"extra_label_keys": []any{"team.example.test/owner", "not a key", 7}, "max_items_per_class": float64(500),
-		"max_part_bytes": float64(2 << 20), "timeout_seconds": float64(90), "unknown": "ignored",
+		"max_part_bytes": float64(2 << 20), "timeout_seconds": float64(90), "unknown": "ignored", "traefik": true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Parameters{MaxPartBytes: 2 << 20, Timeout: 90 * time.Second, Options: Options{
 		Classes: []string{"services", "pods"}, SkipKubeletProbe: true, OmitCertificatePEM: true,
-		ExtraLabelKeys: []string{"team.example.test/owner"}, MaxItemsPerClass: 500,
+		ExtraLabelKeys: []string{"team.example.test/owner"}, MaxItemsPerClass: 500, Traefik: true,
 	}}
 	if !reflect.DeepEqual(p, want) {
 		t.Errorf("got %+v\nwant %+v", p, want)

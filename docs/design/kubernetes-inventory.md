@@ -92,6 +92,7 @@ are all optional:
 | `max_items_per_class` | 100,000 | Stop reading a class after this many rows; the class then answers `failed`, `item_limit` |
 | `max_part_bytes` | 8 MiB | Size at which the result is split into parts |
 | `timeout_seconds` | 600 | Whole-job time limit |
+| `traefik` | false | Also read Traefik's CRDs and answer the `traefik` section (see "Traefik") |
 
 Parameters that would name another cluster or supply a credential
 (`kubeconfig`, `token`, `api_server`, …) make the job invalid. No parameter
@@ -119,6 +120,7 @@ interval. The agent keeps no schedule of its own for this.
 | `policy.linkerd.io` | `servers`, `authorizationpolicies` | list | Linkerd policy |
 | `admissionregistration.k8s.io` | `validatingwebhookconfigurations`, `mutatingwebhookconfigurations` | list | Webhook CA bundles |
 | `apiregistration.k8s.io` | `apiservices` | list | Aggregated API CA bundles |
+| `traefik.io`, `traefik.containo.us` | `ingressroutes`, `ingressroutetcps`, `tlsoptions`, `tlsstores` | list | Traefik edge TLS; only with the job parameter `traefik` |
 | core, **only with the opt-in role** | `secrets` | list | Certificates in TLS Secrets |
 
 The cluster CA bundle is the one the kubelet mounts into the agent's own pod
@@ -219,6 +221,9 @@ a device-agent job result. The schema is closed at every level.
 | `kubelets` | a handshake with one node's kubelet | node, address, port, outcome, TLS version, cipher suite, chain, whether it chains to the cluster CA |
 | `admission_webhooks` | one webhook of a webhook configuration | configuration, name, the Service or host it calls, failure policy, CA bundle |
 | `api_services` | an aggregated API | name, the Service behind it, whether TLS verification is skipped, CA bundle |
+| `traefik_ingress_routes` | an IngressRoute or IngressRouteTCP (`traefik` only) | kind, API group, namespace, name, entry points, routes (redacted match, hosts, Services), TLS (Secret name, options reference, effective options, store, certificate resolver, domains, passthrough) |
+| `traefik_tls_options` | a TLSOption (`traefik` only) | API group, namespace, name, minimum and maximum version, cipher suites, curves, client authentication (type, CA Secret names), SNI strictness, ALPN protocols |
+| `traefik_tls_stores` | a TLSStore (`traefik` only) | API group, namespace, name, default certificate Secret name, certificate Secret names |
 | `certificates` | one distinct certificate | the fields of the one certificate format ([`defs/certificate.json`](../../schemas/managed/v1/defs/certificate.json)), keyed by `fingerprint_sha256` |
 
 **Certificates appear once.** Every other row names a certificate by its
@@ -228,8 +233,10 @@ cannot occur.
 
 **A Secret has no row unless TLS Secrets are read.** It is known by name
 through `secret_name` on an Ingress TLS entry or a Certificate,
-`certificate_refs` on a Gateway listener, `ca_secret_name` on an issuer and
-`secret_volumes` on a workload.
+`certificate_refs` on a Gateway listener, `ca_secret_name` on an issuer,
+`secret_volumes` on a workload, and with `traefik` the `secret_name` of an
+IngressRoute's TLS, a TLSStore's `default_certificate_secret` and
+`certificate_secrets`, and a TLSOption's `client_auth.secret_names`.
 
 ### Attribution
 
@@ -276,12 +283,89 @@ the workload's mode.
 | `failed` | It should have been readable and was not. Rows read before the failure are sent; nothing may be concluded from what is missing | `not_permitted`, `api_error`, `timeout`, `item_limit`, `unreachable` |
 | `unsupported` | Not in this cluster, not given to this deployment, or not collected by this release | `not_installed`, `not_enabled`, `not_requested`, `not_collected_in_this_release` |
 
+`sections` has a `traefik` entry only when the job asked for Traefik (see
+"Traefik"); it is not a class and cannot be named in `classes`.
+
 `control_plane_node_certificates` always answers `unsupported`,
 `not_collected_in_this_release`: it stands for the etcd, scheduler and
 controller-manager certificates, which are files on control-plane nodes.
 
 A job fails as a whole (`success: false`) only when the cluster id cannot be
 read, the agent is not running in a cluster, or the job is invalid.
+
+## Traefik
+
+Traefik's routing and TLS are its own CRDs, which no other member can hold,
+and the record is closed, so an agent that sent them unasked would have its
+result refused by a platform that does not know them. They are therefore
+read only when the job parameters carry `"traefik": true` (job parameters
+are open, so an older agent ignores the parameter and sends no `traefik`
+section). Without the parameter no Traefik API is called and the record is
+byte for byte what it was before; a test holds that. A missing `traefik`
+section means the agent was not asked or does not collect it, never "none".
+
+- **What is read.** `list` on `ingressroutes`, `ingressroutetcps`,
+  `tlsoptions` and `tlsstores`, in `traefik.io/v1alpha1` and in the legacy
+  `traefik.containo.us/v1alpha1`; all eight every time. Each row says its
+  `api_group`, because the same namespace and name can exist in both: two
+  objects. No Secret is read: Secrets are named (`secret_name`, a store's
+  `default_certificate_secret` and `certificate_secrets`, a TLSOption's
+  `client_auth.secret_names`) as an Ingress's are. Middlewares,
+  ServersTransports and IngressRouteUDPs are not read; fields of the read
+  objects that the record does not name (middlewares on a route, a
+  TLSOption's `caFiles`, a store's generated-certificate settings) are not
+  decoded.
+- **The answer.** `ok`; `unsupported`, `not_installed` when neither group
+  serves IngressRoutes (a 404 on any other of the eight is "none"); `failed`,
+  `not_permitted` on a 403 on any of them; `failed`, `item_limit` or
+  `api_error` as for any class. `count` is routes, options and stores
+  together.
+- **The rule is redacted.** A route's `match` is free text that commonly
+  carries shared secrets (``Header(`X-Api-Key`, `...`)``,
+  ``Query(`token`, `...`)``, `ClientIP` lists), so it is tokenised and rebuilt:
+  matcher names, `&&`, `||`, `!` and grouping are kept; the quoted arguments
+  of `Host`, `HostSNI`, `HostRegexp`, `HostSNIRegexp`, `Path`, `PathPrefix`,
+  `PathRegexp`, `Method` and `ALPN` are kept; of `Header`, `HeaderRegexp`,
+  `Headers`, `HeadersRegexp`, `Query` and `QueryRegexp` only the first
+  argument, the key name; every other literal, including all arguments of a
+  matcher the agent does not know, becomes `[REDACTED]`. Backtick and
+  double-quoted literals (with escapes) are read, in Traefik v2 and v3
+  syntax. A rule that cannot be tokenised safely is sent with no `match` at
+  all. Redaction comes before the 1024-character cut.
+- **Hosts.** A route's `hosts` are the literal arguments of `Host(...)` and
+  `HostSNI(...)` in its rule, lower case and sorted, only where they are
+  certain: none for a rule with a negation or a host regular expression, an
+  `||` inside parentheses, or a top-level alternative that names no host
+  (``HostSNI(`*`)`` has none). Hosts are read from the whole rule.
+- **Effective TLS options**, resolved by the agent as Traefik documents it:
+  the TLSOption the route's `tls.options` names (`source: referenced`; its
+  namespace is the route's when the reference names none); else the one
+  TLSOption named `default`, in whatever namespace (`source: default`); else
+  Traefik's built-in options (`source: traefik_builtin`), which is also what
+  Traefik uses when more than one TLSOption is named `default`
+  (`default_conflict: true`). The same namespace's `default` served under both
+  groups counts once. A reference in Traefik's cross-provider form
+  (`name@provider`) is carried as `name` and `provider` with no namespace: the
+  option lives outside the cluster's API. A passthrough route has no
+  effective options (Traefik does not terminate its TLS). When the TLSOptions
+  could not be read, a route that references none has no effective options
+  rather than a guess.
+  `referenced` says what the route names, not that Traefik serves it: Traefik
+  registers any TLSOption named `default` as the global default, so a
+  reference to a TLSOption named `default` in a namespace may not resolve as
+  written; and Traefik refuses a cross-namespace `options` or `store`
+  reference unless `allowCrossNamespace` is set in its static configuration,
+  which the agent cannot see. `default_conflict` counts TLSOptions named
+  `default` from both API groups, and Traefik v3 no longer reads
+  `traefik.containo.us`, so a stale legacy `default` can set it on a v3
+  cluster.
+- **Not visible to the API**, and so not in the record: TLS options, stores
+  and certificates set in Traefik's static or file configuration (including
+  the `defaultTLSResourcesNamespace` restriction on where the `default`
+  option may live), certificates a certificate resolver obtained (the record
+  says which resolver, not the certificate), and Ingresses annotated for
+  Traefik (they are in `ingresses`). What is shown is what the cluster's API
+  declares.
 
 ## Parts
 
@@ -337,7 +421,10 @@ kubeconfig.
   every pod and Service; each class's three answers; the `tls.key` test; that
   no projection can hold an open value; that every request is a declared call
   and every declared call is made; splitting into parts. The fixtures are
-  written by hand, not recorded from real clusters.
+  written by hand, not recorded from real clusters. Traefik: without the
+  parameter no Traefik call and an identical record; the current group, the
+  legacy group, both; not installed, forbidden, item limit; option
+  resolution; host parsing.
 - Job (`internal/deviceagent/devices`): the dispatch, the refusals (credentials,
   another cluster, not negotiated, not in a cluster), parts.
 - Manifest (`shared/kubeinventory/manifest_test.go`): the role in
@@ -352,5 +439,6 @@ kubeconfig.
   under the restricted Pod Security Standard; what the API server says each
   service account may and may not do; a collection made in a pod by the
   device agent's service account, validated against the schema, with and
-  without the TLS Secrets opt-in; removal. It does not cover enrollment with
+  without the TLS Secrets opt-in, and with Traefik asked for (kind has none,
+  so it answers not installed); removal. It does not cover enrollment with
   a platform, a scan job, or any distribution but kind's kubeadm.

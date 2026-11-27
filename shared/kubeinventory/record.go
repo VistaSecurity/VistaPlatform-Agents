@@ -78,6 +78,13 @@ const (
 	ClassAPIServices       = "api_services"
 )
 
+// SectionTraefik is the answer for Traefik's IngressRoutes, TLS options and
+// TLS stores. It is not a class: it is not in Classes, cannot be named in a
+// job's classes, and is present in sections only when the job asked for
+// Traefik (the parameter "traefik"), so a record without it is what an agent
+// that does not collect Traefik sends.
+const SectionTraefik = "traefik"
+
 // Classes is every class, in schema order.
 var Classes = []string{
 	ClassCluster, ClassNodes, ClassNamespaces, ClassWorkloads, ClassPods, ClassServices, ClassIngresses,
@@ -135,6 +142,12 @@ type Inventory struct {
 	AdmissionWebhooks            []AdmissionWebhook           `json:"admission_webhooks,omitempty"`
 	APIServices                  []APIService                 `json:"api_services,omitempty"`
 	Certificates                 []Certificate                `json:"certificates,omitempty"`
+
+	// The Traefik lists are sent only when a job asks for them (the job
+	// parameter "traefik"); see traefik.go.
+	TraefikIngressRoutes []TraefikIngressRoute `json:"traefik_ingress_routes,omitempty"`
+	TraefikTLSOptions    []TraefikTLSOption    `json:"traefik_tls_options,omitempty"`
+	TraefikTLSStores     []TraefikTLSStore     `json:"traefik_tls_stores,omitempty"`
 }
 
 // Collector says how this deployment was set up.
