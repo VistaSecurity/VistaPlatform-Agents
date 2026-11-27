@@ -81,7 +81,9 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 
 			// Without the opt-in: protection, and the key bag the library
 			// keeps in a plain part (no alias: the library writes none). The
-			// certificates are encrypted, so none is listed.
+			// empty password is tried all the same: it opens the store whose
+			// password is empty, and no other. A store it does not open is
+			// not_opened, although its plain part lists the key bag.
 			off, err := ParsePKCS12(p12, false)
 			if err != nil {
 				t.Fatalf("%s: %v", label, err)
@@ -89,8 +91,14 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 			if off.Keystore.Protection != tc.prot {
 				t.Errorf("%s: protection\n got %q\nwant %q", label, off.Keystore.Protection, tc.prot)
 			}
-			if off.Keystore.Opened != OpenedWithoutPassword || off.Keystore.DefaultPassword != nil || off.DefaultsNotTried != "" ||
-				len(off.Keystore.Entries) != 1 || len(off.Certificates) != 0 || off.Keystore.EntryCount != nil {
+			if off.Keystore.DefaultPassword != nil || off.DefaultsNotTried != "" {
+				t.Errorf("%s: without the opt-in, default %v (%q)", label, off.Keystore.DefaultPassword, off.DefaultsNotTried)
+			}
+			if pw.password == "" {
+				if off.Keystore.Opened != OpenedWithoutPassword || len(off.Certificates) != 2 || off.Keystore.EntryCount == nil || *off.Keystore.EntryCount != 2 {
+					t.Errorf("%s: without the opt-in: %+v", label, off.Keystore)
+				}
+			} else if off.Keystore.Opened != OpenedNot || len(off.Keystore.Entries) != 1 || len(off.Certificates) != 0 || off.Keystore.EntryCount != nil {
 				t.Errorf("%s: without the opt-in: %+v", label, off.Keystore)
 			}
 
@@ -103,7 +111,7 @@ func TestParsePKCS12_ProtectionAndDefaults(t *testing.T) {
 				t.Errorf("%s: DefaultPassword %v (%q), want %v", label, ks.DefaultPassword, on.DefaultsNotTried, pw.isDef)
 			}
 			if !pw.isDef && pw.password != "" {
-				if ks.Opened != OpenedWithoutPassword || len(on.Certificates) != 0 || ks.EntryCount != nil {
+				if ks.Opened != OpenedNot || len(on.Certificates) != 0 || ks.EntryCount != nil {
 					t.Errorf("%s: listed with a wrong password: %+v", label, ks)
 				}
 				continue
@@ -396,12 +404,13 @@ func TestParsePKCS12_KeytoolLayout(t *testing.T) {
 		leaf, _ := ksCertificate(leafX.Raw)
 		trusted, _ := ksCertificate(trustedX.Raw)
 
-		// Defaults off: the key entry and its alias from the clear attributes.
+		// Defaults off: the key entry and its alias from the clear
+		// attributes, and the store not opened.
 		off, err := ParsePKCS12(b, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if off.Keystore.Opened != OpenedWithoutPassword || len(off.Keystore.Entries) != 1 || off.Keystore.Entries[0].Alias != "rsakey" ||
+		if off.Keystore.Opened != OpenedNot || len(off.Keystore.Entries) != 1 || off.Keystore.Entries[0].Alias != "rsakey" ||
 			off.Keystore.Entries[0].Kind != "private_key" || off.Keystore.EntryCount != nil || len(off.Certificates) != 0 {
 			t.Errorf("mac=%v off: %+v", mac, off.Keystore)
 		}
@@ -438,13 +447,13 @@ func TestParsePKCS12_KeytoolLayout(t *testing.T) {
 		// encrypted part's padding and structure.
 		bad, _, _ := ksKeytoolPFX(t, "S3cret-Other", mac, secret)
 		got, _ := ParsePKCS12(bad, true)
-		if got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword || got.Keystore.Opened != OpenedWithoutPassword {
+		if got.Keystore.DefaultPassword == nil || *got.Keystore.DefaultPassword || got.Keystore.Opened != OpenedNot {
 			t.Errorf("mac=%v wrong password: %q %+v", mac, got.DefaultsNotTried, got.Keystore)
 		}
 	}
 }
 
-// The reviewer's hang: no MAC, one encrypted part at 1 iteration under the
+// A hang once found: no MAC, one encrypted part at 1 iteration under the
 // empty password, and inside it a key bag asking for 2,000,000,000
 // iterations. Keys are never decrypted, so the count is only described.
 func TestParsePKCS12_HiddenKeyIterationsCostNothing(t *testing.T) {
@@ -470,7 +479,7 @@ func TestParsePKCS12_HiddenKeyIterationsCostNothing(t *testing.T) {
 	}
 }
 
-// The reviewer's false positive: a signedData authenticated safe, even with a
+// A false positive once found: a signedData authenticated safe, even with a
 // MacData beside it, cannot be checked by a password.
 func TestParsePKCS12_SignedDataIsNotCheckable(t *testing.T) {
 	inner, _ := asn1.Marshal([]byte("x"))
@@ -491,11 +500,14 @@ func TestParsePKCS12_SignedDataIsNotCheckable(t *testing.T) {
 }
 
 // Nothing can prove a password right or wrong: no MAC, no encrypted part,
-// only a shrouded key (which is never decrypted). DefaultPassword is nil.
+// only a shrouded key (which is never decrypted). DefaultPassword is nil, and
+// the key's alias is listed from the plain part, but the store is not opened:
+// the key is protected by a password nothing could check.
 func TestParsePKCS12_NothingToCheck(t *testing.T) {
 	b := ksBuildPFX(t, nil, ksDataPart(t, ksShroudedSafeBag(t, 2048, make([]byte, 32), ksAttrName(t, "k"))))
 	got, err := ParsePKCS12(b, true)
-	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedNoCheck || got.Keystore.Opened != OpenedWithoutPassword {
+	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedNoCheck || got.Keystore.Opened != OpenedNot ||
+		len(got.Keystore.Entries) != 1 || got.Keystore.Entries[0].Alias != "k" {
 		t.Errorf("%v %q %+v", err, got.DefaultsNotTried, got.Keystore)
 	}
 }
@@ -540,15 +552,44 @@ func TestKsCBCDecrypt_Padding(t *testing.T) {
 
 func TestParsePKCS12_WorkIsBounded(t *testing.T) {
 	fx := ksMakeP12Fixture(t)
-	// Five candidate passwords at 1,000,000 MAC iterations is over the budget.
+	// Five candidate passwords at 1,000,000 MAC iterations is over the
+	// budget; the empty password alone fits, is tried, and the defaults are
+	// said to be cut.
 	heavy, err := pkcs12.Modern.WithIterations(1_000_000).Encode(fx.key, fx.leaf, nil, "Not-A-Default-9")
 	if err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
 	got, err := ParsePKCS12(heavy, true)
-	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedCost || time.Since(start) > 30*time.Second {
+	if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedDefaultsCost || got.Keystore.Opened != OpenedNot || time.Since(start) > 30*time.Second {
 		t.Errorf("costly file: %v %q %+v %v", err, got.DefaultsNotTried, got.Keystore, time.Since(start))
+	}
+	// Past what even the empty password may cost (a part asking 3,000,000
+	// iterations, its ciphertext never derived), nothing is tried, either way.
+	ct := ksRandKey(t, 64)
+	type eci struct {
+		ContentType asn1.ObjectIdentifier
+		Alg         ksAlgorithmIdentifier
+		Content     []byte `asn1:"tag:0,optional"`
+	}
+	ed, err := asn1.Marshal(struct {
+		Version int
+		ECI     eci
+	}{0, eci{ksOIDData, ksTestPBES2(t, 3_000_000, make([]byte, 16)), ct}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	huge := ksBuildPFX(t, nil, ksContentInfo{ContentType: ksOIDEncryptedData, Content: ksExplicit0(ed)})
+	for _, try := range []bool{false, true} {
+		start = time.Now()
+		got, err = ParsePKCS12(huge, try)
+		want := ""
+		if try {
+			want = ksNotTriedCost
+		}
+		if err != nil || got.Keystore.DefaultPassword != nil || got.DefaultsNotTried != want || got.Keystore.Opened != OpenedNot || time.Since(start) > 5*time.Second {
+			t.Errorf("past the budget (opt-in %v): %v %q %+v %v", try, err, got.DefaultsNotTried, got.Keystore, time.Since(start))
+		}
 	}
 	// Many cheap parts add up: 2,000 encrypted parts of 2,500 iterations.
 	var parts []ksContentInfo
@@ -668,16 +709,23 @@ func FuzzParsePKCS12(f *testing.F) {
 	f.Add(ksBuildPFX(f, nil, ksEncryptedPart(f, "", 1, inner...)))
 	f.Add(ksBuildPFX(f, ksStr("changeit"), ksDataPart(f, inner...)))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		start := time.Now()
-		got, _ := ksParsePKCS12(b, true, 50)
-		if d := time.Since(start); d > 30*time.Second {
-			t.Fatalf("took %v", d)
-		}
-		if len(got.Keystore.Entries) > 50 {
-			t.Fatal("cap exceeded")
-		}
-		if got.DefaultsNotTried != "" && got.Keystore.DefaultPassword != nil {
-			t.Fatal("not tried, yet answered")
+		// With and without the opt-in: the empty password's trial runs in
+		// both and is bounded the same way.
+		for _, try := range []bool{true, false} {
+			start := time.Now()
+			got, _ := ksParsePKCS12(b, try, 50)
+			if d := time.Since(start); d > 30*time.Second {
+				t.Fatalf("took %v", d)
+			}
+			if len(got.Keystore.Entries) > 50 {
+				t.Fatal("cap exceeded")
+			}
+			if got.DefaultsNotTried != "" && got.Keystore.DefaultPassword != nil {
+				t.Fatal("not tried, yet answered")
+			}
+			if !try && (got.DefaultsNotTried != "" || got.Keystore.DefaultPassword != nil || got.Keystore.Opened == OpenedDefaultPassword) {
+				t.Fatalf("a default answer without the opt-in: %+v", got.Keystore)
+			}
 		}
 	})
 }

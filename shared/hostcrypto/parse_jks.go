@@ -26,9 +26,14 @@ import (
 //	digest       20 bytes: SHA-1(password as UTF-16BE || "Mighty Aphrodite" || everything before)
 //
 // The point that matters for posture: the aliases and the certificates are in
-// the clear. Listing a JKS needs no password, so a JKS read is
-// [OpenedWithoutPassword]. The password protects only the private keys (each
-// under its own key password, usually the same) and the integrity digest.
+// the clear, so a JKS is listed without a password whatever its password is.
+// That listing is not the store opening: the password protects the private
+// keys (each under its own key password, usually the same) and the integrity
+// digest. The store is [OpenedWithoutPassword] only when the empty password
+// produces its digest (checked always: it is no guess), and
+// [OpenedDefaultPassword] when, with the opt-in, a well-known default does.
+// Otherwise it is [OpenedNot], its entries and certificates still listed and
+// Unknown saying the integrity password is not empty.
 //
 // The protected key bytes are skipped by length and never copied out: the
 // private-key entry's algorithm, size and public-key hash come from the first
@@ -57,10 +62,11 @@ var errKsNotJKS = errors.New("not a JKS or JCEKS keystore")
 // every certificate, and for a private key entry what its certificate says
 // about the key.
 //
-// With tryDefaults it also checks the integrity digest against each of
-// [DefaultKeystorePasswords]. That answers "does a default password open
-// this?" without decrypting anything: the digest is keyed by the store
-// password, and a match proves it.
+// It checks the integrity digest against the empty password always and, with
+// tryDefaults, against each of [DefaultKeystorePasswords]. That answers "does
+// the store need a password?" and "does a default password open this?"
+// without decrypting anything: the digest is keyed by the store password,
+// and a match proves it.
 //
 // A JCEKS secret-key entry is a serialized Java object whose length is not
 // stated; it cannot be stepped over without a Java deserializer, which this
@@ -87,19 +93,27 @@ func ksParseJKS(b []byte, tryDefaults bool, maxEntries int) (KeystoreContents, e
 	default:
 		return out, errKsNotJKS
 	}
-	out.Keystore.Opened = OpenedWithoutPassword
-
-	if tryDefaults {
-		if len(b) < 12+ksJKSDigestLen {
+	out.Keystore.Opened = OpenedNot
+	if len(b) < 12+ksJKSDigestLen {
+		out.Keystore.Unknown = "the file is too short to hold an integrity digest"
+		if tryDefaults {
 			out.DefaultsNotTried = "file too short to hold an integrity digest"
-		} else {
-			// The empty password first, as its own step: it is no default.
-			empty, ok := ksJKSPasswords(b)
-			ok = ok && !empty
-			out.Keystore.DefaultPassword = &ok
-			if ok {
-				out.Keystore.Opened = OpenedDefaultPassword
-			}
+		}
+	} else {
+		// The empty password first, as its own step: it is no default.
+		empty, deflt := ksJKSPasswords(b, tryDefaults)
+		switch {
+		case empty:
+			out.Keystore.Opened = OpenedWithoutPassword
+		case deflt:
+			out.Keystore.Opened = OpenedDefaultPassword
+		case tryDefaults:
+			out.Keystore.Unknown = "aliases and certificates are stated in clear; the store's integrity password is neither empty nor a well-known default"
+		default:
+			out.Keystore.Unknown = "aliases and certificates are stated in clear; the store's integrity password is not empty"
+		}
+		if tryDefaults {
+			out.Keystore.DefaultPassword = &deflt
 		}
 	}
 
@@ -221,18 +235,21 @@ func ksJavaUTF(r *ksReader) string {
 	return strings.ToValidUTF8(strings.ReplaceAll(string(s), "\xc0\x80", "\x00"), "�")
 }
 
-// ksJKSPasswords reports whether the empty password, and else one of the
-// default passwords, produces the file's integrity digest. It needs nothing
-// but the last 20 bytes and what precedes them, so it answers even when the
-// listing could not finish. A store whose password is empty needs none; it
-// is listed without one either way.
-func ksJKSPasswords(b []byte) (empty, deflt bool) {
+// ksJKSPasswords reports whether the empty password, and else (with
+// defaults) one of the default passwords, produces the file's integrity
+// digest. It needs nothing but the last 20 bytes and what precedes them, so
+// it answers even when the listing could not finish. A store whose password
+// is empty needs none.
+func ksJKSPasswords(b []byte, defaults bool) (empty, deflt bool) {
 	if len(b) < 12+ksJKSDigestLen {
 		return false, false
 	}
 	body, want := b[:len(b)-ksJKSDigestLen], b[len(b)-ksJKSDigestLen:]
 	if subtle.ConstantTimeCompare(ksJKSDigest("", body), want) == 1 {
 		return true, false
+	}
+	if !defaults {
+		return false, false
 	}
 	for _, pw := range DefaultKeystorePasswords {
 		if subtle.ConstantTimeCompare(ksJKSDigest(pw, body), want) == 1 {

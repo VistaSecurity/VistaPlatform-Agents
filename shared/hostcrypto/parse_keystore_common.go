@@ -37,12 +37,12 @@ type KeystoreContents struct {
 // never WHICH one: which default opens a store is itself the store's
 // password, and a report must not carry a password.
 //
-// The EMPTY password is not among them. It is tried as a step of its own
-// (with the same opt-in), and a store it opens is reported as needing no
-// password ([OpenedWithoutPassword], DefaultPassword false): a store without
-// a password is a fact the report records, not a well-known password
-// guessed. Saying so carries no secret, since the empty password is the one
-// value a reader can always assume.
+// The EMPTY password is not among them. It is tried as a step of its own,
+// with or without the opt-in, and a store it opens is reported as needing no
+// password ([OpenedWithoutPassword]; DefaultPassword false with the opt-in,
+// nil without): a store without a password is a fact the report records,
+// not a well-known password guessed. Saying so carries no secret, since the
+// empty password is the one value a reader can always assume.
 var DefaultKeystorePasswords = []string{"changeit", "changeme", "password"}
 
 // DefaultMaxKeystoreEntries bounds how many entries one keystore listing keeps.

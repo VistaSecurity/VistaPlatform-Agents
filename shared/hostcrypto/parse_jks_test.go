@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1" //nolint:gosec // the test encoder computes the format's own digest
 	"encoding/binary"
+	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -111,7 +112,7 @@ func TestParseJKS_ListsWithoutAPassword(t *testing.T) {
 			if got.Truncated || got.DefaultsNotTried != "" {
 				t.Errorf("truncated %v, not tried %q", got.Truncated, got.DefaultsNotTried)
 			}
-			if ks.Type != tc.typ || ks.Protection != tc.prot || ks.Opened != OpenedWithoutPassword {
+			if ks.Type != tc.typ || ks.Protection != tc.prot || ks.Opened != OpenedNot {
 				t.Errorf("type/protection/opened: %q %q %q", ks.Type, ks.Protection, ks.Opened)
 			}
 			if ks.DefaultPassword != nil {
@@ -150,8 +151,7 @@ func TestParseJKS_DefaultPassword(t *testing.T) {
 		{"changeit", true},
 		{"changeme", true},
 		{"password", true},
-		// An empty password is no default: the store needs none (owner,
-		// 2026-11-25).
+		// An empty password is no default: the store needs none.
 		{"", false},
 		{"s3cret-not-default", false},
 	} {
@@ -165,17 +165,29 @@ func TestParseJKS_DefaultPassword(t *testing.T) {
 			if ks.DefaultPassword == nil || *ks.DefaultPassword != tc.want {
 				t.Errorf("%q magic %x: DefaultPassword %v, want %v", tc.password, magic, ks.DefaultPassword, tc.want)
 			}
-			wantOpened := OpenedWithoutPassword
-			if tc.want {
+			// Only the empty digest makes the store no_password; a default
+			// makes it default_password; anything else is not_opened, its
+			// clear entries still listed.
+			wantOpened, wantOff := OpenedNot, OpenedNot
+			switch {
+			case tc.password == "":
+				wantOpened, wantOff = OpenedWithoutPassword, OpenedWithoutPassword
+			case tc.want:
 				wantOpened = OpenedDefaultPassword
 			}
-			if ks.Opened != wantOpened {
-				t.Errorf("%q: opened %q", tc.password, ks.Opened)
+			if ks.Opened != wantOpened || len(ks.Entries) != 2 || len(got.Certificates) != 3 {
+				t.Errorf("%q: opened %q, %d entries, %d certificates", tc.password, ks.Opened, len(ks.Entries), len(got.Certificates))
 			}
-			// Off means off: the same store, no trial.
+			if (ks.Opened == OpenedNot) != strings.Contains(ks.Unknown, "neither empty nor a well-known default") {
+				t.Errorf("%q: unknown %q", tc.password, ks.Unknown)
+			}
+			// Off: the empty digest only, DefaultPassword absent.
 			off, _ := ParseJKS(fx.store, false)
-			if off.Keystore.DefaultPassword != nil || off.Keystore.Opened != OpenedWithoutPassword {
-				t.Errorf("%q: trial ran without the opt-in", tc.password)
+			if off.Keystore.DefaultPassword != nil || off.Keystore.Opened != wantOff || len(off.Keystore.Entries) != 2 || len(off.Certificates) != 3 {
+				t.Errorf("%q: without the opt-in: %+v", tc.password, off.Keystore)
+			}
+			if (wantOff == OpenedNot) != (off.Keystore.Unknown == "aliases and certificates are stated in clear; the store's integrity password is not empty") {
+				t.Errorf("%q: without the opt-in, unknown %q", tc.password, off.Keystore.Unknown)
 			}
 		}
 	}
