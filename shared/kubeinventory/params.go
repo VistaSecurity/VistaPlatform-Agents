@@ -47,6 +47,9 @@ func ParseParameters(params map[string]any) (Parameters, error) {
 	if v, ok := params["probe_kubelets"].(bool); ok {
 		out.Options.SkipKubeletProbe = !v
 	}
+	if v, ok := params["traefik"].(bool); ok {
+		out.Options.Traefik = v
+	}
 	if v, ok := params["include_certificate_pem"].(bool); ok {
 		out.Options.OmitCertificatePEM = !v
 	}

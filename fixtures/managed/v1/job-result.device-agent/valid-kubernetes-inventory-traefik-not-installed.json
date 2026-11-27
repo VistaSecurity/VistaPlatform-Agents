@@ -1,0 +1,109 @@
+{
+  "job_id": "5d0c2a4e-7b1f-4c3a-9e2d-6f8a1b0c9d7e",
+  "success": true,
+  "completed_at": "2026-01-02T03:04:05Z",
+  "kubernetes_inventory": {
+    "schema_version": 1,
+    "collection_id": "00000000-0000-4000-8000-000000007a05",
+    "part": {
+      "index": 0,
+      "count": 1
+    },
+    "collected_at": "2026-01-02T03:04:05Z",
+    "duration_ms": 4210,
+    "collector": {
+      "tls_secrets": "not_enabled",
+      "agent_namespace": "vista-agents"
+    },
+    "cluster": {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "kubernetes_version": "v1.33.4"
+    },
+    "sections": {
+      "cluster": {
+        "status": "ok",
+        "count": 1
+      },
+      "nodes": {
+        "status": "ok",
+        "count": 1
+      },
+      "namespaces": {
+        "status": "ok",
+        "count": 2
+      },
+      "workloads": {
+        "status": "ok",
+        "count": 2
+      },
+      "pods": {
+        "status": "ok",
+        "count": 2
+      },
+      "services": {
+        "status": "ok",
+        "count": 3
+      },
+      "ingresses": {
+        "status": "ok",
+        "count": 1
+      },
+      "gateways": {
+        "status": "ok",
+        "count": 1
+      },
+      "cert_manager": {
+        "status": "ok",
+        "count": 3
+      },
+      "certificate_signing_requests": {
+        "status": "ok",
+        "count": 1
+      },
+      "tls_secrets": {
+        "status": "unsupported",
+        "reason": "not_enabled",
+        "message": "Reading TLS Secrets is not enabled in this cluster."
+      },
+      "mesh_istio": {
+        "status": "ok",
+        "count": 2
+      },
+      "mesh_linkerd": {
+        "status": "unsupported",
+        "reason": "not_installed"
+      },
+      "mesh_cilium": {
+        "status": "failed",
+        "reason": "not_permitted",
+        "message": "configmaps \"cilium-config\" is forbidden"
+      },
+      "api_server_certificate": {
+        "status": "ok",
+        "count": 1
+      },
+      "kubelet_certificates": {
+        "status": "ok",
+        "count": 1
+      },
+      "control_plane_node_certificates": {
+        "status": "unsupported",
+        "reason": "not_collected_in_this_release",
+        "message": "etcd, scheduler and controller-manager certificates are files on control-plane nodes."
+      },
+      "admission_webhooks": {
+        "status": "ok",
+        "count": 1
+      },
+      "api_services": {
+        "status": "ok",
+        "count": 1
+      },
+      "traefik": {
+        "status": "unsupported",
+        "reason": "not_installed",
+        "message": "The cluster does not serve this API."
+      }
+    }
+  }
+}

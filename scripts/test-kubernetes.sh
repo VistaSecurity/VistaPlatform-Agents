@@ -116,7 +116,7 @@ spec:
       containers:
         - name: collect
           image: $agent_image
-          args: ["kubernetes-inventory", "--format", "jsonl", "--quiet"]
+          args: ["kubernetes-inventory", "--format", "jsonl", "--quiet", "--traefik"]
           env: [{name: VISTA_KUBERNETES_READ_TLS_SECRETS, value: "$2"}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
           volumeMounts: [{name: tmp, mountPath: /tmp}]

@@ -36,6 +36,11 @@ type Options struct {
 	// set from the agent's own configuration in the cluster and from nowhere
 	// else: ParseParameters never sets it.
 	ReadTLSSecrets bool
+	// Traefik adds Traefik's IngressRoutes, IngressRouteTCPs, TLSOptions and
+	// TLSStores and the traefik section (job parameter "traefik"). Without
+	// it the record has none of them, so a platform that does not know them
+	// receives the record it always has. Classes does not limit it.
+	Traefik bool
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -118,6 +123,7 @@ func Collect(ctx context.Context, c *Client, opts Options) (*Inventory, error) {
 	k.collectCilium(ctx)
 	k.collectAdmission(ctx)
 	k.collectAPIServices(ctx)
+	k.collectTraefik(ctx)
 	k.collectKubelets(ctx)
 	k.collectAPIServer()
 

@@ -1,0 +1,223 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "web",
+    "namespace": "shop",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a01",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "kind": "Rule",
+      "match": "Host(`Shop.example.test`) && PathPrefix(`/`)",
+      "priority": 10,
+      "middlewares": [
+       {
+        "name": "auth",
+        "namespace": "shop"
+       }
+      ],
+      "services": [
+       {
+        "name": "web",
+        "port": 443,
+        "scheme": "https",
+        "serversTransport": "middleware-secret-value"
+       },
+       {
+        "kind": "TraefikService",
+        "name": "canary"
+       }
+      ]
+     },
+     {
+      "match": "Host(`a.example.test`) || Host(`b.example.test`)",
+      "services": [
+       {
+        "name": "web",
+        "port": "https"
+       }
+      ]
+     },
+     {
+      "match": "HostRegexp(`^.+\\.example\\.test$`)",
+      "services": [
+       {
+        "name": "web",
+        "port": 443
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "secretName": "web-tls",
+     "options": {
+      "name": "modern"
+     },
+     "certResolver": "letsencrypt",
+     "domains": [
+      {
+       "main": "shop.example.test",
+       "sans": [
+        "*.shop.example.test"
+       ]
+      }
+     ],
+     "privateKey": "tls-option-secret-value"
+    }
+   }
+  },
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "api",
+    "namespace": "shop",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a02",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`api.example.test`)",
+      "services": [
+       {
+        "name": "api",
+        "port": 8443
+       }
+      ]
+     }
+    ],
+    "tls": {}
+   }
+  },
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "plain",
+    "namespace": "shop",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a03",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "web"
+    ],
+    "routes": [
+     {
+      "match": "Host(`plain.example.test`)",
+      "services": [
+       {
+        "name": "web",
+        "port": 80
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "filecfg",
+    "namespace": "shop",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a04",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "routes": [
+     {
+      "match": "Host(`file.example.test`)",
+      "services": [
+       {
+        "name": "web",
+        "port": 443
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "hardened@file"
+     },
+     "store": {
+      "name": "default"
+     }
+    }
+   }
+  }
+ ]
+}

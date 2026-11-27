@@ -249,9 +249,13 @@
         },
         "api_services": {
           "$ref": "#/$defs/section"
+        },
+        "traefik": {
+          "$ref": "#/$defs/section",
+          "description": "Traefik's IngressRoutes, IngressRouteTCPs, TLSOptions and TLSStores. Present only when the job parameters carry traefik: true, and not a class: absent means this agent was not asked for, or does not collect, Traefik. not_installed when neither API group serves IngressRoutes."
         }
       },
-      "description": "One answer per class, every class every time."
+      "description": "One answer per class, every class every time; traefik only when the job asked for it."
     },
     "mesh": {
       "$ref": "#/$defs/mesh"
@@ -378,6 +382,27 @@
       "items": {
         "$ref": "#/$defs/api_service"
       }
+    },
+    "traefik_ingress_routes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/traefik_ingress_route"
+      },
+      "description": "Sent only when the job parameters carry traefik: true."
+    },
+    "traefik_tls_options": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/traefik_tls_option"
+      },
+      "description": "Sent only when the job parameters carry traefik: true."
+    },
+    "traefik_tls_stores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/traefik_tls_store"
+      },
+      "description": "Sent only when the job parameters carry traefik: true."
     },
     "certificates": {
       "type": "array",
@@ -2632,6 +2657,388 @@
               "type": "boolean"
             }
           }
+        }
+      }
+    },
+    "traefik_ref": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "A TLSOption or TLSStore by name. namespace is the route's when the route did not name one. provider is set when the name used Traefik's cross-provider form (name@provider); namespace is then absent, and the object is not one of this cluster's API objects.",
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "provider": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      }
+    },
+    "traefik_ingress_route": {
+      "type": "object",
+      "required": [
+        "kind",
+        "api_group",
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "A Traefik IngressRoute or IngressRouteTCP as the cluster's API declares it. Declared, not scanned. TLS set in Traefik's static or file configuration is not visible here.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "IngressRoute",
+            "IngressRouteTCP"
+          ]
+        },
+        "api_group": {
+          "type": "string",
+          "enum": [
+            "traefik.io",
+            "traefik.containo.us"
+          ],
+          "description": "The API group the object was read from. The same namespace and name can exist in both groups; they are two objects."
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "entry_points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "maxItems": 32
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "match": {
+                "type": "string",
+                "maxLength": 1024,
+                "description": "The rule as written, cut to 1024 characters."
+              },
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+                },
+                "maxItems": 64,
+                "description": "The host names of Host(...) or HostSNI(...) in the match, lower case, sorted. Simple forms only: a match with a negation, a regular expression or an alternative that names no host has none."
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "Service",
+                        "TraefikService"
+                      ]
+                    },
+                    "namespace": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+                    },
+                    "port": {
+                      "type": "string",
+                      "maxLength": 63,
+                      "description": "A port number or name, as written."
+                    }
+                  }
+                },
+                "maxItems": 64
+              }
+            }
+          },
+          "maxItems": 256
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Present when the route has a tls block (an empty block is TLS with the default certificate). Secret names only: no Secret is read.",
+          "properties": {
+            "secret_name": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+            },
+            "options_ref": {
+              "$ref": "#/$defs/traefik_ref"
+            },
+            "effective_options": {
+              "type": "object",
+              "required": [
+                "source"
+              ],
+              "additionalProperties": false,
+              "description": "The TLSOption in force, resolved by the agent: the referenced one; else the one TLSOption named default (any namespace); else Traefik's built-in options, also when more than one is named default (default_conflict). Absent on a passthrough route (TLS is not terminated) and when the TLSOptions could not be read and the route references none.",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "referenced",
+                    "default",
+                    "traefik_builtin"
+                  ]
+                },
+                "namespace": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+                },
+                "provider": {
+                  "type": "string",
+                  "maxLength": 63,
+                  "pattern": "^[a-z][a-z0-9-]*$"
+                },
+                "default_conflict": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "store": {
+              "$ref": "#/$defs/traefik_ref"
+            },
+            "cert_resolver": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "domains": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "main": {
+                    "type": "string",
+                    "maxLength": 253,
+                    "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+                  },
+                  "sans": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 253,
+                      "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+                    },
+                    "maxItems": 128
+                  }
+                }
+              },
+              "maxItems": 64
+            },
+            "passthrough": {
+              "type": "boolean",
+              "description": "IngressRouteTCP only."
+            }
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "traefik_tls_option": {
+      "type": "object",
+      "required": [
+        "api_group",
+        "namespace",
+        "name",
+        "sni_strict"
+      ],
+      "additionalProperties": false,
+      "description": "A Traefik TLSOption. Only what the object declares; a setting it leaves out has Traefik's default.",
+      "properties": {
+        "api_group": {
+          "type": "string",
+          "enum": [
+            "traefik.io",
+            "traefik.containo.us"
+          ],
+          "description": "The API group the object was read from. The same namespace and name can exist in both groups; they are two objects."
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "min_version": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "max_version": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "cipher_suites": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "maxItems": 128
+        },
+        "curve_preferences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "maxItems": 32
+        },
+        "client_auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]+$"
+            },
+            "secret_names": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+              },
+              "maxItems": 64,
+              "description": "The Secrets that hold the CA certificates, by name; they are not read."
+            }
+          }
+        },
+        "sni_strict": {
+          "type": "boolean"
+        },
+        "alpn_protocols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._/-]+$"
+          },
+          "maxItems": 16
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "traefik_tls_store": {
+      "type": "object",
+      "required": [
+        "api_group",
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "A Traefik TLSStore: the names of the Secrets it serves, never their content.",
+      "properties": {
+        "api_group": {
+          "type": "string",
+          "enum": [
+            "traefik.io",
+            "traefik.containo.us"
+          ],
+          "description": "The API group the object was read from. The same namespace and name can exist in both groups; they are two objects."
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "default_certificate_secret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "certificate_secrets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+          },
+          "maxItems": 256
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     }

@@ -54,6 +54,11 @@ enforced whatever else an answer carries.
   agent's own service account. Its result is the typed, closed record of
   `defs/kubernetes-inventory.json`, sent as one job result per part. See
   [`design/kubernetes-inventory.md`](design/kubernetes-inventory.md).
+  Traefik's members and the `traefik` section are sent only when the job's
+  parameters carry `"traefik": true`; parameters are open, so this needs no
+  capability: an agent that does not know the parameter ignores it and sends
+  the record without them, and a platform reads a missing `traefik` section
+  as "not collected by this agent".
 - **Certificate rotation** happens when the client certificate has under 30 days
   left: a fresh key, a new certificate, a new agent secret, and the old
   certificate is revoked.

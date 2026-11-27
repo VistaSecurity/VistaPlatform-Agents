@@ -104,6 +104,12 @@ rules:
   - apiGroups: ["apiregistration.k8s.io"]
     resources: ["apiservices"]
     verbs: ["list"]
+  # Traefik's CRDs, current and legacy group. Listed only when a job asks for
+  # Traefik; a cluster without them answers 404. Names of Secrets only: the
+  # collector never reads a Secret for these.
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources: ["ingressroutes", "ingressroutetcps", "tlsoptions", "tlsstores"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

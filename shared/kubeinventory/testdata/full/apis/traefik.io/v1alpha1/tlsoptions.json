@@ -1,0 +1,115 @@
+{
+ "kind": "List",
+ "apiVersion": "v1",
+ "metadata": {
+  "resourceVersion": "1"
+ },
+ "items": [
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "TLSOption",
+   "metadata": {
+    "name": "modern",
+    "namespace": "shop",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a07",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "minVersion": "VersionTLS13",
+    "sniStrict": true,
+    "alpnProtocols": [
+     "h2",
+     "http/1.1"
+    ],
+    "disableSessionTickets": true
+   }
+  },
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "TLSOption",
+   "metadata": {
+    "name": "mtls",
+    "namespace": "edge",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a08",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "minVersion": "VersionTLS12",
+    "maxVersion": "VersionTLS13",
+    "cipherSuites": [
+     "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+     "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    ],
+    "curvePreferences": [
+     "X25519",
+     "CurveP256"
+    ],
+    "clientAuth": {
+     "secretNames": [
+      "client-ca",
+      "client-ca"
+     ],
+     "clientAuthType": "RequireAndVerifyClientCert",
+     "caFiles": [
+      "ca-file-secret-value"
+     ]
+    }
+   }
+  },
+  {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "TLSOption",
+   "metadata": {
+    "name": "default",
+    "namespace": "edge",
+    "uid": "7a1e0f52-3c4d-4e8f-9a0b-1c2d3e4f5a09",
+    "creationTimestamp": "2026-01-02T03:04:05Z",
+    "resourceVersion": "1",
+    "annotations": {
+     "kubectl.kubernetes.io/last-applied-configuration": "{\"password\":\"annotation-secret-value\"}"
+    },
+    "managedFields": [
+     {
+      "manager": "kubectl",
+      "operation": "Update"
+     }
+    ],
+    "labels": {
+     "app": "edge",
+     "owner": "label-secret-value"
+    }
+   },
+   "spec": {
+    "minVersion": "VersionTLS12"
+   }
+  }
+ ]
+}

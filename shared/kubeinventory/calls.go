@@ -85,6 +85,9 @@ var allResources = []Resource{
 	resCMCertificates, resCMRequests, resCMIssuers, resCMClusterIss, resCSRs,
 	resPeerAuths, resDestRules, resLinkerdServers, resLinkerdAuthz,
 	resValidatingWH, resMutatingWH, resAPIServices,
+	// Only when a job asks for Traefik (traefik.go).
+	resTraefikRoutes, resTraefikRoutesTCP, resTraefikTLSOptions, resTraefikTLSStores,
+	resTraefikLegacyRoutes, resTraefikLegacyRoutesTCP, resTraefikLegacyOptions, resTraefikLegacyStores,
 }
 
 // Calls is every resource the collector can read: with optIn false, what it

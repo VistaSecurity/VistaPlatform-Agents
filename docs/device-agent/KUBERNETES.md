@@ -116,11 +116,14 @@ to one ClusterRole. That role is everything the agent can do in your cluster:
 | `list` | certificatesigningrequests |
 | `list` | Istio peerauthentications and destinationrules; Linkerd servers and authorizationpolicies |
 | `list` | validatingwebhookconfigurations, mutatingwebhookconfigurations, apiservices |
+| `list` | Traefik (`traefik.io` and the legacy `traefik.containo.us`): ingressroutes, ingressroutetcps, tlsoptions, tlsstores |
 | `get` | three ConfigMaps by name: `istio-ca-root-cert`, `linkerd-identity-trust-roots`, `cilium-config` |
 | `get` | `/version` |
 
-A rule for something your cluster does not have (no cert-manager, no mesh)
-matches nothing.
+A rule for something your cluster does not have (no cert-manager, no mesh, no
+Traefik) matches nothing. The Traefik resources are read only when the
+platform's job asks for them; an agent asked for them on a cluster without
+Traefik reports Traefik as not installed.
 
 From each object the agent keeps a fixed list of fields and discards the
 rest before anything is stored or sent. What it sends:
@@ -131,6 +134,13 @@ rest before anything is stored or sent. What it sends:
 - Service types, addresses and ports, and which workloads are behind each;
 - Ingress and Gateway hosts, whether TLS is configured and which Secret is
   named;
+- Traefik IngressRoutes and IngressRouteTCPs (entry points, match rules and
+  the hosts in them, backend Services, the TLS Secret, TLS option, store and
+  certificate resolver they name, passthrough), TLSOptions (TLS versions,
+  cipher suites, curves, ALPN, SNI strictness, the client-certificate mode and
+  the names of its CA Secrets) and TLSStores (the names of their Secrets).
+  Only what the cluster's API declares: options set in Traefik's static or
+  file configuration are not visible to it;
 - cert-manager issuers' kinds and addresses, Certificates' names, lifetimes,
   key algorithm and size settings, and whether each is Ready;
 - mesh mTLS policies and modes;

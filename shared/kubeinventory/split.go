@@ -59,6 +59,9 @@ var listFields = []listField{
 	field(func(v *Inventory) *[]AdmissionWebhook { return &v.AdmissionWebhooks }),
 	field(func(v *Inventory) *[]APIService { return &v.APIServices }),
 	field(func(v *Inventory) *[]Certificate { return &v.Certificates }),
+	field(func(v *Inventory) *[]TraefikIngressRoute { return &v.TraefikIngressRoutes }),
+	field(func(v *Inventory) *[]TraefikTLSOption { return &v.TraefikTLSOptions }),
+	field(func(v *Inventory) *[]TraefikTLSStore { return &v.TraefikTLSStores }),
 }
 
 // partOverhead is room left in every part for the job-result envelope and the
@@ -106,4 +109,5 @@ func clearLists(v *Inventory) {
 	v.IstioPeerAuthentications, v.IstioDestinationRules = nil, nil
 	v.LinkerdServers, v.LinkerdAuthorizationPolicies = nil, nil
 	v.Kubelets, v.AdmissionWebhooks, v.APIServices, v.Certificates = nil, nil, nil, nil
+	v.TraefikIngressRoutes, v.TraefikTLSOptions, v.TraefikTLSStores = nil, nil, nil
 }

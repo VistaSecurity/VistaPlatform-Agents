@@ -658,6 +658,7 @@ func runKubernetesInventory(args []string, env standaloneEnv) int {
 		readSecrets bool
 		noKubelets  bool
 		noPEM       bool
+		traefik     bool
 		labelKeys   repeatedFlag
 		timeout     time.Duration
 	)
@@ -666,6 +667,7 @@ func runKubernetesInventory(args []string, env standaloneEnv) int {
 	fs.BoolVar(&readSecrets, "read-tls-secrets", false, "Also read the certificates of Secrets of type kubernetes.io/tls (the service account needs permission to list Secrets; the private key is never decoded). Also on when "+devices.EnvReadTLSSecrets+"=true")
 	fs.BoolVar(&noKubelets, "no-kubelet-probe", false, "Do not handshake with each node's kubelet port")
 	fs.BoolVar(&noPEM, "no-certificate-pem", false, "Write each certificate's parsed fields without its PEM")
+	fs.BoolVar(&traefik, "traefik", false, "Also read Traefik's IngressRoutes, IngressRouteTCPs, TLSOptions and TLSStores (the job parameter traefik); never a Secret")
 	fs.Var(&labelKeys, "label-key", "Report this label key in addition to the built-in list (repeatable)")
 	fs.DurationVar(&timeout, "timeout", kubeinventory.DefaultTimeout, "Whole-collection time limit")
 	usage := func(w io.Writer) {
@@ -710,7 +712,7 @@ func runKubernetesInventory(args []string, env standaloneEnv) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	inv, err := kubeinventory.Collect(ctx, client, kubeinventory.Options{
-		SkipKubeletProbe: noKubelets, OmitCertificatePEM: noPEM, ExtraLabelKeys: labelKeys,
+		SkipKubeletProbe: noKubelets, OmitCertificatePEM: noPEM, ExtraLabelKeys: labelKeys, Traefik: traefik,
 		ReadTLSSecrets: readSecrets || strings.EqualFold(strings.TrimSpace(env.getenv(devices.EnvReadTLSSecrets)), "true"),
 	})
 	if err != nil {
@@ -730,6 +732,9 @@ func runKubernetesInventory(args []string, env standaloneEnv) int {
 		if s := inv.Sections[class]; s.Status == kubeinventory.StatusFailed {
 			failed = append(failed, class+" ("+s.Reason+")")
 		}
+	}
+	if s, ok := inv.Sections[kubeinventory.SectionTraefik]; ok && s.Status == kubeinventory.StatusFailed {
+		failed = append(failed, kubeinventory.SectionTraefik+" ("+s.Reason+")")
 	}
 	if len(failed) > 0 {
 		w.Warn("some classes could not be read: %s", strings.Join(failed, ", "))
