@@ -2744,7 +2744,7 @@
               "match": {
                 "type": "string",
                 "maxLength": 1024,
-                "description": "The rule as written, cut to 1024 characters."
+                "description": "The rule, redacted: matcher names, operators and grouping are kept; the quoted arguments of Host, HostSNI, HostRegexp, HostSNIRegexp, Path, PathPrefix, PathRegexp, Method and ALPN are kept; of Header, HeaderRegexp, Headers, HeadersRegexp, Query and QueryRegexp only the first argument (the key name); every other literal is [REDACTED]. Redacted, then cut to 1024 characters. Absent when the rule could not be tokenised safely."
               },
               "hosts": {
                 "type": "array",
@@ -2754,7 +2754,7 @@
                   "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
                 },
                 "maxItems": 64,
-                "description": "The host names of Host(...) or HostSNI(...) in the match, lower case, sorted. Simple forms only: a match with a negation, a regular expression or an alternative that names no host has none."
+                "description": "The host names of Host(...) or HostSNI(...) in the rule, lower case, sorted, only where certain: none for a rule with a negation or a host regular expression, an || inside parentheses, or a top-level alternative that names no host."
               },
               "services": {
                 "type": "array",
@@ -2785,7 +2785,8 @@
                     "port": {
                       "type": "string",
                       "maxLength": 63,
-                      "description": "A port number or name, as written."
+                      "description": "A port number or name, as written; left out when it is neither.",
+                      "pattern": "^([0-9]{1,5}|[a-z0-9]([a-z0-9-]{0,13}[a-z0-9])?)$"
                     }
                   }
                 },
@@ -2814,7 +2815,7 @@
                 "source"
               ],
               "additionalProperties": false,
-              "description": "The TLSOption in force, resolved by the agent: the referenced one; else the one TLSOption named default (any namespace); else Traefik's built-in options, also when more than one is named default (default_conflict). Absent on a passthrough route (TLS is not terminated) and when the TLSOptions could not be read and the route references none.",
+              "description": "The TLSOption in force, resolved by the agent: the referenced one; else the one TLSOption named default (any namespace); else Traefik's built-in options, also when more than one is named default (default_conflict). Absent on a passthrough route (TLS is not terminated) and when the TLSOptions could not be read and the route references none. What referenced means is that the route names this option, not that Traefik serves it: Traefik registers any TLSOption named default as the global default, so a reference to a TLSOption named default in a namespace may not resolve as written; and Traefik refuses a cross-namespace options or store reference unless allowCrossNamespace is set in its static configuration, which the agent cannot see. default_conflict counts TLSOptions named default from both API groups; Traefik v3 no longer reads traefik.containo.us, so a stale legacy default can set it on a v3 cluster.",
               "properties": {
                 "source": {
                   "type": "string",

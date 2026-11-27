@@ -163,11 +163,11 @@
     ],
     "routes": [
      {
-      "match": "Host(`plain.example.test`)",
+      "match": "Host(`plain.example.test`) && Header(`X-Api-Key`, `header-secret-value`) && Query(`token`, \"query-secret-value\") && ClientIP(`192.0.2.0/24`)",
       "services": [
        {
         "name": "web",
-        "port": 80
+        "port": "Not A Port secret-value"
        }
       ]
      }

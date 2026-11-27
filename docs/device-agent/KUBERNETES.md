@@ -134,8 +134,9 @@ rest before anything is stored or sent. What it sends:
 - Service types, addresses and ports, and which workloads are behind each;
 - Ingress and Gateway hosts, whether TLS is configured and which Secret is
   named;
-- Traefik IngressRoutes and IngressRouteTCPs (entry points, match rules and
-  the hosts in them, backend Services, the TLS Secret, TLS option, store and
+- Traefik IngressRoutes and IngressRouteTCPs (entry points, match rules with
+  header and query values, client addresses and every argument of an unknown
+  matcher replaced by `[REDACTED]`, the hosts in them, backend Services, the TLS Secret, TLS option, store and
   certificate resolver they name, passthrough), TLSOptions (TLS versions,
   cipher suites, curves, ALPN, SNI strictness, the client-certificate mode and
   the names of its CA Secrets) and TLSStores (the names of their Secrets).

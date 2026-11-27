@@ -238,7 +238,7 @@ var (
 	traefikALPNRE     = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	traefikProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 	traefikHostRE     = regexp.MustCompile(`^(\*\.)?[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
-	traefikHostCallRE = regexp.MustCompile(`\bHost(?:SNI)?\(([^()]*)\)`)
+	traefikPortRE     = regexp.MustCompile(`^([0-9]{1,5}|[a-z0-9]([a-z0-9-]{0,13}[a-z0-9])?)$`)
 )
 
 const (
@@ -270,35 +270,6 @@ func cleanHost(s string) string {
 		return s
 	}
 	return ""
-}
-
-// traefikHosts are the host names a route's match names, for the simple forms
-// only: Host(...) and HostSNI(...) with literal arguments, alone, joined by
-// && to other matchers, or alternatives that each name a host. A negation, a
-// regular expression, or an alternative without a host could match other
-// hosts, so such a match yields no hosts (its text is still sent).
-func traefikHosts(match string) []string {
-	if strings.Contains(match, "!") || strings.Contains(match, "Regexp") {
-		return nil
-	}
-	for _, term := range strings.Split(match, "||") {
-		if !traefikHostCallRE.MatchString(term) {
-			return nil
-		}
-	}
-	var hosts []string
-	for _, call := range traefikHostCallRE.FindAllStringSubmatch(match, -1) {
-		for _, arg := range strings.Split(call[1], ",") {
-			arg = strings.TrimSpace(arg)
-			if len(arg) < 2 || (arg[0] != '`' && arg[0] != '"') || arg[len(arg)-1] != arg[0] {
-				return nil
-			}
-			if h := cleanHost(arg[1 : len(arg)-1]); h != "" {
-				hosts = append(hosts, h)
-			}
-		}
-	}
-	return limit(sortedUnique(hosts), 64)
 }
 
 // splitProvider splits Traefik's cross-provider form name@provider.
@@ -441,9 +412,11 @@ func traefikRoute(group, kind string, o traefikRouteObject, index traefikOptionI
 		CreatedAt:   utc(o.Metadata.CreationTimestamp),
 	}
 	for _, r := range limit(o.Spec.Routes, 256) {
-		route := TraefikRoute{Match: clip(strings.TrimSpace(r.Match), maxTraefikMatch), Hosts: traefikHosts(r.Match)}
+		// The rule is redacted before it is cut, and never sent as written
+		// (traefik_rule.go).
+		route := TraefikRoute{Match: clip(redactedRule(r.Match), maxTraefikMatch), Hosts: traefikHosts(r.Match)}
 		for _, s := range limit(r.Services, 64) {
-			svc := TraefikServiceRef{Name: cleanName(s.Name), Namespace: cleanName(s.Namespace), Port: clip(string(s.Port), 63)}
+			svc := TraefikServiceRef{Name: cleanName(s.Name), Namespace: cleanName(s.Namespace), Port: token(string(s.Port), traefikPortRE, 63)}
 			switch s.Kind {
 			case "", "Service":
 				svc.Kind = "Service"

@@ -95,8 +95,14 @@ func TestTraefikFullCluster(t *testing.T) {
 		*api.TLS.EffectiveOptions != (TraefikEffectiveOptions{Source: TraefikOptionsDefault, Namespace: "edge", Name: "default"}) {
 		t.Errorf("api: %+v", api.TLS)
 	}
-	if plain := traefikRow(t, inv, traefikGroup, traefikKindHTTP, "shop", "plain"); plain.TLS != nil {
+	plain := traefikRow(t, inv, traefikGroup, traefikKindHTTP, "shop", "plain")
+	if plain.TLS != nil {
 		t.Errorf("plain has TLS: %+v", plain.TLS)
+	}
+	// The rule's secrets are redacted; a port that is not a port is dropped.
+	if r := plain.Routes[0]; r.Match != "Host(`plain.example.test`) && Header(`X-Api-Key`, `[REDACTED]`) && Query(`token`, \"[REDACTED]\") && ClientIP(`[REDACTED]`)" ||
+		!reflect.DeepEqual(r.Hosts, []string{"plain.example.test"}) || r.Services[0].Port != "" {
+		t.Errorf("plain: %+v", r)
 	}
 	// A cross-provider reference names an option the API cannot show.
 	file := traefikRow(t, inv, traefikGroup, traefikKindHTTP, "shop", "filecfg")
@@ -360,6 +366,14 @@ func TestTraefikHosts(t *testing.T) {
 		"Host(`a.example.test`) && (Path(`/a`) || Path(`/b`))":   nil,
 		"Host(`a.example.test`) && Header(`X-Forwarded`, `yes`)": {"a.example.test"},
 		"Host(unquoted.example.test)":                            nil,
+		// An alternative inside a group could be met without its host.
+		"(Host(`a.test`) || Header(`X`, `y`)) && Host(`b.test`)": nil,
+		"(Host(`a.test`) || Host(`c.test`)) && Path(`/`)":        nil,
+		"(Host(`a.test`) && Path(`/`)) || Host(`b.test`)":        {"a.test", "b.test"},
+		"Host(`a.test`) || Header(`X`, `y`)":                     nil,
+		"PathRegexp(`^/a$`) && Host(`a.test`)":                   {"a.test"},
+		"HostRegexp(`a`) || Host(`a.test`)":                      nil,
+		"Host(`a.test`) && `stray`":                              nil,
 		"":                                                       nil,
 	} {
 		if got := traefikHosts(match); !reflect.DeepEqual(got, want) {
@@ -382,5 +396,64 @@ func TestTraefikLongMatch(t *testing.T) {
 	r := inv.TraefikIngressRoutes[0].Routes[0]
 	if len(r.Match) != maxTraefikMatch || !reflect.DeepEqual(r.Hosts, []string{"late.example.test"}) {
 		t.Errorf("%d characters, hosts %v", len(r.Match), r.Hosts)
+	}
+}
+
+func TestTraefikRuleRedaction(t *testing.T) {
+	for _, tc := range []struct{ rule, want, secret string }{
+		// v3 syntax: one argument per Host, Header with a key and a value.
+		{"Host(`a.example.test`) && Header(`X-Api-Key`, `s3cr3t`)", "Host(`a.example.test`) && Header(`X-Api-Key`, `[REDACTED]`)", "s3cr3t"},
+		{"Host(`a.example.test`) && Query(`token`, `abc123`)", "Host(`a.example.test`) && Query(`token`, `[REDACTED]`)", "abc123"},
+		{"HeaderRegexp(`Authorization`, `^Bearer xyz$`)", "HeaderRegexp(`Authorization`, `[REDACTED]`)", "Bearer xyz"},
+		{"QueryRegexp(`sig`, `^k3y.*$`)", "QueryRegexp(`sig`, `[REDACTED]`)", "k3y"},
+		{"ClientIP(`192.0.2.0/24`) && PathPrefix(`/admin`)", "ClientIP(`[REDACTED]`) && PathPrefix(`/admin`)", "192.0.2.0/24"},
+		{"PathPrefix(`/`) && Unknown(`first-arg-secret`, `x`)", "PathPrefix(`/`) && Unknown(`[REDACTED]`, `[REDACTED]`)", "first-arg-secret"},
+		// v2 syntax: several arguments, Headers, double quotes with escapes.
+		{"Host(`a.example.test`, `b.example.test`) && Headers(`X-Token`, `v2secret`)", "Host(`a.example.test`, `b.example.test`) && Headers(`X-Token`, `[REDACTED]`)", "v2secret"},
+		{`Host("q.example.test") && Header("X-Key", "quo\"ted-secret")`, `Host("q.example.test") && Header("X-Key", "[REDACTED]")`, "ted-secret"},
+		{"!(Method(`POST`) || PathRegexp(`^/a/[0-9]+$`)) && HostSNI(`*`) && ALPN(`h2`)", "!(Method(`POST`) || PathRegexp(`^/a/[0-9]+$`)) && HostSNI(`*`) && ALPN(`h2`)", ""},
+		{"HostRegexp(`^.+\\.example\\.test$`)", "HostRegexp(`^.+\\.example\\.test$`)", ""},
+		{"Path(`/`)   &&Host(`x.example.test`)", "Path(`/`) && Host(`x.example.test`)", ""},
+		// Not tokenisable safely: nothing is sent.
+		{"Host(`a.example.test`) && Header(`X-Api-Key`, `unterminated-secret)", "", "unterminated-secret"},
+		{"Header(X-Api-Key, bare-secret)", "", "bare-secret"},
+		{"Host(`a`) && `stray-secret`", "", "stray-secret"},
+		{"Header(`k`, `v` `adjacent-secret`)", "", "adjacent-secret"},
+		{"Host(`a`) && (Path(`/`)", "", ""},
+		{`Header("k", "bad\escape-secret")`, "", "escape-secret"},
+		{"Header(`k`, Query(`nested-secret`))", "", "nested-secret"},
+		{"Host(`a`) ; Header(`k`, `semi-secret`)", "", "semi-secret"},
+		{"", "", ""},
+	} {
+		got := redactedRule(tc.rule)
+		if got != tc.want {
+			t.Errorf("%q: %q, want %q", tc.rule, got, tc.want)
+		}
+		if tc.secret == "" {
+			continue
+		}
+		// Through the collector: the secret is nowhere in the record.
+		cl := kubetest.New(t)
+		cl.SetList("/api/v1/namespaces", map[string]any{"metadata": map[string]string{"name": "kube-system", "uid": "11111111-2222-4333-8444-555555555555"}})
+		cl.SetList(traefikRoutesPath, map[string]any{
+			"metadata": map[string]string{"namespace": "shop", "name": "r"},
+			"spec":     map[string]any{"routes": []any{map[string]any{"match": tc.rule}}},
+		})
+		inv := collect(t, testClient(t, cl), Options{SkipKubeletProbe: true, Traefik: true})
+		doc, _ := json.Marshal(inv)
+		if bytes.Contains(doc, []byte(tc.secret)) {
+			t.Errorf("%q: %q is in the record", tc.rule, tc.secret)
+		}
+		if len(inv.TraefikIngressRoutes) != 1 || inv.TraefikIngressRoutes[0].Routes[0].Match != tc.want {
+			t.Errorf("%q: the route was not sent with its redacted rule: %+v", tc.rule, inv.TraefikIngressRoutes)
+		}
+	}
+}
+
+func TestTraefikServicePort(t *testing.T) {
+	for in, want := range map[string]string{"443": "443", "https": "https", "web-tls": "web-tls", "1234567890123456": "", "Https": "", "a-very-long-port-name": "", "-x": "", "x y": ""} {
+		if got := token(in, traefikPortRE, 63); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
 	}
 }

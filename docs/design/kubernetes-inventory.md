@@ -221,7 +221,7 @@ a device-agent job result. The schema is closed at every level.
 | `kubelets` | a handshake with one node's kubelet | node, address, port, outcome, TLS version, cipher suite, chain, whether it chains to the cluster CA |
 | `admission_webhooks` | one webhook of a webhook configuration | configuration, name, the Service or host it calls, failure policy, CA bundle |
 | `api_services` | an aggregated API | name, the Service behind it, whether TLS verification is skipped, CA bundle |
-| `traefik_ingress_routes` | an IngressRoute or IngressRouteTCP (`traefik` only) | kind, API group, namespace, name, entry points, routes (match, hosts, Services), TLS (Secret name, options reference, effective options, store, certificate resolver, domains, passthrough) |
+| `traefik_ingress_routes` | an IngressRoute or IngressRouteTCP (`traefik` only) | kind, API group, namespace, name, entry points, routes (redacted match, hosts, Services), TLS (Secret name, options reference, effective options, store, certificate resolver, domains, passthrough) |
 | `traefik_tls_options` | a TLSOption (`traefik` only) | API group, namespace, name, minimum and maximum version, cipher suites, curves, client authentication (type, CA Secret names), SNI strictness, ALPN protocols |
 | `traefik_tls_stores` | a TLSStore (`traefik` only) | API group, namespace, name, default certificate Secret name, certificate Secret names |
 | `certificates` | one distinct certificate | the fields of the one certificate format ([`defs/certificate.json`](../../schemas/managed/v1/defs/certificate.json)), keyed by `fingerprint_sha256` |
@@ -320,11 +320,23 @@ section means the agent was not asked or does not collect it, never "none".
   `not_permitted` on a 403 on any of them; `failed`, `item_limit` or
   `api_error` as for any class. `count` is routes, options and stores
   together.
+- **The rule is redacted.** A route's `match` is free text that commonly
+  carries shared secrets (``Header(`X-Api-Key`, `...`)``,
+  ``Query(`token`, `...`)``, `ClientIP` lists), so it is tokenised and rebuilt:
+  matcher names, `&&`, `||`, `!` and grouping are kept; the quoted arguments
+  of `Host`, `HostSNI`, `HostRegexp`, `HostSNIRegexp`, `Path`, `PathPrefix`,
+  `PathRegexp`, `Method` and `ALPN` are kept; of `Header`, `HeaderRegexp`,
+  `Headers`, `HeadersRegexp`, `Query` and `QueryRegexp` only the first
+  argument, the key name; every other literal, including all arguments of a
+  matcher the agent does not know, becomes `[REDACTED]`. Backtick and
+  double-quoted literals (with escapes) are read, in Traefik v2 and v3
+  syntax. A rule that cannot be tokenised safely is sent with no `match` at
+  all. Redaction comes before the 1024-character cut.
 - **Hosts.** A route's `hosts` are the literal arguments of `Host(...)` and
-  `HostSNI(...)` in its `match`, lower case and sorted, for simple forms
-  only: a match with a negation, a regular expression, or an alternative
-  (`||`) without a host has none (``HostSNI(`*`)`` has none). `match` is
-  sent as written, cut to 1024 characters; hosts are read from the whole text.
+  `HostSNI(...)` in its rule, lower case and sorted, only where they are
+  certain: none for a rule with a negation or a host regular expression, an
+  `||` inside parentheses, or a top-level alternative that names no host
+  (``HostSNI(`*`)`` has none). Hosts are read from the whole rule.
 - **Effective TLS options**, resolved by the agent as Traefik documents it:
   the TLSOption the route's `tls.options` names (`source: referenced`; its
   namespace is the route's when the reference names none); else the one
@@ -338,6 +350,15 @@ section means the agent was not asked or does not collect it, never "none".
   effective options (Traefik does not terminate its TLS). When the TLSOptions
   could not be read, a route that references none has no effective options
   rather than a guess.
+  `referenced` says what the route names, not that Traefik serves it: Traefik
+  registers any TLSOption named `default` as the global default, so a
+  reference to a TLSOption named `default` in a namespace may not resolve as
+  written; and Traefik refuses a cross-namespace `options` or `store`
+  reference unless `allowCrossNamespace` is set in its static configuration,
+  which the agent cannot see. `default_conflict` counts TLSOptions named
+  `default` from both API groups, and Traefik v3 no longer reads
+  `traefik.containo.us`, so a stale legacy `default` can set it on a v3
+  cluster.
 - **Not visible to the API**, and so not in the record: TLS options, stores
   and certificates set in Traefik's static or file configuration (including
   the `defaultTLSResourcesNamespace` restriction on where the `default`
