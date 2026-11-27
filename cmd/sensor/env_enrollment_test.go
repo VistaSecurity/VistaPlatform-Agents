@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/api"
+	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 )
 
 // singleUseKeyPlatform answers the first registration as the fake platform
@@ -54,9 +55,6 @@ func podEnv(t *testing.T, platformURL, dataPath string) {
 	t.Setenv("REGISTRATION_KEY", testSensorRegKey)
 	t.Setenv("DATA_PATH", dataPath)
 	t.Setenv("CAPTURE_DISABLED", "true")
-	// A setting only the environment carries (config.Load reads it, the file
-	// merge does not): it must survive the restart too.
-	t.Setenv("ACTIVE_PROBING", "false")
 }
 
 // startPod runs the start-up path of one pod and reports the exit codes the
@@ -80,28 +78,34 @@ func startPod(t *testing.T) (*Sensor, []int) {
 	return s, exited
 }
 
-func TestEnvOnlySensor_RestartedPodKeepsItsIdentity(t *testing.T) {
-	logs := captureLog(t)
-	p := newSingleUseKeyPlatform(t, false)
-	data := t.TempDir()
-	podEnv(t, p.srv.URL, data)
-
-	// First pod: no config file anywhere, so it enrols.
-	first, exited := startPod(t)
-	if first.configPath != enrolledConfigPath(data) {
-		t.Errorf("after enrolment the sensor uses config %q, want %q", first.configPath, enrolledConfigPath(data))
-	}
-	if len(exited) != 0 || !first.isRegisteredNow() || p.registrations.Load() != 1 {
-		t.Fatalf("first start: exits %v, registered %v, registrations %d; want none, true, 1\n%s", exited, first.isRegisteredNow(), p.registrations.Load(), logs)
-	}
+// assertEnrollmentRecord checks the record a first start leaves: the identity
+// and nothing else, no registration key.
+func assertEnrollmentRecord(t *testing.T, data string) {
+	t.Helper()
 	raw, err := os.ReadFile(enrolledConfigPath(data))
 	if err != nil {
-		t.Errorf("the enrolment was not recorded on the volume: %v", err)
+		t.Fatalf("the enrolment was not recorded on the volume: %v", err)
 	}
-	if strings.Contains(string(raw), testSensorRegKey) || strings.Contains(string(raw), "PRIVATE KEY") || strings.Contains(string(raw), "BEGIN CERTIFICATE") {
-		t.Fatalf("the recorded config holds a secret or key material:\n%s", raw)
+	text := string(raw)
+	for _, want := range []string{
+		"environmentEnrollment: true",
+		"sensorId: " + testSensorID,
+		"registrationKeySha256: " + config.HashRegistrationKey(testSensorRegKey),
+		"clientCertPath: " + filepath.Join(data, "certs", "client.crt"),
+		"clientKeyPath: " + filepath.Join(data, "certs", "client.key"),
+		"agentSecretPath: ",
+		"useTLS: true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("record lacks %q:\n%s", want, text)
+		}
 	}
-	if runtime.GOOS != "windows" && raw != nil {
+	for _, never := range []string{testSensorRegKey, "registrationKey:", "PRIVATE KEY", "BEGIN CERTIFICATE", "capture:", "activeProbing"} {
+		if strings.Contains(text, never) {
+			t.Errorf("record holds %q:\n%s", never, text)
+		}
+	}
+	if runtime.GOOS != "windows" {
 		for _, f := range []string{enrolledConfigPath(data), filepath.Join(data, "certs", "client.key")} {
 			info, err := os.Stat(f)
 			if err != nil {
@@ -112,11 +116,41 @@ func TestEnvOnlySensor_RestartedPodKeepsItsIdentity(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestEnvOnlySensor_RestartedPodKeepsItsIdentity(t *testing.T) {
+	logs := captureLog(t)
+	p := newSingleUseKeyPlatform(t, false)
+	data := t.TempDir()
+	podEnv(t, p.srv.URL, data)
+	t.Setenv("ACTIVE_PROBING", "false")
+	t.Setenv("OWNED_NETWORKS", "198.51.100.0/24")
+	t.Setenv("MAX_CONNECTIONS", "17")
+
+	// First pod: no config file anywhere, so it enrols.
+	first, exited := startPod(t)
+	if first.configPath != enrolledConfigPath(data) {
+		t.Errorf("after enrolment the sensor uses config %q, want %q", first.configPath, enrolledConfigPath(data))
+	}
+	if len(exited) != 0 || !first.isRegisteredNow() || p.registrations.Load() != 1 {
+		t.Fatalf("first start: exits %v, registered %v, registrations %d; want none, true, 1\n%s", exited, first.isRegisteredNow(), p.registrations.Load(), logs)
+	}
+	assertEnrollmentRecord(t, data)
 	if strings.Contains(logs.String(), testSensorRegKey) {
 		t.Fatalf("the registration key reached the log:\n%s", logs)
 	}
 
-	// Second pod: same volume, same environment, the spent key still in it.
+	// The platform delivers a capture setting; the sensor keeps it in the file.
+	if err := first.persistCaptureSetting("hostObservation", false); err != nil {
+		t.Fatalf("the record cannot take a delivered setting: %v", err)
+	}
+
+	// Second pod: same volume, the spent key still in the environment, and the
+	// manifest edited: one setting changed, one removed, the URL changed.
+	t.Setenv("ACTIVE_PROBING", "true")
+	t.Setenv("OWNED_NETWORKS", "")
+	t.Setenv("MAX_CONNECTIONS", "")
+	t.Setenv("CONTROL_PLANE_URL", "https://elsewhere.example")
 	logs.Reset()
 	second, exited := startPod(t)
 	if got := p.registrations.Load(); got != 1 {
@@ -135,21 +169,80 @@ func TestEnvOnlySensor_RestartedPodKeepsItsIdentity(t *testing.T) {
 	if c2.AgentSecretState().IsZero() {
 		t.Fatal("restarted pod lost the agent secret")
 	}
-	if !c2.Capture.Disabled || c2.Capture.ActiveProbing != c1.Capture.ActiveProbing || c2.ReportingInterval != c1.ReportingInterval {
-		t.Fatalf("restarted pod runs differently: disabled %v activeProbing %v→%v interval %v→%v",
-			c2.Capture.Disabled, c1.Capture.ActiveProbing, c2.Capture.ActiveProbing, c1.ReportingInterval, c2.ReportingInterval)
+	if c2.ControlPlaneURL != p.srv.URL {
+		t.Errorf("control-plane URL %q, want the enrolled %q", c2.ControlPlaneURL, p.srv.URL)
 	}
+	// The environment decides every setting, as on a first start.
+	if !c2.Capture.Disabled || !c2.Capture.ActiveProbing || c2.Capture.OwnedNetworks != nil || c2.Capture.MaxConnections != 1000 {
+		t.Errorf("restarted pod does not follow its environment: disabled %v activeProbing %v ownedNetworks %v maxConnections %d",
+			c2.Capture.Disabled, c2.Capture.ActiveProbing, c2.Capture.OwnedNetworks, c2.Capture.MaxConnections)
+	}
+	// ...except what the platform delivered.
+	if c2.Capture.HostObservation {
+		t.Error("a setting the platform delivered was lost on restart")
+	}
+}
 
-	// The recorded file is an ordinary sensor config: the platform's setting
-	// updates can edit it.
-	if err := second.persistCaptureSetting("hostObservation", false); err != nil {
-		t.Fatalf("the recorded config cannot take a setting update: %v", err)
+// The record alone, exactly as the one write leaves it, is a complete
+// enrollment: a start that finds it does not register.
+func TestEnvOnlySensor_TheRecordAloneIsEnough(t *testing.T) {
+	logs := captureLog(t)
+	p := newSingleUseKeyPlatform(t, false)
+	data := t.TempDir()
+	podEnv(t, p.srv.URL, data)
+
+	enrolled := &Sensor{config: config.Load()}
+	enrolled.sensorManager = api.NewSensorManagerClient(enrolled.config)
+	if _, err := enrolled.sensorManager.Register(); err != nil {
+		t.Fatal(err)
 	}
-	if err := second.persistMonitoredInterfaces([]string{"eth1"}); err != nil {
-		t.Fatalf("the recorded config cannot take an interface update: %v", err)
+	if err := saveCertificates(enrolled.config); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := loadConfig(enrolledConfigPath(data)); err != nil {
-		t.Fatalf("the config no longer loads after the updates: %v", err)
+	if err := writeEnvironmentEnrollment(enrolledConfigPath(data), enrolled.config); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrollmentRecord(t, data)
+
+	s, exited := startPod(t)
+	if got := p.registrations.Load(); got != 1 || len(exited) != 0 || !s.isRegisteredNow() || s.config.SensorID != testSensorID {
+		t.Fatalf("registrations %d, exits %v, registered %v, id %q; want 1, none, true, %s\n%s", got, exited, s.isRegisteredNow(), s.config.SensorID, testSensorID, logs)
+	}
+}
+
+// A later save that fails (a rotation, a delivered setting, a full volume)
+// leaves the record as it was, so the next start still does not register.
+func TestEnvOnlySensor_FailedLaterSaveKeepsTheEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot write")
+	}
+	logs := captureLog(t)
+	p := newSingleUseKeyPlatform(t, false)
+	data := t.TempDir()
+	podEnv(t, p.srv.URL, data)
+
+	first, _ := startPod(t)
+	if p.registrations.Load() != 1 {
+		t.Fatalf("first start did not enrol\n%s", logs)
+	}
+	if err := os.Chmod(data, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(data, 0o700) })
+	if err := first.saveConfigFile(); err == nil {
+		t.Fatal("the save succeeded in a read-only directory; the test proves nothing")
+	}
+	if err := first.persistCaptureSetting("hostObservation", false); err == nil {
+		t.Fatal("the setting save succeeded in a read-only directory; the test proves nothing")
+	}
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrollmentRecord(t, data)
+
+	second, exited := startPod(t)
+	if got := p.registrations.Load(); got != 1 || len(exited) != 0 || !second.isRegisteredNow() {
+		t.Fatalf("after a failed save: registrations %d, exits %v, registered %v; want 1, none, true\n%s", got, exited, second.isRegisteredNow(), logs)
 	}
 }
 

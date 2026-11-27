@@ -75,11 +75,14 @@ step 1, never a tag alone) and the Secret at the end.
 
 A registration key is used once, at the agent's first start. After that the
 agent's identity (a private key it generated itself, and the certificate the
-platform issued for it) is on its volume, with the configuration file that
-names it (`agent-config.yaml` or `sensor-config.yaml`, mode 0600), and the
+platform issued for it) is on its volume, with the file that names it
+(`agent-config.yaml` or `sensor-config.yaml`, mode 0600), and the
 registration key is of no use to anyone. A replaced pod (a restart, an upgrade,
 a node drain) reads that file and is the same agent; it does not present the
-key again. You may then delete the two keys from the Secret. If the platform
+key again. The sensor's file holds its identity only: its settings come from
+the manifest's environment on every start, so an edit there takes effect at
+the next rollout (the enrolled platform address and CA, and settings the
+platform delivered, stay as they are). You may then delete the two keys from the Secret. If the platform
 refuses the stored identity (the agent was deleted in the console), the pod
 keeps running and its heartbeats fail; it does not try the spent key. To
 enroll it again, delete its PersistentVolumeClaim (which holds the old

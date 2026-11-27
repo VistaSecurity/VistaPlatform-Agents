@@ -80,12 +80,20 @@ which names it accepts.
    and runs scan jobs as usual. That is how the sensor runs in a container; a
    `DATA_PATH` set in the environment is also where it looks for its saved
    enrollment when it starts. A sensor configured by the environment alone
-   (no configuration file, as in a container) writes
-   `<dataPath>/sensor-config.yaml` (0600) when it enrolls: the settings it
-   runs with, its sensor ID and the paths of its certificate files, and no key
-   or certificate itself. Every later start reads that file and uses the
-   identity in it; a `REGISTRATION_KEY` still in the environment is then
-   ignored, so the spent key is never presented again.
+   (no configuration file, as in a container) records its enrollment in
+   `<dataPath>/sensor-config.yaml` (0600, marked `environmentEnrollment:
+   true`), in one write: its sensor ID, the control-plane URL it enrolled
+   with, the paths of its certificate, key, CA and agent-secret files, and the
+   registration key's fingerprint. No setting, no registration key, no key or
+   certificate. Every later start uses that identity (a `REGISTRATION_KEY`
+   still in the environment is ignored, so the spent key is never presented
+   again) and takes **every setting from the environment and the defaults**,
+   exactly as the first start did: a variable changed in the environment takes
+   effect at the next start, and one removed reverts to its default. Two
+   exceptions, as for any enrolled sensor: the enrolled control-plane URL and
+   the stored CA win over `CONTROL_PLANE_URL` and `SERVER_CA_CERT`
+   (`CONTROL_PLANE_URL_OVERRIDE=1` repoints), and settings the platform has
+   delivered (below) are kept in the same file and win.
 3. The configuration file.
 4. Built-in defaults.
 
@@ -100,8 +108,8 @@ consent, the additional TLS ports) win over the local values once delivered.
 │   ├── client.crt               # the sensor's certificate
 │   ├── client.key               # its private key (0600), generated on this host
 │   └── ca.crt                   # the platform CA
-├── sensor-config.yaml           # the configuration (0600): written by the installer,
-│                                #   or at enrollment by a sensor configured by its environment
+├── sensor-config.yaml           # the configuration (0600) written by the installer, or the
+│                                #   enrollment record of a sensor configured by its environment
 ├── logs/sensor.log              # Windows: the sensor's log
 ├── platform-probe-consent.json  # the platform's probing settings as last delivered
 └── test-discoveries.log         # test mode only

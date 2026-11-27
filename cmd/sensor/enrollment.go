@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -99,10 +98,10 @@ func enrollmentLostMessage(sensorID, path string, err error) string {
 
 // persistEnrollment writes the certificates and then the sensor ID and
 // certificate paths to the config file. A sensor configured by its environment
-// alone has no config file, so one is created under the data path first
-// (enrolledConfigPath) from the configuration it is running, and the sensor
-// uses it from then on, as one an installer wrote. The returned error already
-// names the path and says the key is spent.
+// alone has no config file: it records its enrollment instead in
+// enrolledConfigPath, in one complete write (writeEnvironmentEnrollment), and
+// uses that file from then on. The returned error already names the path and
+// says the key is spent.
 func (s *Sensor) persistEnrollment() error {
 	certsDir := filepath.Join(s.config.Storage.DataPath, "certs")
 	if err := saveCertificates(s.config); err != nil {
@@ -112,11 +111,12 @@ func (s *Sensor) persistEnrollment() error {
 
 	if s.configPath == "" {
 		path := enrolledConfigPath(s.config.Storage.DataPath)
-		if err := writeEnrolledConfigFile(path, s.config); err != nil {
+		if err := writeEnvironmentEnrollment(path, s.config); err != nil {
 			return errors.New(enrollmentLostMessage(s.config.SensorID, path, err))
 		}
 		s.configPath = path
-		log.Printf("📁 No config file was in use: the enrollment is recorded in %s, which the sensor reads on its next start", path)
+		log.Printf("💾 No config file was in use: the enrollment is recorded in %s; every start reads it and takes all other settings from the environment", path)
+		return nil
 	}
 	if err := s.saveConfigFile(); err != nil {
 		return errors.New(enrollmentLostMessage(s.config.SensorID, s.configPath, err))
@@ -125,99 +125,62 @@ func (s *Sensor) persistEnrollment() error {
 	return nil
 }
 
-// writeEnrolledConfigFile creates the config file of a sensor that was
-// configured by its environment alone, holding the settings it is running with
-// (so the next start, which reads this file, runs the same way). The identity
-// is added by saveConfigFile, exactly as for an installer's file: the sensor
-// ID, the certificate paths and, once the agent secret is on disk, the
-// registration key's fingerprint instead of the key. No certificate or key is
-// written here; they are files of their own under certs/. Owner-only (0600),
-// like every config file the sensor writes.
-func writeEnrolledConfigFile(path string, cfg *config.Config) error {
-	var f config.ConfigFile
-	f.ControlPlaneURL = cfg.ControlPlaneURL
-	f.RegistrationKey = cfg.RegistrationKey
-	f.ReportingIntervalSecs = int(cfg.ReportingInterval / time.Second)
-	f.HeartbeatIntervalSecs = int(cfg.HeartbeatInterval / time.Second)
-	f.Storage.DataPath = cfg.Storage.DataPath
-	c := &cfg.Capture
-	fc := &f.Capture
-	fc.Disabled = c.Disabled
-	fc.Interfaces = c.Interfaces
-	fc.ActiveProbing = c.ActiveProbing
-	fc.ThirdPartyTLSEnrichment = c.ThirdPartyTLSEnrichment
-	fc.OwnedNetworks = c.OwnedNetworks
-	fc.NetworkDiscovery = c.NetworkDiscovery
-	fc.MaxConnections = c.MaxConnections
-	fc.TimeoutSeconds = c.TimeoutSeconds
-	fc.BufferSize = c.BufferSize
-	fc.ExtraPortsToMonitor = c.ExtraPortsToMonitor
-	fc.DeepScan = c.DeepScan
-	fc.DedupTTLMinutes = c.DedupTTLMinutes
-	fc.STARTTLSPorts = c.STARTTLSPorts
-	fc.EnableJA3 = boolPtr(c.EnableJA3)
-	fc.EnableSTARTTLS = boolPtr(c.EnableSTARTTLS)
-	fc.EnableQUICDecrypt = boolPtr(c.EnableQUICDecrypt)
-	fc.EnableWireGuard = boolPtr(c.EnableWireGuard)
-	fc.EnableSMB = boolPtr(c.EnableSMB)
-	fc.EnableOpenVPN = boolPtr(c.EnableOpenVPN)
-	fc.EnableKerberos = boolPtr(c.EnableKerberos)
-	fc.EnableModbus = boolPtr(c.EnableModbus)
-	fc.EnableMMS = boolPtr(c.EnableMMS)
-	fc.EnableDNP3 = boolPtr(c.EnableDNP3)
-	fc.EnableOPCUA = boolPtr(c.EnableOPCUA)
-	fc.EnableENIP = boolPtr(c.EnableENIP)
-	fc.EnableHARTIP = boolPtr(c.EnableHARTIP)
-	fc.HostObservation = boolPtr(c.HostObservation)
-	fc.HostObservationWindowSeconds = c.HostObservationWindowSeconds
-	fc.HostObservationDNS = boolPtr(c.HostObservationDNS)
-	f.TestMode = cfg.TestMode
-	f.Verbose = cfg.Verbose
+// environmentEnrollment is the whole of what a sensor configured by its
+// environment records about itself (config.ConfigFile's
+// environmentEnrollment). Settings are not in it: they come from the
+// environment on every start (config.loadEnvironmentEnrollment). Nor is the
+// registration key, only its fingerprint; the certificate and keys are files
+// of their own under certs/.
+type environmentEnrollment struct {
+	EnvironmentEnrollment bool   `yaml:"environmentEnrollment"`
+	SensorID              string `yaml:"sensorId"`
+	ControlPlaneURL       string `yaml:"controlPlaneUrl"`
+	RegistrationKeySHA256 string `yaml:"registrationKeySha256,omitempty"`
+	Security              struct {
+		ClientCertPath   string `yaml:"clientCertPath"`
+		ClientKeyPath    string `yaml:"clientKeyPath"`
+		ServerCACertPath string `yaml:"serverCACertPath"`
+		AgentSecretPath  string `yaml:"agentSecretPath,omitempty"`
+		UseTLS           bool   `yaml:"useTLS"`
+	} `yaml:"security"`
+}
+
+// writeEnvironmentEnrollment writes the enrollment record in one atomic,
+// owner-only (0600) write, complete from the start: a sensor that stops at any
+// point after it finds either no record (certificates only, as before) or all
+// of it. The raw registration key is never written: the fingerprint stands in
+// for it (managed protocol 1 always issues the agent secret that replaces it),
+// and the key, while it is still needed, is in the environment.
+func writeEnvironmentEnrollment(path string, cfg *config.Config) error {
+	var r environmentEnrollment
+	r.EnvironmentEnrollment = true
+	r.SensorID = cfg.SensorID
+	r.ControlPlaneURL = cfg.ControlPlaneURL
+	r.RegistrationKeySHA256 = cfg.RegistrationKeyFingerprint()
+	r.Security.ClientCertPath = cfg.Security.ClientCertPath
+	r.Security.ClientKeyPath = cfg.Security.ClientKeyPath
+	r.Security.ServerCACertPath = cfg.Security.ServerCACertPath
+	r.Security.AgentSecretPath = cfg.Security.AgentSecretPath
+	r.Security.UseTLS = true
 
 	var root yaml.Node
-	if err := root.Encode(&f); err != nil {
-		return fmt.Errorf("encode configuration: %w", err)
-	}
-	// saveConfigFile writes these, and a key written twice would make the file
-	// unreadable; an unset verbose stays unset rather than null.
-	for _, key := range []string{"sensorId", "registrationKeySha256", "security"} {
-		removeMappingKey(&root, key)
-	}
-	if cfg.Verbose == nil {
-		removeMappingKey(&root, "verbose")
-	}
-	if cfg.RegistrationKey == "" {
-		removeMappingKey(&root, "registrationKey")
+	if err := root.Encode(&r); err != nil {
+		return fmt.Errorf("encode enrollment: %w", err)
 	}
 	doc := &yaml.Node{
 		Kind:        yaml.DocumentNode,
 		Content:     []*yaml.Node{&root},
-		HeadComment: "Vista Platform Network Sensor Configuration\nWritten at enrollment from the environment configuration; the sensor reads it on every start",
+		HeadComment: "Vista Platform Network Sensor: enrollment of a sensor configured by its environment.\nWritten by the sensor. Its settings come from the environment on every start.",
 	}
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
-	// Two-space lists, as the installer writes them: the interface update edits them.
+	// Two-space indent, as the line-based updates (saveConfigFile) expect.
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
-		return fmt.Errorf("encode configuration: %w", err)
+		return fmt.Errorf("encode enrollment: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return fmt.Errorf("encode configuration: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+		return fmt.Errorf("encode enrollment: %w", err)
 	}
 	return writeSecretConfigFile(path, out.Bytes())
-}
-
-func boolPtr(v bool) *bool { return &v }
-
-// removeMappingKey drops key and its value from a YAML mapping node.
-func removeMappingKey(m *yaml.Node, key string) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
 }
