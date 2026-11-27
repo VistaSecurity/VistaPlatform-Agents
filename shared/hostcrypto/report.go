@@ -349,8 +349,8 @@ const (
 
 // How a keystore was opened.
 const (
-	OpenedNot             = "not_opened"       // it needs a password the collector does not have
-	OpenedWithoutPassword = "no_password"      // its listing needs none (JKS certificates, a keytab)
+	OpenedNot             = "not_opened"       // its protection needs a password the collector does not have (what it states in clear may still be listed)
+	OpenedWithoutPassword = "no_password"      // it needs none: the empty password opens its protection, or nothing in it is protected (a keytab)
 	OpenedDefaultPassword = "default_password" // a well-known default opened it (opt-in)
 )
 

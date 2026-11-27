@@ -13,11 +13,18 @@ package hostcrypto
 //     installed; openssl is not a Windows built-in and is not used there.
 //   - A keystore: `openssl pkcs12 -nokeys -info` for PKCS#12 (keys are never
 //     output) and `keytool -list` (never -v, never -rfc) for JKS and JCEKS.
-//     The default-password opt-in sends the well-known passwords on the
-//     command's STANDARD INPUT, one per line, read by the script into a
-//     shell variable and handed to the tool through a pipe from the shell's
-//     own printf: no password is ever in a process's arguments, so none is
-//     in `ps`. Without the opt-in only the empty password is tried. No
+//     The empty password is always tried first. For PKCS#12 a second try
+//     with a random value no store can have tells whether anything in the
+//     file checks a password at all (`openssl pkcs12 -nokeys` lists a file
+//     with no MAC and clear certificates under any password); for JKS and
+//     JCEKS, whose listing never needs the password, the host computes the
+//     integrity digest for the empty password and prints only whether it
+//     matches. The default-password opt-in then sends the well-known
+//     passwords on the command's STANDARD INPUT, one per line, read by the
+//     script into a shell variable and handed to the tool through a pipe
+//     from the shell's own printf: no password is ever in a process's
+//     arguments, so none is in `ps` (the random value is in the arguments;
+//     it is the password of nothing). No
 //     Windows keystore probe: Windows has no built-in tool that lists a
 //     keystore without being able to print its keys (certutil -dump prints
 //     key material), so remote Windows keystores keep their markers-only
@@ -33,7 +40,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strconv"
@@ -384,24 +393,39 @@ func jobParseKeyProbe(out []byte, base PrivateKey) PrivateKey {
 	return k
 }
 
-// jobKeystoreProbeScript lists one keystore ($1, of type $2). With $3 = 1
-// it first tries the passwords on its standard input, one per line. Its
-// answer is "OPENED default" or "OPENED empty" with the filtered listing,
-// or one of "LOCKED", "DENIED", "NOTOOL", "UNSUPPORTED".
+// jobKeystoreProbeScript lists one keystore ($1, of type $2). $4 is a
+// random value made for this probe, a password no store has. The empty
+// password is tried first; then, with $3 = 1, the passwords on its standard
+// input, one per line. Its answer is the filtered listing and one of:
+//
+//   - "OPENED empty": the empty password opens it (PKCS#12: openssl accepts
+//     it and refuses the random value; JKS/JCEKS: the empty password's
+//     integrity digest matches, "JKSEMPTY" below);
+//   - "OPENED nocheck" (PKCS#12): openssl accepts the random value too, so
+//     nothing in the file checks a password;
+//   - "OPENED default": a default opens it, verified by the tool;
+//   - "LISTED" / "LISTED unchecked" (JKS/JCEKS): listed in clear, the
+//     integrity password not empty (nor a default, with $3 = 1), or not
+//     checked because the host has no SHA-1 tool;
+//   - "LOCKED clear" (PKCS#12): no password opens it, and its clear parts
+//     were listed without verifying the MAC (nothing in it is encrypted);
+//   - "LOCKED", "DENIED", "NOTOOL", "UNSUPPORTED".
 //
 // The filtered listing is, for openssl pkcs12: "I <line>" for its MAC,
 // PKCS7 and bag lines, "N <friendlyName>", and "CERT" for each certificate
 // it printed (never the certificate); for keytool: "V 1" when the listing
 // was not verified (no password), "C <count>", "E <alias line>" and
-// "F <SHA-256 fingerprint>".
+// "F <SHA-256 fingerprint>". Every openssl run has -nokeys: no key is
+// decrypted or printed, so no private key byte crosses.
 const jobKeystoreProbeScript = `f=$1
 typ=$2
 tries=$3
+rnd=$4
 fp12() { awk '/^MAC/ || /^PKCS7 / || /^Shrouded Keybag/ || /^Key bag/ || /^Certificate bag/ {print "I " $0; next} /^-----BEGIN CERTIFICATE-----$/ {print "CERT"; next} /^ *friendlyName: / {sub(/^ *friendlyName: /, ""); print "N " $0}'; }
 fkt() { awk '/^Your keystore contains [0-9]+ entr/ {print "C " $4; next} /(PrivateKeyEntry|trustedCertEntry|SecretKeyEntry), *$/ {print "E " $0; next} /^Certificate fingerprint \(SHA-256\): / {print "F " $4}'; }
 p12() {
   for leg in "" -legacy; do
-    o=$(printf '%s\n' "$1" | openssl pkcs12 $leg -in "$f" -nokeys -info -passin stdin 2>&1)
+    o=$(printf '%s\n' "$1" | openssl pkcs12 $leg $2 -in "$f" -nokeys -info -passin stdin 2>&1)
     if [ $? -eq 0 ]; then printf '%s\n' "$o" | fp12; return 0; fi
     case $o in *nsupported*|*"RC2"*) continue;; esac
     return 1
@@ -417,6 +441,18 @@ kt() {
   printf '%s\n' "$o" | fkt
   return 0
 }
+jdig() {
+  n=$(wc -c < "$f" | tr -d ' ')
+  [ "$n" -gt 32 ] 2>/dev/null || return 0
+  if command -v sha1sum >/dev/null 2>&1; then h="sha1sum"
+  elif command -v shasum >/dev/null 2>&1; then h="shasum -a 1"
+  elif command -v openssl >/dev/null 2>&1; then h="openssl dgst -sha1 -r"
+  else return 0; fi
+  w=$(tail -c 20 "$f" | od -An -tx1 | tr -d ' \n')
+  g=$({ printf 'Mighty Aphrodite'; head -c $((n-20)) "$f"; } | $h | cut -c1-40)
+  [ ${#w} -eq 40 ] && [ ${#g} -eq 40 ] || return 0
+  if [ "$g" = "$w" ]; then echo 1; else echo 0; fi
+}
 case $typ in
   pkcs12) tool=openssl;;
   jks|jceks) tool=keytool;;
@@ -424,31 +460,66 @@ case $typ in
 esac
 [ -r "$f" ] || { echo DENIED; exit 0; }
 command -v "$tool" >/dev/null 2>&1 || { echo NOTOOL; exit 0; }
-lst() { if [ "$tool" = openssl ]; then p12 "$1"; else kt "$1"; fi; }
+if [ "$tool" = openssl ]; then
+  if p12 ""; then
+    if p12 "$rnd" >/dev/null; then echo "OPENED nocheck"; else echo "OPENED empty"; fi
+    exit 0
+  fi
+  if p12 "$rnd" >/dev/null; then p12 "$rnd"; echo "OPENED nocheck"; exit 0; fi
+  if [ "$tries" = 1 ]; then
+    while IFS= read -r pw; do
+      [ -n "$pw" ] || continue
+      p12 "$pw" && { echo "OPENED default"; exit 0; }
+    done
+  fi
+  p12 "$rnd" -nomacver && { echo "LOCKED clear"; exit 0; }
+  echo LOCKED
+  exit 0
+fi
+kt ""
+rc=$?
+[ $rc -eq 2 ] && { echo NOTOOL; exit 0; }
+if [ $rc -eq 0 ]; then
+  d=$(jdig)
+  [ "$d" = 1 ] && { echo "OPENED empty"; exit 0; }
+  if [ "$tries" = 1 ]; then
+    while IFS= read -r pw; do
+      [ -n "$pw" ] || continue
+      kt "$pw" >/dev/null && { echo "OPENED default"; exit 0; }
+    done
+  fi
+  if [ "$d" = 0 ]; then echo LISTED; else echo "LISTED unchecked"; fi
+  exit 0
+fi
 if [ "$tries" = 1 ]; then
   while IFS= read -r pw; do
     [ -n "$pw" ] || continue
-    lst "$pw"
+    kt "$pw"
     rc=$?
     [ $rc -eq 0 ] && { echo "OPENED default"; exit 0; }
     [ $rc -eq 2 ] && { echo NOTOOL; exit 0; }
   done
 fi
-lst ""
-rc=$?
-[ $rc -eq 0 ] && { echo "OPENED empty"; exit 0; }
-[ $rc -eq 2 ] && { echo NOTOOL; exit 0; }
 echo LOCKED
 `
 
-// jobKeystoreProbeArgv runs jobKeystoreProbeScript; path and type are
-// positional arguments, and no password is ever among them.
-func jobKeystoreProbeArgv(path, typ string, tries bool) []string {
+// jobKeystoreProbeArgv runs jobKeystoreProbeScript; path, type and the
+// probe's random value are positional arguments, and no password is ever
+// among them.
+func jobKeystoreProbeArgv(path, typ string, tries bool, random string) []string {
 	t := "0"
 	if tries {
 		t = "1"
 	}
-	return []string{"env", "LC_ALL=C", "sh", "-c", jobKeystoreProbeScript, "sh", path, typ, t}
+	return []string{"env", "LC_ALL=C", "sh", "-c", jobKeystoreProbeScript, "sh", path, typ, t, random}
+}
+
+// jobProbeRandom is a fresh value for one probe: 128 random bits, so no store
+// has it as its password, in hexadecimal, so the shell passes it intact.
+func jobProbeRandom() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return "vista-probe-" + hex.EncodeToString(b[:])
 }
 
 // jobProbeRemoteKeystore is locRemoteKeystoreProbe. Only a POSIX host is
@@ -473,12 +544,12 @@ func jobProbeRemoteKeystore(ctx context.Context, t Target, path, typ string, try
 				pw = append(pw, p)
 			}
 		}
-		out, _, exit, err = ir.RunInput(ctx, jobKeystoreProbeArgv(path, typ, true), []byte(strings.Join(pw, "\n")+"\n"))
+		out, _, exit, err = ir.RunInput(ctx, jobKeystoreProbeArgv(path, typ, true, jobProbeRandom()), []byte(strings.Join(pw, "\n")+"\n"))
 	default:
 		if tryDefaults {
 			notTried = "the connection cannot pass a password on standard input"
 		}
-		out, _, exit, err = tt.Run(ctx, jobKeystoreProbeArgv(path, typ, false))
+		out, _, exit, err = tt.Run(ctx, jobKeystoreProbeArgv(path, typ, false, jobProbeRandom()))
 	}
 	if err != nil || exit != 0 {
 		return KeystoreContents{}, false
@@ -487,7 +558,9 @@ func jobProbeRemoteKeystore(ctx context.Context, t Target, path, typ string, try
 	if !ok {
 		return KeystoreContents{}, false
 	}
-	kc.DefaultsNotTried = notTried
+	if notTried != "" {
+		kc.DefaultsNotTried = notTried
+	}
 	return kc, true
 }
 
@@ -522,8 +595,8 @@ var jobFingerprintRx = regexp.MustCompile(`^(?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2
 func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents, bool) {
 	ks := Keystore{Type: typ, Opened: OpenedNot}
 	var protection []string
-	var opened string
-	unverified := false
+	var opened, notTried string
+	shrouded := false
 	count := -1
 	pendingName := ""
 	sc := bufio.NewScanner(bytes.NewReader(out))
@@ -539,6 +612,10 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 		switch l {
 		case "LOCKED":
 			opened = "locked"
+		case "LOCKED clear":
+			opened = "locked clear"
+		case "LISTED", "LISTED unchecked":
+			opened = strings.ToLower(l)
 		case "DENIED":
 			ks.Unknown = "remote: the account may not read the keystore; entries not read"
 			return KeystoreContents{Keystore: ks}, true
@@ -547,10 +624,11 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 			return KeystoreContents{Keystore: ks}, true
 		case "UNSUPPORTED":
 			return KeystoreContents{}, false
-		case "OPENED default", "OPENED empty":
+		case "OPENED default", "OPENED empty", "OPENED nocheck":
 			opened = l[len("OPENED "):]
 		case "V 1":
-			unverified = true
+			// keytool listed without verifying; the integrity answer is the
+			// host's digest check (JKSEMPTY) or a default keytool verified.
 		case "CERT":
 			// A certificate the listing printed: its bag is counted already,
 			// and the attributes printed just before it are its own (openssl
@@ -568,6 +646,7 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 				switch {
 				case strings.Contains(v, "Shrouded Keybag") || strings.HasPrefix(v, "Key bag"):
 					ks.Entries = append(ks.Entries, KeystoreEntry{Kind: "private_key"})
+					shrouded = shrouded || strings.Contains(v, "Shrouded Keybag")
 					if a, ok := tag(v, "Shrouded Keybag: "); ok && !strings.HasPrefix(a, "Bag Attributes") {
 						protection = jobAppendOnce(protection, "keys "+a)
 					}
@@ -614,19 +693,47 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 		}
 	}
 	yes, no := true, false
+	notEmpty := "not empty"
+	if tried {
+		notEmpty = "neither empty nor a well-known default"
+	}
 	switch opened {
 	case "default":
 		ks.Opened, ks.DefaultPassword = OpenedDefaultPassword, &yes
 	case "empty":
-		// Listed with the empty password: the store needs none (or, for a
-		// listing keytool did not verify, its password is not known). Either
-		// way no well-known default opened it.
+		// The empty password opens it: openssl accepted it and refused a
+		// random value, or the empty password's JKS digest matched. No
+		// well-known default opened it.
 		ks.Opened = OpenedWithoutPassword
 		if tried {
 			ks.DefaultPassword = &no
 		}
+	case "nocheck":
+		// openssl accepted a random value: nothing in the file checks a
+		// password, so no password was tried in any useful sense.
+		if shrouded {
+			ks.Unknown = "remote: nothing in the keystore verifies a password and its keys are encrypted; what it states in clear is listed"
+			notTried = ksNotTriedNoCheck
+		} else {
+			ks.Opened = OpenedWithoutPassword
+			notTried = ksNotTriedUnprotected
+		}
+	case "listed", "listed unchecked":
+		// JKS/JCEKS: aliases and certificates in clear, the store not opened.
+		ks.Unknown = "aliases and certificates are stated in clear; the store's integrity password is " + notEmpty
+		if opened == "listed unchecked" {
+			ks.Unknown = "aliases and certificates are stated in clear; whether the store's integrity password is empty was not checked (no SHA-1 tool on the host)"
+		}
+		if tried {
+			ks.DefaultPassword = &no
+		}
+	case "locked clear":
+		ks.Unknown = "remote: the keystore needs a password that is " + notEmpty + "; what its unencrypted parts state is listed, its integrity not checked"
+		if tried {
+			ks.DefaultPassword = &no
+		}
 	case "locked":
-		ks.Unknown = "remote: the keystore needs a password; entries not read"
+		ks.Unknown = "remote: the keystore needs a password that is " + notEmpty + "; entries not read (a locked keystore is listed remotely only when nothing in it is encrypted)"
 		ks.Entries = nil
 		if tried {
 			ks.DefaultPassword = &no
@@ -642,10 +749,11 @@ func jobParseKeystoreProbe(out []byte, typ string, tried bool) (KeystoreContents
 	if len(protection) > 0 {
 		ks.Protection = strings.Join(protection, "; ")
 	}
-	if unverified {
-		ks.Unknown = "remote: listed without a password; the keystore's integrity was not checked"
+	kc := KeystoreContents{Keystore: ks}
+	if tried {
+		kc.DefaultsNotTried = notTried
 	}
-	return KeystoreContents{Keystore: ks}, true
+	return kc, true
 }
 
 // jobAppendOnce adds a protection phrase once. A phrase is the tool's
@@ -673,7 +781,7 @@ func jobAppendOnce(list []string, s string) []string {
 func jobProbeCommands() map[string]string {
 	return map[string]string{
 		"key-probe":      strings.Join(jobKeyProbeArgv([]string{"PATH"}), " "),
-		"keystore-probe": strings.Join(jobKeystoreProbeArgv("PATH", "TYPE", true), " "),
+		"keystore-probe": strings.Join(jobKeystoreProbeArgv("PATH", "TYPE", true, "RANDOM"), " "),
 		"win-key-probe":  jobWinKeyProbe,
 	}
 }

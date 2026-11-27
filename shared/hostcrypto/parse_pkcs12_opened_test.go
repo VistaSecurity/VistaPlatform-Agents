@@ -23,7 +23,7 @@ import (
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
-// What "opened" means for a PKCS#12 file (owner, 2026-11-26):
+// What "opened" means for a PKCS#12 file:
 //
 //   - no_password only when the empty password opens what the file protects
 //     (its MAC verifies with it, or an encrypted part decrypts with it), or

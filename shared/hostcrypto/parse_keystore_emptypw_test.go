@@ -2,19 +2,20 @@ package hostcrypto
 
 import (
 	"encoding/asn1"
+	"fmt"
 	"strings"
 	"testing"
 
 	"software.sslmate.com/src/go-pkcs12"
 )
 
-// TestEmptyPasswordIsNotADefault (owner, 2026-11-25): with the
+// TestEmptyPasswordIsNotADefault: with the
 // default-password opt-in, a store whose password is empty reads as
 // needing none (no_password, DefaultPassword false); only a well-known
 // default (changeit) is default_password/true; a real password is
 // DefaultPassword false and opens nothing it would need a password for.
 // Every store is generated here. Without the opt-in only the empty password
-// is tried (owner, 2026-11-26), and DefaultPassword stays nil.
+// is tried, and DefaultPassword stays nil.
 func TestEmptyPasswordIsNotADefault(t *testing.T) {
 	type want struct {
 		opened  string
@@ -43,17 +44,17 @@ func TestEmptyPasswordIsNotADefault(t *testing.T) {
 			return ParseJKS(ksMakeJKSFixture(t, ksMagicJKS, 2, pw).store, true)
 		}, map[string]want{
 			// A JKS lists without a password whatever it is; the digest says
-			// which password it has.
+			// which password it has, and only an empty one is no_password.
 			"":            {OpenedWithoutPassword, false, -1},
 			"changeit":    {OpenedDefaultPassword, true, -1},
-			"Real-Pass-7": {OpenedWithoutPassword, false, -1},
+			"Real-Pass-7": {OpenedNot, false, -1},
 		}},
 		{"jceks", func(pw string) (KeystoreContents, error) {
 			return ParseJKS(ksMakeJKSFixture(t, ksMagicJCEKS, 2, pw).store, true)
 		}, map[string]want{
 			"":            {OpenedWithoutPassword, false, -1},
 			"changeit":    {OpenedDefaultPassword, true, -1},
-			"Real-Pass-7": {OpenedWithoutPassword, false, -1},
+			"Real-Pass-7": {OpenedNot, false, -1},
 		}},
 	}
 	for _, tc := range cases {
@@ -273,6 +274,134 @@ func TestPKCS12RetryBudget(t *testing.T) {
 	if ks.Opened != OpenedWithoutPassword || ks.DefaultPassword != nil || ks.EntryCount != nil ||
 		!strings.Contains(ks.Unknown, "iteration count is above the limit") || strings.Contains(ks.Unknown, "neither empty") || strings.Contains(ks.Unknown, "does not try") {
 		t.Fatalf("cut: %+v", ks)
+	}
+
+	// Without the opt-in the same stores: the empty password alone, so no
+	// default answer, and the same "opened" whenever the empty password is
+	// what opens the store.
+	for name, b := range map[string][]byte{"fits": fits, "same": same, "cut": cut} {
+		off, err := ParsePKCS12(b, false)
+		if err != nil || off.DefaultsNotTried != "" || off.Keystore.DefaultPassword != nil {
+			t.Fatalf("%s without the opt-in: %v %q %+v", name, err, off.DefaultsNotTried, off.Keystore)
+		}
+		want := OpenedWithoutPassword // the MAC is the empty password's
+		if name == "fits" {
+			want = OpenedNot // the MAC is changeit's
+		}
+		if off.Keystore.Opened != want || len(off.Certificates) != 0 {
+			t.Fatalf("%s without the opt-in: %+v, %d certificates", name, off.Keystore, len(off.Certificates))
+		}
+	}
+}
+
+// TestPKCS12EmptyPasswordSameAcrossTheCostWindow: a store whose password is
+// empty reads the same with the opt-in on and off at every iteration count
+// the empty password alone can afford; past what the defaults can afford the
+// opt-in says they were cut, and leaves default_password absent.
+func TestPKCS12EmptyPasswordSameAcrossTheCostWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("derives keys at up to 1,900,000 iterations")
+	}
+	a := ksTestCert(t, ksTestECDSA(t), "window", false)
+	for _, iters := range []int{1, 600_000, 900_000, 1_900_000} {
+		for _, mac := range []bool{false, true} {
+			var macPW *string
+			if mac {
+				macPW = ksStr("")
+			}
+			b := ksBuildPFX(t, macPW, ksEncryptedPart(t, "", iters, ksCertSafeBag(t, a.Raw)))
+			off, err1 := ParsePKCS12(b, false)
+			on, err2 := ParsePKCS12(b, true)
+			if err1 != nil || err2 != nil {
+				t.Fatal(err1, err2)
+			}
+			label := fmt.Sprintf("%d iterations, MAC %v", iters, mac)
+			if off.Keystore.Opened != OpenedWithoutPassword || on.Keystore.Opened != OpenedWithoutPassword || len(off.Certificates) != 1 || len(on.Certificates) != 1 {
+				t.Errorf("%s: off %q (%d), on %q (%d)", label, off.Keystore.Opened, len(off.Certificates), on.Keystore.Opened, len(on.Certificates))
+			}
+			// Where the defaults do not fit, they are said to be cut.
+			if d := on.Keystore.DefaultPassword; on.DefaultsNotTried == "" {
+				if d == nil || *d {
+					t.Errorf("%s: default %v", label, d)
+				}
+			} else if d != nil || on.DefaultsNotTried != ksNotTriedDefaultsCost {
+				t.Errorf("%s: default %v, not tried %q", label, d, on.DefaultsNotTried)
+			}
+		}
+	}
+}
+
+// TestPKCS12NoAnswerWhenAPartWasNotTried: when no candidate passes the
+// store's check, the other parts are still tried, so "does a default open
+// this?" is answered from what was tried, and is absent when the budget cut
+// a try.
+func TestPKCS12NoAnswerWhenAPartWasNotTried(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "a", false)
+	b := ksTestCert(t, ksTestECDSA(t), "b", false)
+	// No MAC: the cheapest part under a real password, the other under
+	// changeit. Every part is its own check: a default opens one.
+	noMAC := ksBuildPFX(t, nil, ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, a.Raw)), ksEncryptedPart(t, "changeit", 50, ksCertSafeBag(t, b.Raw)))
+	got, err := ParsePKCS12(noMAC, true)
+	if ks := got.Keystore; err != nil || ks.Opened != OpenedDefaultPassword || ks.DefaultPassword == nil || !*ks.DefaultPassword || len(got.Certificates) != 1 || ks.EntryCount != nil {
+		t.Errorf("no MAC, real then changeit: %v %+v", err, ks)
+	}
+	off, _ := ParsePKCS12(noMAC, false)
+	if ks := off.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword != nil || len(off.Certificates) != 0 {
+		t.Errorf("no MAC, real then changeit, opt-in off: %+v", ks)
+	}
+	// A MAC under a real password and a part under changeit: the MAC is not
+	// opened, so the store is not; a default does open part of it.
+	locked := ksBuildPFX(t, ksStr("Real-Pass-7"), ksEncryptedPart(t, "changeit", 1, ksCertSafeBag(t, a.Raw)))
+	got, err = ParsePKCS12(locked, true)
+	if ks := got.Keystore; err != nil || ks.Opened != OpenedNot || ks.DefaultPassword == nil || !*ks.DefaultPassword || len(got.Certificates) != 1 ||
+		!strings.Contains(ks.Unknown, "opens part of it") {
+		t.Errorf("MAC real, part changeit: %v %+v", err, ks)
+	}
+	// Every part refused every candidate: the answer is false.
+	refused := ksBuildPFX(t, ksStr("Real-Pass-7"), ksEncryptedPart(t, "Real-Pass-7", 1, ksCertSafeBag(t, a.Raw)))
+	got, _ = ParsePKCS12(refused, true)
+	if ks := got.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword == nil || *ks.DefaultPassword || got.DefaultsNotTried != "" {
+		t.Errorf("all refused: %q %+v", got.DefaultsNotTried, ks)
+	}
+	if testing.Short() {
+		return
+	}
+	// The same as "locked", where the budget cannot try changeit on the part
+	// after the MAC refused: not checked, so absent, and said why.
+	costly := ksBuildPFX(t, ksStr("Real-Pass-7"), ksEncryptedPart(t, "changeit", 1_200_000, ksCertSafeBag(t, a.Raw)))
+	got, _ = ParsePKCS12(costly, true)
+	if ks := got.Keystore; ks.Opened != OpenedNot || ks.DefaultPassword != nil || got.DefaultsNotTried != ksNotTriedCost {
+		t.Errorf("MAC real, costly part: %q %+v", got.DefaultsNotTried, ks)
+	}
+}
+
+// TestPKCS12UncomputableMACIsNotOpened: a MAC this code does not compute
+// cannot be stood in for by a part that decrypts: not opened, and why.
+func TestPKCS12UncomputableMACIsNotOpened(t *testing.T) {
+	a := ksTestCert(t, ksTestECDSA(t), "a", false)
+	authSafe, err := asn1.Marshal([]ksContentInfo{ksEncryptedPart(t, "", 1, ksCertSafeBag(t, a.Raw))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	os, _ := asn1.Marshal(authSafe)
+	pfx, err := asn1.Marshal(ksPFX{Version: 3, AuthSafe: ksContentInfo{ContentType: ksOIDData, Content: ksExplicit0(os)}, MacData: ksMacData{
+		// HMAC-MD5: named, and not computed here.
+		Mac:     ksDigestInfo{Algorithm: ksAlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 113549, 2, 5}, Parameters: asn1.NullRawValue}, Digest: make([]byte, 16)},
+		MacSalt: []byte("macsalt!"), Iterations: 2048,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, try := range []bool{false, true} {
+		got, err := ParsePKCS12(pfx, try)
+		ks := got.Keystore
+		wantNotTried := ""
+		if try {
+			wantNotTried = ksNotTriedMAC
+		}
+		if err != nil || ks.Opened != OpenedNot || ks.DefaultPassword != nil || got.DefaultsNotTried != wantNotTried || !strings.Contains(ks.Unknown, "MAC") {
+			t.Errorf("opt-in %v: %v %q %+v", try, err, got.DefaultsNotTried, ks)
+		}
 	}
 }
 

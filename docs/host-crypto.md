@@ -125,22 +125,27 @@ takes them from its configuration file.
   report's `home_directories` section says `skipped`.
 - **Default keystore passwords** (`host_crypto_default_keystore_passwords`,
   `--default-keystore-passwords`): also try the well-known defaults
-  (`changeit`, `changeme`, `password`) against Java and PKCS#12 keystores:
-  on this machine after the empty password, on a remote host before it.
-  Only a default gives `opened: default_password` and
-  `default_password: true`, also when it opens only a part of the keystore;
-  which default worked is never recorded. Without the opt-in
-  `default_password` is absent.
+  (`changeit`, `changeme`, `password`) against Java and PKCS#12 keystores,
+  after the empty password. Only a default gives `opened: default_password`
+  and `default_password: true`, also when it opens only a part of the
+  keystore; which default worked is never recorded. With the opt-in,
+  `default_password` is `false` when every default was tried and none
+  opened anything, and absent when the defaults could not be tried: nothing
+  in the file is protected by a password, nothing in it can check one, or
+  the file's iteration count puts them over the work limit (then only the
+  empty password is tried). Without the opt-in `default_password` is always
+  absent.
 
   The empty password is not a guess, so it is tried with the opt-in on or
-  off. A keystore it opens is reported as needing no password
-  (`opened: no_password`, with the opt-in `default_password: false`) and its
-  contents are listed. A PKCS#12 file reads `no_password` only when the
-  empty password verifies its integrity MAC or decrypts its encrypted parts,
-  or when nothing in it is protected by a password; names and certificates
-  it keeps in an unencrypted part are listed either way, but do not by
-  themselves make it `no_password`. A file whose protection the empty
-  password does not open reads `opened: not_opened`, and `unknown` says why.
+  off. `opened` says what opened the keystore's protection, never only that
+  something in it could be read:
+
+  | Keystore | `no_password` | `not_opened` |
+  |---|---|---|
+  | PKCS#12 | the empty password verifies its integrity MAC (or, with no MAC, decrypts its encrypted parts), or nothing in it is protected by a password | anything else; names and certificates kept in an unencrypted part are still listed |
+  | JKS, JCEKS | the empty password produces its integrity digest | anything else; its aliases and certificates, which the format stores in clear, are still listed |
+
+  A `not_opened` keystore says why in `unknown`.
 
 ## Directories it sweeps
 
@@ -232,14 +237,22 @@ of a private key file crosses the connection:
   OpenSSH cannot read an Ed25519 PKCS#8 key; it too says so. Every tool run
   is bounded (3 seconds), and the keys of a pass are probed in batches.
 - A keystore on Linux or macOS is listed by `openssl pkcs12 -nokeys -info`
-  (PKCS#12) or `keytool -list` (JKS, JCEKS), which print no key. Only the
-  empty password is tried, unless you opt in to default passwords: those are
-  sent on the command's standard input, never in its arguments, so they never
-  appear in the host's process list. The defaults are tried first and the
-  empty password last; a keystore the empty password opens reads
-  `opened: no_password`, never `default_password`. Windows keystores are not
-  listed remotely (Windows has no built-in tool that lists one without being
-  able to print its keys), nor are keytabs.
+  (PKCS#12) or `keytool -list` (JKS, JCEKS), which print no key. The empty
+  password is tried first. For PKCS#12 one more try with a random value made
+  for that probe tells whether anything in the file checks a password at all
+  (`openssl pkcs12 -nokeys` lists a file with no MAC and clear certificates
+  under any password); such a file reads `no_password` only when it holds no
+  encrypted key. For JKS and JCEKS the host computes the integrity digest for
+  the empty password and sends only whether it matches (where the host has
+  `sha1sum`, `shasum` or `openssl`; otherwise `unknown` says it was not
+  checked). The defaults come after that, only if you opt in: they are sent
+  on the command's standard input, never in its arguments, so they never
+  appear in the host's process list. One difference from this machine: a
+  PKCS#12 keystore that no password opens is listed remotely only when
+  nothing in it is encrypted (its clear certificates, read without checking
+  its MAC); otherwise its entries are not read, and `unknown` says so.
+  Windows keystores are not listed remotely (Windows has no built-in tool
+  that lists one without being able to print its keys), nor are keytabs.
 - Configuration is filtered **on the host** to the named directives before
   anything is sent.
 - The sweep goes by file name and size only.
