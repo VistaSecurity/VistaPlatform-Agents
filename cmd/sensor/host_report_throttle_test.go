@@ -21,6 +21,7 @@ import (
 // half is what TestSendHeartbeat_HostBlock_ThrottledWhenUnchanged and
 // TestSendHeartbeat_HostBlock_ResentAfterInterval below actually exercise.
 func TestSendHeartbeat_HostBlock_FirstBeatAlwaysReports(t *testing.T) {
+	hostReportingBuild(t)
 	sensor := heartbeatTestSensor("")
 	health := sendHeartbeatAndCapture(t, sensor)
 	if health.Host == nil {
@@ -40,6 +41,7 @@ func TestSendHeartbeat_HostBlock_FirstBeatAlwaysReports(t *testing.T) {
 // guard in sendHeartbeat (always attaching it) makes this test fail on the
 // second capture.
 func TestSendHeartbeat_HostBlock_ThrottledWhenUnchanged(t *testing.T) {
+	hostReportingBuild(t)
 	sensor := heartbeatTestSensor("")
 
 	first := sendHeartbeatAndCapture(t, sensor)
@@ -62,6 +64,7 @@ func TestSendHeartbeat_HostBlock_ThrottledWhenUnchanged(t *testing.T) {
 // eventually will be (so a database restored from backup, or state lost some
 // other way, still converges within the hour).
 func TestSendHeartbeat_HostBlock_ResentAfterInterval(t *testing.T) {
+	hostReportingBuild(t)
 	sensor := heartbeatTestSensor("")
 
 	first := sendHeartbeatAndCapture(t, sensor)
@@ -84,6 +87,7 @@ func TestSendHeartbeat_HostBlock_ResentAfterInterval(t *testing.T) {
 // TestSendHeartbeat_HostBlock_ChangeBypassesThrottle: a heartbeat sent
 // immediately after a change (not just after the interval) still reports.
 func TestSendHeartbeat_HostBlock_ChangeBypassesThrottle(t *testing.T) {
+	hostReportingBuild(t)
 	sensor := heartbeatTestSensor("")
 	first := sendHeartbeatAndCapture(t, sensor)
 	if first.Host == nil {
@@ -112,6 +116,7 @@ func TestSendHeartbeat_HostBlock_ChangeBypassesThrottle(t *testing.T) {
 // out of the `else` branch (committing unconditionally, even on error) makes
 // this test fail.
 func TestSendHeartbeat_HostBlock_FailedSendDoesNotCommitThrottle(t *testing.T) {
+	hostReportingBuild(t)
 	sensor := heartbeatTestSensor("")
 
 	// First attempt: server is down, heartbeat fails.
@@ -175,4 +180,32 @@ func TestShouldReportHost_ReadOnly(t *testing.T) {
 	if !sensor.lastHostSentAt.IsZero() {
 		t.Fatal("shouldReportHost must not commit state on its own")
 	}
+}
+
+// TestSendHeartbeat_HostBlock_NeverFromTheContainerImage: in the container
+// image the sensor's host is its pod, which the platform would otherwise
+// record as a server asset, a new one after every pod replacement.
+//
+// Mutation check: dropping `reportOwnHost &&` from sendHeartbeat makes this
+// fail on the first beat.
+func TestSendHeartbeat_HostBlock_NeverFromTheContainerImage(t *testing.T) {
+	orig := reportOwnHost
+	reportOwnHost = false
+	t.Cleanup(func() { reportOwnHost = orig })
+
+	sensor := heartbeatTestSensor("")
+	for i := 0; i < 2; i++ {
+		if health := sendHeartbeatAndCapture(t, sensor); health.Host != nil {
+			t.Fatalf("heartbeat %d carried a Host block (%+v); the container image must not report its pod as a host", i+1, health.Host)
+		}
+	}
+}
+
+// hostReportingBuild runs a test as the host build, where the sensor reports
+// its own host, whichever tags the test binary was built with.
+func hostReportingBuild(t *testing.T) {
+	t.Helper()
+	orig := reportOwnHost
+	reportOwnHost = true
+	t.Cleanup(func() { reportOwnHost = orig })
 }

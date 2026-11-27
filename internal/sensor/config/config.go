@@ -393,6 +393,11 @@ type SecurityConfig struct {
 
 // ConfigFile represents the YAML config file structure
 type ConfigFile struct {
+	// EnvironmentEnrollment marks the file a sensor configured by its
+	// environment alone writes for itself at enrollment (a container: no
+	// config file, DATA_PATH on a volume). Such a file records the identity
+	// only; see loadEnvironmentEnrollment.
+	EnvironmentEnrollment bool   `yaml:"environmentEnrollment"`
 	SensorID              string `yaml:"sensorId"`
 	ControlPlaneURL       string `yaml:"controlPlaneUrl"`
 	RegistrationKey       string `yaml:"registrationKey"`
@@ -479,6 +484,10 @@ func LoadFromFile(filePath string) (*Config, error) {
 	}
 	log.Printf("🔍 Parsed from config file: controlPlaneUrl=%q sensorId=%q registrationKey=%s interfaces=%v dataPath=%q",
 		cfgFile.ControlPlaneURL, cfgFile.SensorID, keyState, cfgFile.Capture.Interfaces, cfgFile.Storage.DataPath)
+
+	if cfgFile.EnvironmentEnrollment {
+		return loadEnvironmentEnrollment(data, &cfgFile)
+	}
 
 	// Convert ConfigFile to Config, using config file values as base
 	cfg := &Config{
@@ -752,6 +761,94 @@ func mergeEnvVars(cfg *Config) {
 		// Set from the config file (the env case is flagged above).
 		cfg.Network.ipAddressPinned = true
 	}
+}
+
+// loadEnvironmentEnrollment builds the configuration of a sensor configured by
+// its environment alone that has enrolled. Every setting comes from the
+// environment and the defaults, exactly as on its first start (Load), so a
+// change to the environment (a manifest edit) takes effect on the next start
+// and a variable removed from it reverts to its default. The file contributes
+// only what the environment cannot: the identity (sensor ID, the certificate,
+// key, CA and agent-secret files, the registration key's fingerprint), the
+// control-plane URL it enrolled with, and the capture settings the platform
+// delivered since, which the sensor writes into the same file and which win
+// over local values once delivered, as in any sensor's config file.
+//
+// The stored CA (serverCACertPath) is authoritative over SERVER_CA_CERT, and
+// the enrolled URL over CONTROL_PLANE_URL unless CONTROL_PLANE_URL_OVERRIDE=1,
+// as for an installed sensor.
+func loadEnvironmentEnrollment(data []byte, f *ConfigFile) (*Config, error) {
+	cfg := Load()
+	cfg.SensorID = f.SensorID
+	cfg.RegistrationKeySHA256 = f.RegistrationKeySHA256
+	if f.SensorID != "" && cfg.Name == "crypto-sensor" {
+		cfg.Name = f.SensorID
+	}
+	if f.ControlPlaneURL != "" {
+		if env := cfg.ControlPlaneURL; os.Getenv("CONTROL_PLANE_URL") != "" && env != f.ControlPlaneURL {
+			if sharedconfig.GetEnv("CONTROL_PLANE_URL_OVERRIDE", "") == "1" {
+				fmt.Printf("⚠️  CONTROL_PLANE_URL_OVERRIDE=1 — repointing an enrolled sensor to %s; its mTLS client cert is bound to the previous endpoint and will likely fail until re-enrolled\n", env)
+			} else {
+				fmt.Printf("ℹ️  Ignoring CONTROL_PLANE_URL=%s because enrolled mTLS config already pins controlPlaneUrl=%s (set CONTROL_PLANE_URL_OVERRIDE=1 to force)\n", env, f.ControlPlaneURL)
+				cfg.ControlPlaneURL = f.ControlPlaneURL
+			}
+		} else {
+			cfg.ControlPlaneURL = f.ControlPlaneURL
+		}
+	}
+	cfg.Security.ClientCert, cfg.Security.ClientKey = "", ""
+	cfg.Security.ClientCertPath = f.Security.ClientCertPath
+	cfg.Security.ClientKeyPath = f.Security.ClientKeyPath
+	cfg.Security.ServerCACertPath = f.Security.ServerCACertPath
+	cfg.Security.AgentSecretPath = f.Security.AgentSecretPath
+	cfg.Security.UseTLS = f.Security.UseTLS
+
+	// Capture settings the platform delivered: only keys present in the file.
+	present, err := captureKeysPresent(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	c, fc := &cfg.Capture, &f.Capture
+	for key := range present {
+		switch key {
+		case "activeProbing":
+			c.ActiveProbing = fc.ActiveProbing
+		case "networkDiscovery":
+			c.NetworkDiscovery = fc.NetworkDiscovery
+		case "dedupTTLMinutes":
+			c.DedupTTLMinutes = fc.DedupTTLMinutes
+		case "extraPortsToMonitor":
+			c.ExtraPortsToMonitor = fc.ExtraPortsToMonitor
+		case "interfaces":
+			c.Interfaces = fc.Interfaces
+		case "hostObservation":
+			c.HostObservation = fc.HostObservation != nil && *fc.HostObservation
+		case "hostObservationDNS":
+			c.HostObservationDNS = fc.HostObservationDNS != nil && *fc.HostObservationDNS
+		case "hostObservationWindowSeconds":
+			c.HostObservationWindowSeconds = fc.HostObservationWindowSeconds
+		}
+	}
+
+	if err := loadCertificatesFromFiles(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// captureKeysPresent lists the keys of the file's top-level capture mapping.
+func captureKeysPresent(data []byte) (map[string]bool, error) {
+	var doc struct {
+		Capture map[string]yaml.Node `yaml:"capture"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool, len(doc.Capture))
+	for k := range doc.Capture {
+		keys[k] = true
+	}
+	return keys, nil
 }
 
 func shouldPreserveEnrolledControlPlaneURL(cfg *Config) bool {

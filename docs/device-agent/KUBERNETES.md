@@ -75,8 +75,18 @@ step 1, never a tag alone) and the Secret at the end.
 
 A registration key is used once, at the agent's first start. After that the
 agent's identity (a private key it generated itself, and the certificate the
-platform issued for it) is on its volume, and the registration key is of no
-use to anyone. You may then delete the two keys from the Secret.
+platform issued for it) is on its volume, with the file that names it
+(`agent-config.yaml` or `sensor-config.yaml`, mode 0600), and the
+registration key is of no use to anyone. A replaced pod (a restart, an upgrade,
+a node drain) reads that file and is the same agent; it does not present the
+key again. The sensor's file holds its identity only: its settings come from
+the manifest's environment on every start, so an edit there takes effect at
+the next rollout (the enrolled platform address and CA, and settings the
+platform delivered, stay as they are). You may then delete the two keys from the Secret. If the platform
+refuses the stored identity (the agent was deleted in the console), the pod
+keeps running and its heartbeats fail; it does not try the spent key. To
+enroll it again, delete its PersistentVolumeClaim (which holds the old
+identity), put a new key in the Secret, and apply the manifest again.
 
 **4. Read what you are about to grant, then apply.** The whole of it is the
 `ClusterRole` in the file, and it is short enough to read:
@@ -193,7 +203,10 @@ On the network: it opens connections to the addresses the platform's scan
 jobs name (your Services and pods) and reports what answers. It does **not**
 capture traffic: the image is built without packet capture, opens no
 interface, and needs no capability. Passive capture in a cluster would need a
-privileged pod on every node and is not part of this.
+privileged pod on every node and is not part of this. Nor does it report its
+own host, as a sensor on a machine does: its host is its pod, which would
+otherwise appear in the inventory as a server, a new one after every pod
+replacement.
 
 Two things change what the sensor can see, and both are reported as what
 they are rather than as "no TLS":
