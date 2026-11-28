@@ -141,6 +141,9 @@ type DeviceIdentity struct {
 // Assets onto their own downstream asset/finding model.
 type InterrogateResult struct {
 	Assets []CryptoAsset `json:"assets"`
+	// DatabaseObservations is the fact-only SQL session/configuration result.
+	// A v7 database job emits at most one item.
+	DatabaseObservations []DatabaseObservation `json:"database_observations,omitempty"`
 	// DeviceInfo is freeform vendor system info (version/model/serial, raw
 	// certificate dumps, etc.).
 	DeviceInfo map[string]interface{} `json:"device_info"`

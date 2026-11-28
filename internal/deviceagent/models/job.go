@@ -57,6 +57,9 @@ type JobResult struct {
 	Assets      []DiscoveredAsset      `json:"assets,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 	CompletedAt time.Time              `json:"completed_at"`
+	// DatabaseObservations carries typed facts for a database interrogation.
+	// The platform binds engine and port to this authenticated job target.
+	DatabaseObservations []di.DatabaseObservation `json:"database_observations,omitempty"`
 
 	// Facts and Relationships are the ops observations the shared collectors
 	// emit alongside the crypto assets — interfaces, neighbours, VLANs,

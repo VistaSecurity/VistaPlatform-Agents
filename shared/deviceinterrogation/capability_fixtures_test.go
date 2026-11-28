@@ -1055,23 +1055,32 @@ func databaseConformanceRuns(t *testing.T) []conformanceRun {
 	savedPG, savedMy := dbInterrogatePostgres, dbInterrogateMy
 	t.Cleanup(func() { dbInterrogatePostgres, dbInterrogateMy = savedPG, savedMy })
 
-	dbInterrogatePostgres = func(context.Context, string) (*DatabaseEncryptionFinding, error) {
-		return &DatabaseEncryptionFinding{
-			Engine: "postgresql", Version: "PostgreSQL 17.2 on x86_64-pc-linux-gnu",
-			SSLEnabled: true, SSLVersion: "TLSv1.3", SSLCipher: "TLS_AES_256_GCM_SHA384",
-			PasswordEncryptionMethod: "scram-sha-256",
-			RawConfig:                map[string]interface{}{"ssl": "on", "ssl_min_protocol_version": "TLSv1.2"},
+	dbInterrogatePostgres = func(context.Context, string) (*DatabaseObservation, error) {
+		return &DatabaseObservation{
+			Engine:          "postgresql",
+			ServerVersion:   stringMeasured("PostgreSQL 17.2 on x86_64-pc-linux-gnu"),
+			SessionTLSInUse: boolMeasured(true), SessionTLSVersion: stringMeasured("TLSv1.3"),
+			SessionTLSCipher: stringMeasured("TLS_AES_256_GCM_SHA384"),
+			TLSEnforced:      boolState(DatabaseUnsupported), EncryptionAtRestEnabled: boolState(DatabaseUnsupported),
+			EncryptionMethod: stringState(DatabaseUnsupported), EncryptionAlgorithm: stringState(DatabaseUnsupported),
+			PasswordEncryptionDefault: stringMeasured("scram-sha-256"),
+			RawConfig:                 map[string]interface{}{"ssl": "on", "ssl_min_protocol_version": "TLSv1.2"},
 		}, nil
 	}
-	dbInterrogateMy = func(context.Context, string) (*DatabaseEncryptionFinding, error) {
-		return &DatabaseEncryptionFinding{Engine: "mysql", Version: "8.4.3", SSLEnabled: false,
-			RawConfig: map[string]interface{}{"have_ssl": "DISABLED"}}, nil
+	dbInterrogateMy = func(context.Context, string) (*DatabaseObservation, error) {
+		return &DatabaseObservation{Engine: "mysql", ServerVersion: stringMeasured("8.4.3"),
+			SessionTLSInUse: boolState(DatabaseQueryError), SessionTLSVersion: stringState(DatabaseQueryError),
+			SessionTLSCipher: stringState(DatabaseQueryError), TLSEnforced: boolState(DatabaseUnknown),
+			EncryptionAtRestEnabled: boolState(DatabaseUnknown), EncryptionMethod: stringState(DatabaseUnknown),
+			EncryptionAlgorithm: stringState(DatabaseUnknown), PasswordEncryptionDefault: stringState(DatabaseUnsupported),
+			RawConfig: map[string]interface{}{"have_ssl": "DISABLED"},
+			Warnings:  []CollectionWarning{{Collector: databaseCollector, Endpoint: "session-tls", Reason: WarningPermissionDenied, Effect: "current SQL session TLS facts not collected"}}}, nil
 	}
 
 	creds := Credentials{Username: "inventory", Password: "inventory"}
 	return []conformanceRun{
 		{name: "postgresql, TLS on", result: interrogateConformance(t, "postgresql", DeviceInfo{IPAddress: "192.0.2.40"}, creds)},
-		{name: "mysql, TLS off", result: interrogateConformance(t, "mysql", DeviceInfo{IPAddress: "192.0.2.41"}, creds)},
+		expectWarnings(conformanceRun{name: "mysql, TLS facts unavailable", result: interrogateConformance(t, "mysql", DeviceInfo{IPAddress: "192.0.2.41"}, creds)}, "session-tls"),
 	}
 }
 

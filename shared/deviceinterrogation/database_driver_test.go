@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 )
 
 // MySQL interrogation must reach the network.
@@ -38,14 +41,19 @@ func TestMySQLDriver_AcceptsTheBuiltDSN(t *testing.T) {
 		{"hostname", DeviceInfo{DeviceType: "mysql", Hostname: "db.example.test"}, Credentials{Username: "audit", Password: "s3cret"}},
 		{"ipv4", DeviceInfo{DeviceType: "mysql", IPAddress: "192.0.2.41"}, Credentials{Username: "audit", Password: "s3cret"}},
 		{"password with DSN metacharacters", DeviceInfo{DeviceType: "mysql", IPAddress: "192.0.2.41"}, Credentials{Username: "audit", Password: "p@ss:w/rd(1)?x=y"}},
+		{"non-default port", DeviceInfo{DeviceType: "mysql", Hostname: "db.example.test", Port: 8443}, Credentials{Username: "audit", Password: "s3cret"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dsn, port, err := dbBuildConnStr(tc.device, tc.creds)
 			if err != nil {
 				t.Fatalf("dbBuildConnStr: %v", err)
 			}
-			if port != 3306 {
-				t.Errorf("port = %d, want 3306", port)
+			wantPort := tc.device.Port
+			if wantPort == 0 {
+				wantPort = 3306
+			}
+			if port != wantPort {
+				t.Errorf("port = %d, want %d", port, wantPort)
 			}
 			cfg, err := mysqlConfig(dsn)
 			if err != nil {
@@ -64,10 +72,36 @@ func TestMySQLDriver_AcceptsTheBuiltDSN(t *testing.T) {
 				t.Errorf("logger = %T, want *mysql.NopLogger", cfg.Logger)
 			}
 			host, _ := deviceHost(tc.device)
-			if want := net.JoinHostPort(host, "3306"); cfg.Addr != want {
+			if want := net.JoinHostPort(host, strconv.Itoa(wantPort)); cfg.Addr != want {
 				t.Errorf("addr = %q, want %q", cfg.Addr, want)
 			}
 		})
+	}
+}
+
+func TestPostgreSQLDriver_AcceptsEscapedCredentialsIPv6AndPort(t *testing.T) {
+	device := DeviceInfo{DeviceType: "postgresql", IPAddress: "2001:db8::41", Port: 5544}
+	creds := Credentials{Username: "audit/user@example.test", Password: "p@ss:w/rd?#[]"}
+	dsn, port, err := dbBuildConnStr(device, creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != 5544 {
+		t.Fatalf("port = %d, want 5544", port)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	password, ok := parsed.User.Password()
+	if !ok || parsed.User.Username() != creds.Username || password != creds.Password {
+		t.Fatalf("credentials did not round-trip: user=%q password-present=%v", parsed.User.Username(), ok)
+	}
+	if parsed.Hostname() != device.IPAddress || parsed.Port() != "5544" {
+		t.Fatalf("address = %q:%q, want [%s]:5544", parsed.Hostname(), parsed.Port(), device.IPAddress)
+	}
+	if _, err := pq.NewConnector(dsn); err != nil {
+		t.Fatalf("PostgreSQL driver rejects built DSN: %v", err)
 	}
 }
 

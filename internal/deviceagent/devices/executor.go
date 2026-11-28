@@ -319,9 +319,10 @@ func (e *JobExecutor) executeDeviceInterrogation(ctx context.Context, job *model
 	assets := convertInterrogateResult(result)
 
 	jobResult := &models.JobResult{
-		JobID:   job.ID,
-		Success: true,
-		Assets:  assets,
+		JobID:                job.ID,
+		Success:              true,
+		Assets:               assets,
+		DatabaseObservations: result.DatabaseObservations,
 		// The ops observations the collectors produced alongside the crypto
 		// assets. They are forwarded verbatim rather than folded into Metadata:
 		// the platform validates each fact key against the registry and each
