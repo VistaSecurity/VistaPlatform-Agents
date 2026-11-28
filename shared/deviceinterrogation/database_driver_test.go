@@ -100,7 +100,7 @@ func TestPostgreSQLDriver_AcceptsEscapedCredentialsIPv6AndPort(t *testing.T) {
 	if parsed.Hostname() != device.IPAddress || parsed.Port() != "5544" {
 		t.Fatalf("address = %q:%q, want [%s]:5544", parsed.Hostname(), parsed.Port(), device.IPAddress)
 	}
-	if _, err := pq.ParseURL(dsn); err != nil {
+	if _, err := pq.NewConnector(dsn); err != nil {
 		t.Fatalf("PostgreSQL driver rejects built DSN: %v", err)
 	}
 }
