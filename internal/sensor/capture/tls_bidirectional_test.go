@@ -261,10 +261,9 @@ func TestPassiveServerHelloAloneIsOrientedToTheServer(t *testing.T) {
 	}
 }
 
-// IEC 62351-3 compliance is a verdict on NEGOTIATED parameters. A ClientHello
-// with no ServerHello has none, and "unknown" must not be reported as
-// "noncompliant".
-func TestIEC62351NotAssertedWithoutNegotiatedParameters(t *testing.T) {
+// Generic TLS discovery retains the negotiated facts without deciding IEC
+// 62351 applicability or compliance. A web port alone is not OT evidence.
+func TestTLSDiscoveryDoesNotMakeIEC62351PolicyJudgments(t *testing.T) {
 	cfg := &config.Config{SensorID: "test-sensor"}
 	cfg.Capture.DedupTTLMinutes = 1
 	pc := NewPacketCapture(cfg)
@@ -280,20 +279,33 @@ func TestIEC62351NotAssertedWithoutNegotiatedParameters(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d discoveries, want 1 ClientHello-only discovery", len(got))
 	}
-	for _, k := range []string{"iec62351_applicable", "iec62351_overall", "iec62351_noncompliance"} {
+	iecKeys := []string{
+		"iec62351_applicable",
+		"iec62351_tls_version_compliant",
+		"iec62351_cipher_compliant",
+		"iec62351_cert_compliant",
+		"iec62351_overall",
+		"iec62351_noncompliance",
+	}
+	for _, k := range iecKeys {
 		if v, ok := got[0].RawMetadata[k]; ok {
-			t.Errorf("ClientHello-only discovery carries %s=%v; no negotiated parameters were observed", k, v)
+			t.Errorf("ClientHello-only discovery carries retired judgment %s=%v", k, v)
 		}
 	}
 
-	// Polarity check: once the negotiated values ARE known the classifier
-	// still runs (and still reports a real failure).
+	// Once values are negotiated, keep those raw values and still emit no IEC
+	// applicability or compliance assertion.
 	cbc := tlsRecord(0x16, handshakeRecord(0x02, buildServerHello(0x0301, 0xC013, 0))) // TLS 1.0, ECDHE-RSA-AES128-CBC-SHA
 	d := captureConnection(t, 443, clientHelloRecord(), cbc)
 	if len(d) != 1 {
 		t.Fatalf("got %d discoveries, want 1", len(d))
 	}
-	if d[0].RawMetadata["iec62351_applicable"] != true || d[0].RawMetadata["iec62351_overall"] != false {
-		t.Errorf("negotiated TLS 1.0 CBC on 443 must still be classified noncompliant: %v", d[0].RawMetadata)
+	if d[0].Version != "TLS 1.0" || d[0].CipherSuite != "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA" {
+		t.Errorf("negotiated facts lost: version=%q cipher=%q", d[0].Version, d[0].CipherSuite)
+	}
+	for _, k := range iecKeys {
+		if v, ok := d[0].RawMetadata[k]; ok {
+			t.Errorf("negotiated generic TLS carries retired judgment %s=%v", k, v)
+		}
 	}
 }

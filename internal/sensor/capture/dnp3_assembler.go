@@ -17,15 +17,10 @@ import (
 // American electric T&D — RTUs, protective relays, meters, reclosers
 // talking to control-center master stations on TCP/UDP port 20000.
 //
-// Most deployments are still plaintext; some have Secure Authentication
-// (SAv2 deprecated, SAv5 current, SAv6 emerging). We classify on three
-// axes:
-//   - Plaintext DNP3 (no SA objects ever seen): security="none",
-//     Version="DNP3-Plaintext" — high-severity finding.
-//   - SAv5 with strong MAC (HMAC-SHA-256-16 or AES-128-GMAC-12):
-//     security="present", Version="SAv5".
-//   - SAv2 or SAv5 with SHA-1-family MAC: security="weak",
-//     Version="SAv2" / "SAv5".
+// Most deployments are still plaintext; some use Secure Authentication. The
+// decoder records the observed SA version and exact MAC identifier separately
+// from the plaintext observation. Secure Authentication is authentication;
+// it does not establish that the DNP3 payload was encrypted.
 //
 // Frame format (link layer):
 //   Sync(2) Length(1) Control(1) Dst(2 LE) Src(2 LE) CRC(2)
@@ -81,25 +76,24 @@ const (
 // MAC algorithm ID → human-readable name + version inference.
 // Source: IEEE 1815-2012 Annex A Table 7-1.
 type dnp3MACInfo struct {
-	Name     string
-	Version  string // "SAv2" or "SAv5"
-	Strength string // "weak" or "present"
+	Name    string
+	Version string // "SAv2" or "SAv5"
 }
 
 func dnp3MACAlgorithm(id uint8) (dnp3MACInfo, bool) {
 	switch id {
 	case 1:
-		return dnp3MACInfo{"HMAC-SHA-1-4", "SAv2", "weak"}, true
+		return dnp3MACInfo{"HMAC-SHA-1-4", "SAv2"}, true
 	case 2:
-		return dnp3MACInfo{"HMAC-SHA-256-8", "SAv5", "present"}, true
+		return dnp3MACInfo{"HMAC-SHA-256-8", "SAv5"}, true
 	case 3:
-		return dnp3MACInfo{"HMAC-SHA-256-16", "SAv5", "present"}, true
+		return dnp3MACInfo{"HMAC-SHA-256-16", "SAv5"}, true
 	case 4:
-		return dnp3MACInfo{"HMAC-SHA-1-10", "SAv2", "weak"}, true
+		return dnp3MACInfo{"HMAC-SHA-1-10", "SAv2"}, true
 	case 5:
-		return dnp3MACInfo{"AES-128-GMAC-12", "SAv5", "present"}, true
+		return dnp3MACInfo{"AES-128-GMAC-12", "SAv5"}, true
 	case 6:
-		return dnp3MACInfo{"HMAC-SHA-256-10", "SAv5", "present"}, true
+		return dnp3MACInfo{"HMAC-SHA-256-10", "SAv5"}, true
 	}
 	return dnp3MACInfo{}, false
 }
@@ -362,7 +356,7 @@ func dnp3ClassifyFrame(frame []byte, userBytes int) dnp3FrameClassification {
 		if variation >= dnp3SAVarPubKeyUpdateReq && variation <= dnp3SAVarCertStatusResp {
 			return dnp3FrameClassification{
 				kind:  dnp3ClassSAv6,
-				info:  dnp3MACInfo{Name: "asymmetric-PKI", Version: "SAv6", Strength: "present"},
+				info:  dnp3MACInfo{Name: "asymmetric-PKI", Version: "SAv6"},
 				macID: 0,
 			}
 		}
@@ -387,7 +381,7 @@ func dnp3ClassifyFrame(frame []byte, userBytes int) dnp3FrameClassification {
 		}
 		return dnp3FrameClassification{
 			kind: dnp3ClassSA,
-			info: dnp3MACInfo{Name: "unknown", Version: "SA", Strength: "present"},
+			info: dnp3MACInfo{Name: "unknown", Version: "SA"},
 		}
 	}
 	return dnp3FrameClassification{kind: dnp3ClassPlaintext}
@@ -501,21 +495,15 @@ func parseDNP3Packet(payload []byte, srcIP, dstIP string, srcPort, dstPort int, 
 	switch classification.kind {
 	case dnp3ClassPlaintext:
 		version = "DNP3-Plaintext"
-		metadata["security"] = "none"
 		metadata["plaintext_dnp3"] = true
 		metadata["sa_active"] = false
 	case dnp3ClassSA, dnp3ClassSAv6:
 		info := classification.info
 		version = info.Version
-		security := info.Strength
-		if security == "" {
-			security = "present"
-		}
 		metadata["sa_active"] = true
 		metadata["sa_version"] = info.Version
 		metadata["mac_algorithm_id"] = int(classification.macID)
 		metadata["mac_algorithm_name"] = info.Name
-		metadata["security"] = security
 		if classification.kind == dnp3ClassSAv6 {
 			dedupKey = "DNP3-UDP-SAv6"
 		} else {
@@ -585,7 +573,6 @@ func (s *DNP3Stream) emitPlaintext() {
 	metadata := map[string]interface{}{
 		"session_id":     s.state.sessionID,
 		"reassembled":    true,
-		"security":       "none",
 		"plaintext_dnp3": true,
 		"sa_active":      false,
 	}
@@ -608,10 +595,6 @@ func (s *DNP3Stream) emitSA(info dnp3MACInfo) {
 			return
 		}
 	}
-	security := info.Strength
-	if security == "" {
-		security = "present"
-	}
 	metadata := map[string]interface{}{
 		"session_id":         s.state.sessionID,
 		"reassembled":        true,
@@ -619,7 +602,6 @@ func (s *DNP3Stream) emitSA(info dnp3MACInfo) {
 		"sa_version":         info.Version,
 		"mac_algorithm_id":   int(s.state.saMACID),
 		"mac_algorithm_name": info.Name,
-		"security":           security,
 	}
 	if s.state.iface != "" {
 		metadata["interface"] = s.state.iface

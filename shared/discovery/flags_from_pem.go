@@ -9,7 +9,7 @@ import (
 // ClassifyCertChainFromPEMs parses an ordered (leaf-first) set of PEM-encoded
 // certificates and returns the same chain-validation result the active TLS
 // prober produces: validation status, quality flags (SCT, EV, known-bad CA,
-// weak signature/key, incomplete chain, large SAN count) and — when withOCSP is
+// incomplete chain, large SAN count) and — when withOCSP is
 // set and an issuer is present — OCSP revocation status.
 //
 // The interrogation paths (cloud-API discovery and device interrogation) already

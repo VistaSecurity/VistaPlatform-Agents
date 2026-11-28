@@ -12,7 +12,7 @@ import (
 )
 
 // makeTestCertPEM builds a minimal self-signed RSA cert of the given key size
-// and returns its PEM. A small key size (e.g. 1024) drives weak-key detection.
+// and returns its PEM.
 func makeTestCertPEM(t *testing.T, commonName string, bits int) string {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, bits)
@@ -41,8 +41,9 @@ func TestClassifyCertChainFromPEMs_EmptyAndGarbage(t *testing.T) {
 	}
 }
 
-func TestClassifyCertChainFromPEMs_ForwardsQualityFlags(t *testing.T) {
-	// Strong key: parses, quality flags present, no weak-key flag.
+func TestClassifyCertChainFromPEMs_ForwardsObservedQualityFlags(t *testing.T) {
+	// Both key sizes parse and retain observed quality facts. The classifier
+	// does not label either certificate weak; policy owns that judgment.
 	strong := makeTestCertPEM(t, "strong.example.com", 2048)
 	v := ClassifyCertChainFromPEMs([]string{strong}, false)
 	if v == nil {
@@ -53,17 +54,17 @@ func TestClassifyCertChainFromPEMs_ForwardsQualityFlags(t *testing.T) {
 	if _, ok := v.QualityFlags["cert_has_sct"].(bool); !ok {
 		t.Fatalf("cert_has_sct missing or wrong type: %#v", v.QualityFlags["cert_has_sct"])
 	}
-	if _, weak := v.QualityFlags["cert_weak_public_key"]; weak {
-		t.Errorf("cert_weak_public_key should be absent for RSA-2048, got %v", v.QualityFlags["cert_weak_public_key"])
-	}
-
-	// Weak key: the adapter must surface the weak-key flag from the classifier.
-	weak := makeTestCertPEM(t, "weak.example.com", 1024)
-	vw := ClassifyCertChainFromPEMs([]string{weak}, false)
+	small := makeTestCertPEM(t, "small-key.example.com", 1024)
+	vw := ClassifyCertChainFromPEMs([]string{small}, false)
 	if vw == nil {
-		t.Fatal("want non-nil validation for weak cert")
+		t.Fatal("want non-nil validation for a parseable 1024-bit cert")
 	}
-	if got, _ := vw.QualityFlags["cert_weak_public_key"].(string); got != "RSA-1024" {
-		t.Errorf("cert_weak_public_key: want %q, flags=%#v", "RSA-1024", vw.QualityFlags)
+	for _, flags := range []map[string]interface{}{v.QualityFlags, vw.QualityFlags} {
+		if _, ok := flags["cert_weak_public_key"]; ok {
+			t.Errorf("retired cert_weak_public_key judgment present: %#v", flags)
+		}
+		if _, ok := flags["cert_weak_signature"]; ok {
+			t.Errorf("retired cert_weak_signature judgment present: %#v", flags)
+		}
 	}
 }

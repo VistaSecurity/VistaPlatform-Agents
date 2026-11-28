@@ -191,7 +191,6 @@ func TestTLSAssemblerEmitsCertQualityFlags(t *testing.T) {
 		certQualityFlags: map[string]interface{}{
 			"cert_has_sct":          true,
 			"cert_is_ev":            true,
-			"cert_weak_signature":   "SHA-1",
 			"cert_incomplete_chain": true,
 		},
 		lastSeen: time.Now(),
@@ -202,7 +201,6 @@ func TestTLSAssemblerEmitsCertQualityFlags(t *testing.T) {
 	for key, want := range map[string]interface{}{
 		"cert_has_sct":          true,
 		"cert_is_ev":            true,
-		"cert_weak_signature":   "SHA-1",
 		"cert_incomplete_chain": true,
 	} {
 		if got := disc.RawMetadata[key]; got != want {

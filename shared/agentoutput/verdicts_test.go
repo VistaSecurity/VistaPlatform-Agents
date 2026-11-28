@@ -14,19 +14,22 @@ func TestWriteRemovesVerdictsAndKeepsFacts(t *testing.T) {
 		"key_size":     1024,
 		"sequence":     uint64(1<<63 + 5), // must survive exactly
 		"raw_metadata": map[string]any{
-			"iec62351_overall":           "noncompliant",
-			"iec62351_cipher_compliant":  false,
-			"iec62351_noncompliance":     []string{"cipher"},
-			"key_exchange_algorithm":     "RSA",
-			"cert_weak_signature":        "SHA-1",
-			"cert_weak_public_key":       "RSA-1024",
-			"signature_alg":              "SHA1-RSA",
-			"security":                   "weak",
-			"security_policy_short":      "Basic128Rsa15",
-			"certificates":               []any{map[string]any{"risk_score": 80, "key_size": 1024}},
-			"nested_list_of_lists":       []any{[]any{map[string]any{"risk_level": "high", "port": 443}}},
-			"compliance_status":          map[string]any{"pci": "fail"},
-			"security_mode_unrelated_ok": "weak", // only the key "security" is rewritten
+			"iec62351_applicable":            true,
+			"iec62351_tls_version_compliant": false,
+			"iec62351_overall":               "noncompliant",
+			"iec62351_cipher_compliant":      false,
+			"iec62351_cert_compliant":        false,
+			"iec62351_noncompliance":         []string{"cipher"},
+			"key_exchange_algorithm":         "RSA",
+			"cert_weak_signature":            "SHA-1",
+			"cert_weak_public_key":           "RSA-1024",
+			"signature_alg":                  "SHA1-RSA",
+			"security":                       "weak",
+			"security_policy_short":          "Basic128Rsa15",
+			"certificates":                   []any{map[string]any{"risk_score": 80, "key_size": 1024}},
+			"nested_list_of_lists":           []any{[]any{map[string]any{"risk_level": "high", "port": 443}}},
+			"compliance_status":              map[string]any{"pci": "fail"},
+			"security_mode_unrelated_ok":     "weak",
 		},
 		"device_info": map[string]any{"risk_score": 3, "risk_factors": []string{"x"}, "highest_risk": 9, "risk_level": "low", "db_version": "16.2"},
 	}
@@ -37,7 +40,7 @@ func TestWriteRemovesVerdictsAndKeepsFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := strings.Split(strings.TrimSpace(stdout.String()), "\n")[1]
-	gone := []string{`"` + VerdictKeyPrefix, `"security":"weak"`}
+	gone := []string{`"security":"weak"`}
 	for _, k := range VerdictKeys {
 		gone = append(gone, `"`+k+`"`)
 	}
@@ -47,7 +50,7 @@ func TestWriteRemovesVerdictsAndKeepsFacts(t *testing.T) {
 		}
 	}
 	for _, kept := range []string{`"version":"TLS 1.2"`, `"key_size":1024`, `"key_exchange_algorithm":"RSA"`, `"signature_alg":"SHA1-RSA"`,
-		`"security":"present"`, `"security_policy_short":"Basic128Rsa15"`, `"port":443`, `"db_version":"16.2"`,
+		`"iec62351_applicable":true`, `"security_policy_short":"Basic128Rsa15"`, `"port":443`, `"db_version":"16.2"`,
 		`"sequence":9223372036854775813`, `"security_mode_unrelated_ok":"weak"`} {
 		if !strings.Contains(line, kept) {
 			t.Errorf("fact %s missing from the output: %s", kept, line)

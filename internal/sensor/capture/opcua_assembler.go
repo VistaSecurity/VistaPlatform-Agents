@@ -324,15 +324,6 @@ func (s *OPCUAStream) emit(phase, policyURI string) {
 	if policyURI != "" {
 		metadata["security_policy"] = policyURI
 		metadata["security_policy_short"] = opcuaPolicyShortName(policyURI)
-		// "None" policy is a high-severity finding — it means the OPC UA
-		// session has neither signing nor encryption.
-		if isOPCUANonePolicy(policyURI) {
-			metadata["security"] = "none"
-		} else if isOPCUADeprecatedPolicy(policyURI) {
-			metadata["security"] = "weak"
-		} else {
-			metadata["security"] = "present"
-		}
 	}
 	if s.state.iface != "" {
 		metadata["interface"] = s.state.iface
@@ -406,23 +397,6 @@ func opcuaPolicyShortName(uri string) string {
 		}
 	}
 	return uri
-}
-
-// isOPCUANonePolicy reports whether the URI is the OPC UA #None policy
-// (no signing, no encryption).
-func isOPCUANonePolicy(uri string) bool {
-	return opcuaPolicyShortName(uri) == "None"
-}
-
-// isOPCUADeprecatedPolicy reports whether the URI is one of the OPC
-// Foundation-deprecated policies (Basic128Rsa15, Basic256). These use
-// SHA-1 and are no longer recommended.
-func isOPCUADeprecatedPolicy(uri string) bool {
-	switch opcuaPolicyShortName(uri) {
-	case "Basic128Rsa15", "Basic256":
-		return true
-	}
-	return false
 }
 
 // Compile-time interface checks

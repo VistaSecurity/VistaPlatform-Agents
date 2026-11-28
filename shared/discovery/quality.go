@@ -9,18 +9,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform-agents/shared/certificates"
 	"golang.org/x/crypto/ocsp"
 )
 
-// ClassifyCertificateFlags produces additional quality/risk flags for a leaf
-// certificate and its chain (weak signature/key, incomplete chain, embedded
-// SCTs, known-bad CAs, EV status, large SAN counts). These are forwarded to the
-// platform for assessment beyond basic chain validation. Both the sensor and
-// the in-cluster service emit these, so they must be identical — hence shared.
+// ClassifyCertificateFlags produces additional observed quality flags for a
+// leaf certificate and its chain (incomplete chain, embedded SCTs, known-bad
+// CAs, EV status, large SAN counts). Both the sensor and the in-cluster service
+// emit these, so they must be identical — hence shared.
 func ClassifyCertificateFlags(leaf *x509.Certificate, chain []*x509.Certificate) map[string]interface{} {
 	flags := make(map[string]interface{})
 
@@ -29,31 +26,6 @@ func ClassifyCertificateFlags(leaf *x509.Certificate, chain []*x509.Certificate)
 		flags["cert_no_subject"] = true
 	} else if leaf.Subject.CommonName == "" {
 		flags["cert_no_common_name"] = true
-	}
-
-	// --- Weak signature algorithm (SHA-1, MD5, MD2) on the leaf cert ---
-	sigAlg := strings.ToUpper(leaf.SignatureAlgorithm.String())
-	if strings.Contains(sigAlg, "SHA1") || strings.Contains(sigAlg, "SHA-1") {
-		flags["cert_weak_signature"] = "SHA-1"
-	} else if strings.Contains(sigAlg, "MD5") {
-		flags["cert_weak_signature"] = "MD5"
-	} else if strings.Contains(sigAlg, "MD2") {
-		flags["cert_weak_signature"] = "MD2"
-	}
-
-	// --- Weak public key size ---
-	keySize := certificates.CalculateKeySize(leaf.PublicKey)
-	if keySize > 0 {
-		switch leaf.PublicKeyAlgorithm {
-		case x509.RSA:
-			if keySize < 2048 {
-				flags["cert_weak_public_key"] = fmt.Sprintf("RSA-%d", keySize)
-			}
-		case x509.ECDSA:
-			if keySize < 224 {
-				flags["cert_weak_public_key"] = fmt.Sprintf("ECDSA-%d", keySize)
-			}
-		}
 	}
 
 	// --- Incomplete chain detection ---

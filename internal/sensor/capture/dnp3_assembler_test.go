@@ -16,20 +16,19 @@ import (
 func TestDNP3MACAlgorithm(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		id         uint8
-		wantName   string
-		wantVer    string
-		wantStrong string
-		wantOk     bool
+		id       uint8
+		wantName string
+		wantVer  string
+		wantOk   bool
 	}{
-		{1, "HMAC-SHA-1-4", "SAv2", "weak", true},
-		{2, "HMAC-SHA-256-8", "SAv5", "present", true},
-		{3, "HMAC-SHA-256-16", "SAv5", "present", true},
-		{4, "HMAC-SHA-1-10", "SAv2", "weak", true},
-		{5, "AES-128-GMAC-12", "SAv5", "present", true},
-		{6, "HMAC-SHA-256-10", "SAv5", "present", true},
-		{0, "", "", "", false},
-		{99, "", "", "", false},
+		{1, "HMAC-SHA-1-4", "SAv2", true},
+		{2, "HMAC-SHA-256-8", "SAv5", true},
+		{3, "HMAC-SHA-256-16", "SAv5", true},
+		{4, "HMAC-SHA-1-10", "SAv2", true},
+		{5, "AES-128-GMAC-12", "SAv5", true},
+		{6, "HMAC-SHA-256-10", "SAv5", true},
+		{0, "", "", false},
+		{99, "", "", false},
 	}
 	for _, c := range cases {
 		got, ok := dnp3MACAlgorithm(c.id)
@@ -46,9 +45,13 @@ func TestDNP3MACAlgorithm(t *testing.T) {
 		if got.Version != c.wantVer {
 			t.Errorf("dnp3MACAlgorithm(%d).Version=%q, want %q", c.id, got.Version, c.wantVer)
 		}
-		if got.Strength != c.wantStrong {
-			t.Errorf("dnp3MACAlgorithm(%d).Strength=%q, want %q", c.id, got.Strength, c.wantStrong)
-		}
+	}
+}
+
+func assertNoDNP3SecurityVerdict(t *testing.T, metadata map[string]interface{}) {
+	t.Helper()
+	if value, ok := metadata["security"]; ok {
+		t.Errorf("DNP3 metadata contains generic security verdict %v", value)
 	}
 }
 
@@ -142,24 +145,25 @@ func TestDNP3Assembler_PlaintextFrameEmitsNoSecurity(t *testing.T) {
 		if d.Version != "DNP3-Plaintext" {
 			t.Errorf("Version=%s, want DNP3-Plaintext", d.Version)
 		}
-		if d.RawMetadata["security"] != "none" {
-			t.Errorf("security=%v, want none", d.RawMetadata["security"])
-		}
+		assertNoDNP3SecurityVerdict(t, d.RawMetadata)
 		if d.RawMetadata["sa_active"] != false {
 			t.Errorf("sa_active=%v, want false", d.RawMetadata["sa_active"])
+		}
+		if d.RawMetadata["plaintext_dnp3"] != true {
+			t.Errorf("plaintext_dnp3=%v, want true", d.RawMetadata["plaintext_dnp3"])
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected DNP3 plaintext discovery within 1s")
 	}
 }
 
-func TestDNP3Assembler_SAv5StrongMACDetected(t *testing.T) {
+func TestDNP3Assembler_SAv5MACFacts(t *testing.T) {
 	t.Parallel()
 	factory, ch := newTestDNP3Factory(t)
 	stream, _ := preDNP3Stream(factory)
 
 	// App payload includes a Group 120 Variation 1 (Challenge) object with
-	// MAC algorithm ID = 3 (HMAC-SHA-256-16, SAv5 strong).
+	// MAC algorithm ID = 3 (HMAC-SHA-256-16, SAv5).
 	// Layout after the function-code byte: anything, then the SA marker
 	// 0x78 0x01, qualifier 0x07, then ChallengeData(4) UserNumber(2)
 	// MACAlgorithm(1=3).
@@ -181,26 +185,27 @@ func TestDNP3Assembler_SAv5StrongMACDetected(t *testing.T) {
 		if d.RawMetadata["sa_active"] != true {
 			t.Errorf("sa_active=%v, want true", d.RawMetadata["sa_active"])
 		}
+		if d.RawMetadata["sa_version"] != "SAv5" {
+			t.Errorf("sa_version=%v, want SAv5", d.RawMetadata["sa_version"])
+		}
 		if d.RawMetadata["mac_algorithm_id"] != 3 {
 			t.Errorf("mac_algorithm_id=%v, want 3", d.RawMetadata["mac_algorithm_id"])
 		}
 		if d.RawMetadata["mac_algorithm_name"] != "HMAC-SHA-256-16" {
 			t.Errorf("mac_algorithm_name=%v", d.RawMetadata["mac_algorithm_name"])
 		}
-		if d.RawMetadata["security"] != "present" {
-			t.Errorf("security=%v, want present", d.RawMetadata["security"])
-		}
+		assertNoDNP3SecurityVerdict(t, d.RawMetadata)
 	case <-time.After(time.Second):
 		t.Fatal("expected SAv5 discovery")
 	}
 }
 
-func TestDNP3Assembler_SAv2WeakMACDetected(t *testing.T) {
+func TestDNP3Assembler_SAv2MACFacts(t *testing.T) {
 	t.Parallel()
 	factory, ch := newTestDNP3Factory(t)
 	stream, _ := preDNP3Stream(factory)
 
-	// SA Challenge with MAC algorithm ID = 1 (HMAC-SHA-1-4, SAv2 weak).
+	// SA Challenge with MAC algorithm ID = 1 (HMAC-SHA-1-4, SAv2).
 	app := []byte{
 		0xC0, 0xC1, 0x83,
 		dnp3SAGroup, dnp3SAVarChallenge, 0x07,
@@ -216,9 +221,10 @@ func TestDNP3Assembler_SAv2WeakMACDetected(t *testing.T) {
 		if d.Version != "SAv2" {
 			t.Errorf("Version=%s, want SAv2", d.Version)
 		}
-		if d.RawMetadata["security"] != "weak" {
-			t.Errorf("security=%v, want weak", d.RawMetadata["security"])
+		if d.RawMetadata["sa_active"] != true || d.RawMetadata["sa_version"] != "SAv2" {
+			t.Errorf("SAv2 authentication facts missing: %#v", d.RawMetadata)
 		}
+		assertNoDNP3SecurityVerdict(t, d.RawMetadata)
 		if d.RawMetadata["mac_algorithm_name"] != "HMAC-SHA-1-4" {
 			t.Errorf("mac_algorithm_name=%v", d.RawMetadata["mac_algorithm_name"])
 		}
@@ -301,8 +307,9 @@ func TestDNP3UDP_PlaintextFrame(t *testing.T) {
 	if got.Version != "DNP3-Plaintext" {
 		t.Errorf("Version=%s, want DNP3-Plaintext", got.Version)
 	}
-	if got.RawMetadata["security"] != "none" {
-		t.Errorf("security=%v, want none", got.RawMetadata["security"])
+	assertNoDNP3SecurityVerdict(t, got.RawMetadata)
+	if got.RawMetadata["plaintext_dnp3"] != true || got.RawMetadata["sa_active"] != false {
+		t.Errorf("plaintext facts missing: %#v", got.RawMetadata)
 	}
 	if got.RawMetadata["transport"] != "udp" {
 		t.Errorf("transport=%v, want udp", got.RawMetadata["transport"])
@@ -312,7 +319,7 @@ func TestDNP3UDP_PlaintextFrame(t *testing.T) {
 	}
 }
 
-func TestDNP3UDP_SAv5StrongMAC(t *testing.T) {
+func TestDNP3UDP_SAv5MACFacts(t *testing.T) {
 	t.Parallel()
 	app := []byte{
 		0xC0, 0xC1, 0x83,
@@ -333,15 +340,19 @@ func TestDNP3UDP_SAv5StrongMAC(t *testing.T) {
 	if got.RawMetadata["sa_active"] != true {
 		t.Errorf("sa_active=%v, want true", got.RawMetadata["sa_active"])
 	}
+	if got.RawMetadata["sa_version"] != "SAv5" {
+		t.Errorf("sa_version=%v, want SAv5", got.RawMetadata["sa_version"])
+	}
 	if got.RawMetadata["mac_algorithm_id"] != 3 {
 		t.Errorf("mac_algorithm_id=%v, want 3", got.RawMetadata["mac_algorithm_id"])
 	}
-	if got.RawMetadata["security"] != "present" {
-		t.Errorf("security=%v, want present", got.RawMetadata["security"])
+	assertNoDNP3SecurityVerdict(t, got.RawMetadata)
+	if got.RawMetadata["mac_algorithm_name"] != "HMAC-SHA-256-16" {
+		t.Errorf("mac_algorithm_name=%v", got.RawMetadata["mac_algorithm_name"])
 	}
 }
 
-func TestDNP3UDP_SAv2WeakMAC(t *testing.T) {
+func TestDNP3UDP_SAv2MACFacts(t *testing.T) {
 	t.Parallel()
 	app := []byte{
 		0xC0, 0xC1, 0x83,
@@ -359,8 +370,12 @@ func TestDNP3UDP_SAv2WeakMAC(t *testing.T) {
 	if got.Version != "SAv2" {
 		t.Errorf("Version=%s, want SAv2", got.Version)
 	}
-	if got.RawMetadata["security"] != "weak" {
-		t.Errorf("security=%v, want weak", got.RawMetadata["security"])
+	if got.RawMetadata["sa_active"] != true || got.RawMetadata["sa_version"] != "SAv2" {
+		t.Errorf("SAv2 authentication facts missing: %#v", got.RawMetadata)
+	}
+	assertNoDNP3SecurityVerdict(t, got.RawMetadata)
+	if got.RawMetadata["mac_algorithm_name"] != "HMAC-SHA-1-4" || got.RawMetadata["mac_algorithm_id"] != 1 {
+		t.Errorf("SAv2 MAC facts missing: %#v", got.RawMetadata)
 	}
 }
 
@@ -433,9 +448,7 @@ func TestDNP3UDP_SAv6CertStatusResponse(t *testing.T) {
 	if got.RawMetadata["sa_version"] != "SAv6" {
 		t.Errorf("sa_version=%v, want SAv6", got.RawMetadata["sa_version"])
 	}
-	if got.RawMetadata["security"] != "present" {
-		t.Errorf("security=%v, want present", got.RawMetadata["security"])
-	}
+	assertNoDNP3SecurityVerdict(t, got.RawMetadata)
 	if got.RawMetadata["mac_algorithm_name"] != "asymmetric-PKI" {
 		t.Errorf("mac_algorithm_name=%v, want asymmetric-PKI", got.RawMetadata["mac_algorithm_name"])
 	}

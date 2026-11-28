@@ -4,22 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // Standalone mode collects; it does not assess (docs/design/standalone-mode.md).
-// The decoders and collectors it shares with managed mode attach a few labels
-// that are judgements rather than observations, for the platform's benefit:
-// a compliance verdict against IEC 62351, a "weak" signature or key, a risk
-// score. Write removes them from every record, wherever they are nested, so a
-// standalone result holds only what was observed. The facts each label was
-// derived from (the protocol version, the cipher suite, the signature
-// algorithm, the key size, the OPC UA policy, the DNP3 MAC) stay.
+// Producers now emit facts rather than policy judgments. Write still removes
+// retired verdict keys wherever they are nested so legacy or mixed-version
+// input cannot leak assessments into standalone output. The observed facts
+// from which policy can decide (versions, algorithms, sizes and OT mechanisms)
+// stay.
 //
 // Managed mode is unaffected: it does not write through this package.
 
-// VerdictKeys are the keys Write removes. A key starting with
-// VerdictKeyPrefix is removed too.
+// VerdictKeys are retired producer verdicts that Write removes defensively.
 var VerdictKeys = []string{
 	"cert_weak_signature",  // shared/discovery quality flag: a judgement of the signature algorithm
 	"cert_weak_public_key", // shared/discovery quality flag: a judgement of the key size
@@ -28,21 +24,18 @@ var VerdictKeys = []string{
 	"risk_factors",
 	"highest_risk",
 	"compliance_status",
+	"iec62351_tls_version_compliant",
+	"iec62351_cipher_compliant",
+	"iec62351_cert_compliant",
+	"iec62351_overall",
+	"iec62351_noncompliance",
 }
 
-// VerdictKeyPrefix marks the IEC 62351 classification the passive TLS decoder
-// adds to every observation (iec62351_overall, iec62351_cipher_compliant, ...).
-const VerdictKeyPrefix = "iec62351_"
-
-// weakSecurity is the one verdict value among facts: the OT decoders' "security"
-// key is "none" or "present" (observed) or "weak" (judged). Write reports a
-// weak mechanism as "present"; the mechanism itself is in the record.
+// weakSecurity is retained only to remove a legacy generic OT verdict. It is
+// not rewritten to a replacement strength because that would invent a fact.
 const weakSecurity = "weak"
 
 func isVerdictKey(k string) bool {
-	if strings.HasPrefix(k, VerdictKeyPrefix) {
-		return true
-	}
 	for _, v := range VerdictKeys {
 		if k == v {
 			return true
@@ -80,7 +73,7 @@ func scrubVerdicts(v any) any {
 				continue
 			}
 			if k == "security" && val == weakSecurity {
-				t[k] = "present"
+				delete(t, k)
 				continue
 			}
 			t[k] = scrubVerdicts(val)
