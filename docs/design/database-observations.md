@@ -129,6 +129,19 @@ cannot-evaluate attempt and retains the prior pass/fail finding with its
 freshness label. Only a subject with no prior judgment is not assessed. Policy
 measurement codes and registry rows are a separate coordinated change.
 
+A dial, authentication or initial ping failure occurs before the collector can
+make a typed observation. AG7-F2 reports the job failure and emits no fabricated
+`query_error` observation. The current Platform intake consequently does not
+change the canonical fact row for that failure. The coordinated M-DB lifecycle
+work must project a failed database job onto its authenticated canonical
+instance as a collection-error/freshness overlay, without changing the last
+measured value or resolving its prior policy finding. Its acceptance test is a
+successful measured observation followed by a failed reconnect: the prior
+result remains labelled, contributes under the accepted cannot-evaluate
+semantics, and the evidence is not presented as freshly measured. Until that
+work lands, AG7-F2 does not claim that zero-observation failures clear or stale
+current facts.
+
 That later measurement family must include every eligible current canonical
 database instance in its subject population even when a fact is unknown,
 unsupported or failed to query. Unknown/unsupported produce a not-assessed
