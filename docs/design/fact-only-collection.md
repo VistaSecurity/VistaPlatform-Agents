@@ -69,6 +69,20 @@ registry under `services/compliance-engine`, together with end-to-end storage
 tests for `crypto_implementations.raw_data`. Platform's policy-judged v7 design
 and release plan remain the authoritative assessment contract.
 
+## Normalized OT observation boundary
+
+The packet and enrichment paths also carry a bounded `ot_security` object with
+schema `vista.ot-security-observation/v1`. It contains parser provenance,
+packet direction when the assembler can establish it, and separate fields for
+confidentiality state/capability and message-authentication state/evidence. A
+complete decoded DNP3 frame, including a Secure Authentication frame, records
+clear-frame evidence; Secure Authentication additionally records positive
+message authentication. OPC UA URI-only observations leave both states
+unknown. TLS ServerHello output records the selected-suite capability
+(`non_null`, `none`, or `unknown`) with server-to-client provenance while
+actual protected traffic remains unknown without completion evidence. Unknown
+or unsupported parser output never becomes a policy pass or failure.
+
 ## Deferred packages
 
 AG7-F2 removes the database collector's `risk_score` while retaining database

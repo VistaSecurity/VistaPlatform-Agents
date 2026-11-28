@@ -11,6 +11,7 @@ import (
 	"github.com/gopacket/gopacket/tcpassembly"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // DNP3 (IEEE 1815) passive detector. Dominant SCADA protocol for North
@@ -105,6 +106,7 @@ type dnp3SessionState struct {
 	serverIP   string
 	serverPort int
 	clientIP   string
+	direction  string
 	iface      string
 	buffer     []byte
 
@@ -153,10 +155,15 @@ func (f *DNP3StreamFactory) New(netFlow, transportFlow gopacket.Flow) tcpassembl
 	serverIP := netFlow.Dst().String()
 	serverPort := dstPort
 	clientIP := netFlow.Src().String()
+	direction := otsecurity.DirectionUnknown
+	if dstPort == 20000 && srcPort != 20000 {
+		direction = otsecurity.DirectionClientToServer
+	}
 	if srcPort == 20000 && dstPort != 20000 {
 		serverIP = netFlow.Src().String()
 		serverPort = srcPort
 		clientIP = netFlow.Dst().String()
+		direction = otsecurity.DirectionServerToClient
 	}
 
 	iface := ""
@@ -172,6 +179,7 @@ func (f *DNP3StreamFactory) New(netFlow, transportFlow gopacket.Flow) tcpassembl
 			serverIP:   serverIP,
 			serverPort: serverPort,
 			clientIP:   clientIP,
+			direction:  direction,
 			iface:      iface,
 			lastSeen:   time.Now(),
 		}
@@ -475,10 +483,15 @@ func parseDNP3Packet(payload []byte, srcIP, dstIP string, srcPort, dstPort int, 
 	serverIP := dstIP
 	serverPort := dstPort
 	clientIP := srcIP
+	direction := otsecurity.DirectionUnknown
+	if dstPort == 20000 && srcPort != 20000 {
+		direction = otsecurity.DirectionClientToServer
+	}
 	if srcPort == 20000 && dstPort != 20000 {
 		serverIP = srcIP
 		serverPort = srcPort
 		clientIP = dstIP
+		direction = otsecurity.DirectionServerToClient
 	}
 
 	sessionID := uuid.New().String()
@@ -513,6 +526,7 @@ func parseDNP3Packet(payload []byte, srcIP, dstIP string, srcPort, dstPort int, 
 	if iface != "" {
 		metadata["interface"] = iface
 	}
+	metadata[otsecurity.Key] = otsecurity.DNP3WithDirection(time.Now(), true, classification.kind == dnp3ClassSA || classification.kind == dnp3ClassSAv6, direction)
 
 	if connCache != nil && serverIP != "" {
 		shouldReport, _ := connCache.ShouldReport(serverIP, serverPort, dedupKey)
@@ -598,6 +612,7 @@ func (s *DNP3Stream) emitSA(info dnp3MACInfo) {
 	metadata := map[string]interface{}{
 		"session_id":         s.state.sessionID,
 		"reassembled":        true,
+		"plaintext_dnp3":     true,
 		"sa_active":          true,
 		"sa_version":         info.Version,
 		"mac_algorithm_id":   int(s.state.saMACID),
@@ -611,6 +626,9 @@ func (s *DNP3Stream) emitSA(info dnp3MACInfo) {
 }
 
 func (s *DNP3Stream) send(protocol, version string, metadata map[string]interface{}) {
+	plaintext, _ := metadata["plaintext_dnp3"].(bool)
+	secureAuthentication, _ := metadata["sa_active"].(bool)
+	metadata[otsecurity.Key] = otsecurity.DNP3WithDirection(time.Now(), plaintext, secureAuthentication, s.state.direction)
 	discovery := &models.CryptoDiscovery{
 		ID:              uuid.New().String(),
 		SensorID:        s.factory.sensorID,

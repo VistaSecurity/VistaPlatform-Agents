@@ -14,6 +14,7 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/config"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // Passive TLS posture comes from BOTH directions of a connection.
@@ -199,6 +200,10 @@ func TestPassiveTLS13NegotiatedValuesFromServerHello(t *testing.T) {
 	if d.CipherSuite != "TLS_AES_128_GCM_SHA256" {
 		t.Errorf("CipherSuite = %q, want TLS_AES_128_GCM_SHA256", d.CipherSuite)
 	}
+	ot, ok := d.RawMetadata["ot_security"].(map[string]interface{})
+	if !ok || ot["ot_confidentiality_capability"] != "non_null" || ot["ot_confidentiality_state"] != "unknown" || ot["direction"] != otsecurity.DirectionServerToClient {
+		t.Errorf("TLS capability evidence = %#v", d.RawMetadata["ot_security"])
+	}
 }
 
 // TLS 1.2: version and suite from the ServerHello, and the certificate chain
@@ -219,6 +224,10 @@ func TestPassiveTLS12NegotiatedValuesAndCertificateFromServerFlight(t *testing.T
 	}
 	if d.CipherSuite != "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" {
 		t.Errorf("CipherSuite = %q, want TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", d.CipherSuite)
+	}
+	ot, ok := d.RawMetadata["ot_security"].(map[string]interface{})
+	if !ok || ot["ot_confidentiality_capability"] != "non_null" || ot["ot_confidentiality_state"] != "unknown" || ot["direction"] != otsecurity.DirectionServerToClient {
+		t.Errorf("TLS capability evidence = %#v", d.RawMetadata["ot_security"])
 	}
 	certs, _ := d.RawMetadata["certificates"].([]interface{})
 	if len(certs) != 1 {

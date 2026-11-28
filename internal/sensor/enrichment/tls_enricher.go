@@ -38,6 +38,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/discovery"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // debounceEntry tracks when an endpoint was last probed.
@@ -403,6 +404,7 @@ func (e *TLSEnricher) buildEnrichmentDiscovery(req enrichRequest, finding *model
 	metadata["probe_timestamp"] = now.Format(time.RFC3339)
 	metadata["handshake_types"] = []string{"ClientHello", "ServerHello", "Certificate"}
 	metadata["cipher_suite"] = finding.SelectedCipher
+	metadata[otsecurity.Key] = otsecurity.TLSWithDirection(now, finding.SelectedCipher, otsecurity.DirectionServerToClient)
 
 	if finding.CertValidationError != "" {
 		metadata["cert_validation_error"] = finding.CertValidationError

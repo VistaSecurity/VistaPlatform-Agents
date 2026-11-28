@@ -12,6 +12,7 @@ import (
 	"github.com/gopacket/gopacket/tcpassembly"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 const (
@@ -167,6 +168,11 @@ func (f *STARTTLSStreamFactory) emitDiscovery(state *tlsSessionState) {
 	if state.iface != "" {
 		metadata["interface"] = state.iface
 	}
+	direction := otsecurity.DirectionUnknown
+	if state.cipherSuite != "" {
+		direction = otsecurity.DirectionServerToClient
+	}
+	metadata[otsecurity.Key] = otsecurity.TLSWithDirection(time.Now(), state.cipherSuite, direction)
 
 	confidence := 0.85
 	if len(state.certificates) > 0 {

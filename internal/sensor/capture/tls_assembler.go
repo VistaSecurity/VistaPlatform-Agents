@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/discovery"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 	shareddisc "github.com/vistasecurity/vistaplatform-agents/shared/discovery"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // tlsFlowKey identifies a TCP flow. In TLSStreamFactory.sessions it is always
@@ -350,6 +351,11 @@ func (f *TLSStreamFactory) emitDiscovery(state *tlsSessionState, skipDedup bool)
 		metadata["mtls_detected"] = false
 		metadata["server_requests_client_cert"] = true
 	}
+	direction := otsecurity.DirectionUnknown
+	if state.cipherSuite != "" {
+		direction = otsecurity.DirectionServerToClient
+	}
+	metadata[otsecurity.Key] = otsecurity.TLSWithDirection(time.Now(), state.cipherSuite, direction)
 
 	// Determine confidence based on what we observed
 	confidence := 0.7
