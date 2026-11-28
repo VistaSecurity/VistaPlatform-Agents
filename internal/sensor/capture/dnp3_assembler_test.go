@@ -7,6 +7,7 @@ import (
 	"github.com/gopacket/gopacket/tcpassembly"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // =============================================================================
@@ -110,6 +111,7 @@ func preDNP3Stream(f *DNP3StreamFactory) (*DNP3Stream, *dnp3SessionState) {
 		serverIP:   "10.0.0.5",
 		serverPort: 20000,
 		clientIP:   "10.0.0.10",
+		direction:  otsecurity.DirectionClientToServer,
 		iface:      "eth0",
 	}
 	f.mu.Lock()
@@ -152,6 +154,10 @@ func TestDNP3Assembler_PlaintextFrameEmitsNoSecurity(t *testing.T) {
 		if d.RawMetadata["plaintext_dnp3"] != true {
 			t.Errorf("plaintext_dnp3=%v, want true", d.RawMetadata["plaintext_dnp3"])
 		}
+		ot, ok := d.RawMetadata["ot_security"].(map[string]interface{})
+		if !ok || ot["ot_confidentiality_state"] != "clear" || ot["ot_message_authentication_state"] != "unknown" || ot["direction"] != otsecurity.DirectionClientToServer {
+			t.Errorf("normalized DNP3 plaintext evidence = %#v", d.RawMetadata["ot_security"])
+		}
 	case <-time.After(time.Second):
 		t.Fatal("expected DNP3 plaintext discovery within 1s")
 	}
@@ -193,6 +199,10 @@ func TestDNP3Assembler_SAv5MACFacts(t *testing.T) {
 		}
 		if d.RawMetadata["mac_algorithm_name"] != "HMAC-SHA-256-16" {
 			t.Errorf("mac_algorithm_name=%v", d.RawMetadata["mac_algorithm_name"])
+		}
+		ot, ok := d.RawMetadata["ot_security"].(map[string]interface{})
+		if !ok || ot["ot_message_authentication_state"] != "present" || ot["ot_confidentiality_state"] != "clear" || ot["ot_confidentiality_evidence"] != "clear_frame" || ot["direction"] != otsecurity.DirectionClientToServer {
+			t.Errorf("normalized DNP3 SA evidence = %#v", d.RawMetadata["ot_security"])
 		}
 		assertNoDNP3SecurityVerdict(t, d.RawMetadata)
 	case <-time.After(time.Second):

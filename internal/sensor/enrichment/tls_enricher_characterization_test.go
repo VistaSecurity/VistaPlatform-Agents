@@ -73,6 +73,17 @@ func dumpDiscovery(t *testing.T, d *models.CryptoDiscovery) map[string]any {
 	meta := map[string]interface{}{}
 	for k, v := range d.RawMetadata {
 		if k != "probe_timestamp" {
+			if k == "ot_security" {
+				if ot, ok := v.(map[string]interface{}); ok {
+					stable := map[string]interface{}{}
+					for field, value := range ot {
+						if field != "observed_at" {
+							stable[field] = value
+						}
+					}
+					v = stable
+				}
+			}
 			meta[k] = v
 		}
 	}
@@ -143,6 +154,30 @@ func enricherExceptions(sc tlsendpointtest.Scenario) []tlsendpointtest.Exception
 			return tlsendpointtest.AddSharedProbeWireKeys(m, tlsendpointtest.Leaf(m["version"]), tlsendpointtest.Leaf(m["cipher_suite"]))
 		},
 	}}
+	exceptions = append(exceptions, tlsendpointtest.Exception{
+		Name: "bounded OT capability evidence",
+		Why:  "the active TLS probe now emits the shared factual OT observation object; its timestamp is intentionally omitted from this characterization, while the stable schema, unknown traffic state, and selected-suite capability remain pinned",
+		Apply: func(g map[string]any) bool {
+			m := meta(g)
+			ot := map[string]any{
+				"map[string]interface {}": map[string]any{
+					"direction":                       "string=server_to_client",
+					"observation_scope":               "string=selected_suite_capability",
+					"ot_confidentiality_capability":   "string=non_null",
+					"ot_confidentiality_evidence":     "string=protected_capability",
+					"ot_confidentiality_state":        "string=unknown",
+					"ot_message_authentication_state": "string=unknown",
+					"parser_status":                   "string=complete",
+					"schema":                          "string=vista.ot-security-observation/v1",
+				},
+			}
+			if _, exists := m["ot_security"]; exists {
+				return false
+			}
+			m["ot_security"] = ot
+			return true
+		},
+	})
 	if sc.Name != "tls13-client-cert-requested" {
 		exceptions = append(exceptions, tlsendpointtest.Exception{
 			Name: "server_requests_client_cert explicit false",

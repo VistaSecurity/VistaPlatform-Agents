@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/discovery"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // OPC UA Binary passive detector for TCP port 4840.
@@ -48,6 +49,7 @@ type opcuaSessionState struct {
 	serverIP   string
 	serverPort int
 	clientIP   string
+	direction  string
 	iface      string
 	buffer     []byte
 
@@ -94,10 +96,15 @@ func (f *OPCUAStreamFactory) New(netFlow, transportFlow gopacket.Flow) tcpassemb
 	serverIP := netFlow.Dst().String()
 	serverPort := dstPort
 	clientIP := netFlow.Src().String()
+	direction := otsecurity.DirectionUnknown
+	if dstPort == 4840 && srcPort != 4840 {
+		direction = otsecurity.DirectionClientToServer
+	}
 	if srcPort == 4840 && dstPort != 4840 {
 		serverIP = netFlow.Src().String()
 		serverPort = srcPort
 		clientIP = netFlow.Dst().String()
+		direction = otsecurity.DirectionServerToClient
 	}
 
 	iface := ""
@@ -113,6 +120,7 @@ func (f *OPCUAStreamFactory) New(netFlow, transportFlow gopacket.Flow) tcpassemb
 			serverIP:   serverIP,
 			serverPort: serverPort,
 			clientIP:   clientIP,
+			direction:  direction,
 			iface:      iface,
 			lastSeen:   time.Now(),
 		}
@@ -321,6 +329,7 @@ func (s *OPCUAStream) emit(phase, policyURI string) {
 		"opcua_hel_seen": s.state.helSeen,
 		"opcua_ack_seen": s.state.ackSeen,
 	}
+	metadata[otsecurity.Key] = otsecurity.OPCUAWithDirection(time.Now(), s.state.direction)
 	if policyURI != "" {
 		metadata["security_policy"] = policyURI
 		metadata["security_policy_short"] = opcuaPolicyShortName(policyURI)

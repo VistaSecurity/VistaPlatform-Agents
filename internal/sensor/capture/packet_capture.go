@@ -26,6 +26,7 @@ import (
 	sensordisc "github.com/vistasecurity/vistaplatform-agents/internal/sensor/discovery"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 	"github.com/vistasecurity/vistaplatform-agents/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 // capturedPacket pairs a raw packet with the interface it arrived on
@@ -1298,6 +1299,7 @@ func (pc *PacketCapture) analyzeServerHello(payload []byte, discovery *models.Cr
 			discovery.RawMetadata["key_exchange_algorithm"] = kex
 		}
 	}
+	discovery.RawMetadata[otsecurity.Key] = otsecurity.TLSWithDirection(time.Now(), discovery.CipherSuite, otsecurity.DirectionServerToClient)
 
 	// Skip compression method
 	offset++
@@ -1470,7 +1472,7 @@ func tlsVersionName(ver uint16) string {
 func tlsCipherName(suite uint16) string {
 	switch suite {
 	case 0x0000:
-		return "" // TLS_NULL_WITH_NULL_NULL — skip
+		return "TLS_NULL_WITH_NULL_NULL"
 	case 0x000A:
 		return "TLS_RSA_WITH_3DES_EDE_CBC_SHA"
 	case 0x0016:

@@ -8,6 +8,12 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
 )
 
+func TestTLSCipherNameIncludesKnownNullCapability(t *testing.T) {
+	if got := tlsCipherName(0x0000); got != "TLS_NULL_WITH_NULL_NULL" {
+		t.Fatalf("tlsCipherName(0x0000) = %q, want TLS_NULL_WITH_NULL_NULL", got)
+	}
+}
+
 // DISC-1 regression tests.
 //
 // The passive assembler must record the NEGOTIATED TLS version, which only the

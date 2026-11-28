@@ -14,6 +14,7 @@ import (
 	"github.com/gopacket/gopacket/tcpassembly"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/cache"
 	"github.com/vistasecurity/vistaplatform-agents/internal/sensor/models"
+	"github.com/vistasecurity/vistaplatform-agents/shared/otsecurity"
 )
 
 func TestOPCUAPolicyShortName(t *testing.T) {
@@ -147,6 +148,7 @@ func preOPCUAStream(f *OPCUAStreamFactory) (*OPCUAStream, *opcuaSessionState) {
 		serverIP:   "10.0.0.5",
 		serverPort: 4840,
 		clientIP:   "10.0.0.10",
+		direction:  otsecurity.DirectionClientToServer,
 	}
 	f.mu.Lock()
 	f.sessions[tlsFlowKey{}] = state
@@ -203,6 +205,10 @@ func TestOPCUAAssembler_OPNExtractsSecurityPolicy(t *testing.T) {
 		}
 		if d.RawMetadata["security_policy"] != "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256" {
 			t.Errorf("security_policy=%v", d.RawMetadata["security_policy"])
+		}
+		ot, ok := d.RawMetadata["ot_security"].(map[string]interface{})
+		if !ok || ot["ot_confidentiality_state"] != "unknown" || ot["ot_message_authentication_state"] != "unknown" || ot["direction"] != otsecurity.DirectionClientToServer {
+			t.Errorf("URI-only OPC UA evidence inferred a mode: %#v", d.RawMetadata["ot_security"])
 		}
 		if value, ok := d.RawMetadata["security"]; ok {
 			t.Errorf("generic security verdict present: %v", value)
