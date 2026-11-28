@@ -191,7 +191,10 @@
           "pattern": "^SHA256:[A-Za-z0-9+/]{43}=?$",
           "description": "A remote job reached over SSH (host_crypto): the host key the connection was made through, for the platform to record and pin."
         },
-        "ssh_host_key_type": { "type": "string", "description": "Its algorithm: ssh-ed25519, ecdsa-sha2-nistp256, ssh-rsa." },
+        "ssh_host_key_type": {
+          "type": "string",
+          "description": "Its algorithm: ssh-ed25519, ecdsa-sha2-nistp256, ssh-rsa."
+        },
         "ssh_host_key_verification": {
           "type": "string",
           "description": "Values today: pinned, known_hosts, first_use, skipped. How the key was trusted: against the job's ssh_host_key_fingerprint, the agent's known_hosts, accepted on first use (record and pin it), or not checked (insecure_skip_verify)."
@@ -240,6 +243,538 @@
     },
     "kubernetes_inventory": {
       "$ref": "defs/kubernetes-inventory.json"
+    },
+    "database_observations": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "engine",
+          "port",
+          "server_version",
+          "session_tls_in_use",
+          "session_tls_version",
+          "session_tls_cipher",
+          "tls_enforced",
+          "encryption_at_rest_enabled",
+          "encryption_method",
+          "encryption_algorithm",
+          "password_encryption_default"
+        ],
+        "properties": {
+          "engine": {
+            "enum": [
+              "postgresql",
+              "mysql"
+            ]
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "hostname": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "instance_name": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "server_version": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "session_tls_in_use": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "session_tls_version": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "session_tls_cipher": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "tls_enforced": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "encryption_at_rest_enabled": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "encryption_method": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "encryption_algorithm": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "password_encryption_default": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "measured"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "unknown",
+                      "query_error",
+                      "unsupported"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "raw_config": {
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 19,
+            "properties": {
+              "version": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "session_tls_in_use": {
+                "type": "boolean"
+              },
+              "session_tls_version": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "session_tls_cipher": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "ssl": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "ssl_min_protocol_version": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "ssl_max_protocol_version": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "ssl_ciphers": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "ssl_prefer_server_ciphers": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "password_encryption": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "have_ssl": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "have_openssl": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "tls_version": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "tls_ciphersuites": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "require_secure_transport": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "default_table_encryption": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "innodb_encrypt_tables": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "binlog_encryption": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              },
+              "table_encryption_privilege_check": {
+                "type": [
+                  "string",
+                  "boolean",
+                  "number"
+                ],
+                "maxLength": 2048
+              }
+            }
+          }
+        }
+      }
     }
   },
   "if": {

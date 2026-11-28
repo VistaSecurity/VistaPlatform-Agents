@@ -2,6 +2,7 @@ package deviceinterrogation
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -188,6 +189,9 @@ func validHost(s string) bool {
 	}
 	if strings.ContainsAny(s, " \t\r\n/\\?#@") {
 		return false
+	}
+	if net.ParseIP(s) != nil {
+		return true
 	}
 	u, err := url.Parse("https://" + s)
 	return err == nil && u.Hostname() != ""

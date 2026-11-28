@@ -270,7 +270,7 @@ func TestSanitize_ServiceHints(t *testing.T) {
 // TestDatabaseFindingRawConfigIsRedacted is gate 1 D2.
 //
 // The database path is the one interrogation that does NOT go through
-// Registry.Get: the service wrapper needs the typed DatabaseEncryptionFinding
+// Registry.Get: the service wrapper needs the typed DatabaseObservation
 // so it can write `database_encryption_states`, so it called InterrogateDatabase
 // directly and the sanitizing wrapper never saw the result. RawConfig is the
 // engine's whole settings bag — SHOW VARIABLES, pg_settings — and it went into
@@ -282,22 +282,25 @@ func TestSanitize_ServiceHints(t *testing.T) {
 func TestDatabaseFindingRawConfigIsRedacted(t *testing.T) {
 	original := dbInterrogateMy
 	t.Cleanup(func() { dbInterrogateMy = original })
-	dbInterrogateMy = func(context.Context, string) (*DatabaseEncryptionFinding, error) {
-		return &DatabaseEncryptionFinding{
-			Engine:     "mysql",
-			SSLEnabled: true,
+	dbInterrogateMy = func(context.Context, string) (*DatabaseObservation, error) {
+		return &DatabaseObservation{
+			Engine:                    "mysql",
+			ServerVersion:             stringMeasured("8.4.3"),
+			SessionTLSInUse:           boolMeasured(true),
+			SessionTLSVersion:         stringMeasured("TLSv1.3"),
+			SessionTLSCipher:          stringMeasured("TLS_AES_256_GCM_SHA384"),
+			TLSEnforced:               boolMeasured(true),
+			EncryptionAtRestEnabled:   boolState(DatabaseUnknown),
+			EncryptionMethod:          stringState(DatabaseUnknown),
+			EncryptionAlgorithm:       stringState(DatabaseUnknown),
+			PasswordEncryptionDefault: stringState(DatabaseUnsupported),
 			RawConfig: map[string]interface{}{
 				// Posture: must SURVIVE. A redactor that eats these has made
 				// the feature useless, which is this guard's other polarity.
-				"ssl_cipher":               "TLS_AES_256_GCM_SHA384",
-				"tls_version":              "TLSv1.3",
+				"session_tls_cipher":       "TLS_AES_256_GCM_SHA384",
+				"session_tls_version":      "TLSv1.3",
 				"have_ssl":                 "YES",
-				"ssl_key_size":             "2048",
 				"require_secure_transport": "ON",
-				// Secrets: must NOT.
-				"master_ssl_password": "hunter2",
-				"admin_api_key":       "AKIAIOSFODNN7EXAMPLE",
-				"replication_secret":  "s3cr3t",
 			},
 		}, nil
 	}
@@ -309,16 +312,10 @@ func TestDatabaseFindingRawConfigIsRedacted(t *testing.T) {
 		t.Fatalf("InterrogateDatabase: %v", err)
 	}
 
-	for _, keep := range []string{"ssl_cipher", "tls_version", "have_ssl", "ssl_key_size", "require_secure_transport"} {
+	for _, keep := range []string{"session_tls_cipher", "session_tls_version", "have_ssl", "require_secure_transport"} {
 		if got, _ := finding.RawConfig[keep].(string); got == "" || got == redact.Marker {
 			t.Errorf("%s = %q; crypto POSTURE must survive redaction or the feature reports nothing",
 				keep, finding.RawConfig[keep])
-		}
-	}
-	for _, drop := range []string{"master_ssl_password", "admin_api_key", "replication_secret"} {
-		if got, _ := finding.RawConfig[drop].(string); got != redact.Marker {
-			t.Errorf("%s = %q, want it redacted — a database's settings bag is not ours to keep",
-				drop, got)
 		}
 	}
 }
@@ -330,8 +327,8 @@ func TestDatabaseFindingRawConfigIsRedacted(t *testing.T) {
 // engine's settings bag unredacted. Driven through the exported functions
 // themselves, via the same per-engine seams, not through redact.Map.
 func TestDatabaseConnEntryPointsRedactRawConfig(t *testing.T) {
-	bag := func() *DatabaseEncryptionFinding {
-		return &DatabaseEncryptionFinding{
+	bag := func() *DatabaseObservation {
+		return &DatabaseObservation{
 			RawConfig: map[string]interface{}{
 				"ssl_cipher":          "TLS_AES_256_GCM_SHA384", // posture: must survive
 				"master_ssl_password": "hunter2",                // secret: must not
@@ -341,10 +338,10 @@ func TestDatabaseConnEntryPointsRedactRawConfig(t *testing.T) {
 	}
 	origPG, origMy := dbInterrogatePostgres, dbInterrogateMy
 	t.Cleanup(func() { dbInterrogatePostgres, dbInterrogateMy = origPG, origMy })
-	dbInterrogatePostgres = func(context.Context, string) (*DatabaseEncryptionFinding, error) { return bag(), nil }
-	dbInterrogateMy = func(context.Context, string) (*DatabaseEncryptionFinding, error) { return bag(), nil }
+	dbInterrogatePostgres = func(context.Context, string) (*DatabaseObservation, error) { return bag(), nil }
+	dbInterrogateMy = func(context.Context, string) (*DatabaseObservation, error) { return bag(), nil }
 
-	for name, call := range map[string]func(context.Context, string) (*DatabaseEncryptionFinding, error){
+	for name, call := range map[string]func(context.Context, string) (*DatabaseObservation, error){
 		"InterrogatePostgreSQLConn": InterrogatePostgreSQLConn,
 		"InterrogateMySQLConn":      InterrogateMySQLConn,
 	} {

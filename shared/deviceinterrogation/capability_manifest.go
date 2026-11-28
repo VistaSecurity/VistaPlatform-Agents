@@ -592,7 +592,6 @@ func httpManifest() CollectorManifest {
 func databaseManifest() CollectorManifest {
 	na := NotApplicable(naSQLService)
 	host := NotApplicable(naDBHostFacts)
-	sslinfo := "any login role; ssl_is_used() and ssl_cipher() need the sslinfo extension in the target database"
 	return CollectorManifest{
 		Collector: databaseCollector,
 		Declarations: map[Capability]Declaration{
@@ -612,7 +611,7 @@ func databaseManifest() CollectorManifest {
 			CapVPNTunnelEdges:       na,
 			CapDeviceServedTLS:      Supplies("the session's own TLS version and cipher, when SSL is on"),
 			CapCertificateInventory: Gap("M-13", Unscheduled, "the server certificate is never read"),
-			CapCollectionWarnings:   Gap("M-07", "W2.4", "every failed query is skipped silently; W0.1 did not cover this collector"),
+			CapCollectionWarnings:   Supplies(),
 
 			FactCapability(facts.KeyOSName):               host,
 			FactCapability(facts.KeyOSVersion):            host,
@@ -630,16 +629,14 @@ func databaseManifest() CollectorManifest {
 		},
 		Endpoints: []Endpoint{
 			dbQuery("SELECT version()", "PostgreSQL version", "any login role"),
-			dbQuery("SELECT ssl_is_used()", "whether this session is TLS (PostgreSQL)", sslinfo),
-			dbQuery("SELECT ssl_cipher(), version()", "this session's cipher (PostgreSQL)", sslinfo),
+			dbQuery("SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()", "current session TLS use, negotiated protocol and cipher (PostgreSQL)", "any login role"),
 			dbQuery("SELECT name, setting FROM pg_settings WHERE name = $1",
 				"ssl, ssl_min_protocol_version, ssl_max_protocol_version, ssl_ciphers, ssl_prefer_server_ciphers, password_encryption (PostgreSQL)",
 				"any login role"),
-			dbQuery("SELECT setting FROM pg_settings WHERE name = 'ssl'", "whether SSL is on (PostgreSQL)", "any login role"),
 			dbQuery("SELECT VERSION()", "MySQL version", "any login account"),
-			dbQuery("SHOW VARIABLES WHERE Variable_name LIKE '%ssl%' OR Variable_name LIKE '%tls%' OR Variable_name LIKE '%encrypt%'",
-				"TLS and encryption variables, filtered to an allowlist before anything is kept (MySQL)", "any login account"),
-			dbQuery("SELECT @@innodb_encrypt_tables", "at-rest table encryption (MariaDB; MySQL has no such variable and the query fails harmlessly)", "any login account"),
+			dbQuery("SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_cipher','Ssl_version')", "current session TLS cipher and negotiated protocol (MySQL)", "any login account"),
+			dbQuery(mysqlSettingsQuery,
+				"explicit allowlisted TLS and encryption variables (MySQL)", "any login account"),
 		},
 	}
 }

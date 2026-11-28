@@ -3,8 +3,10 @@ package deviceinterrogation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,216 +18,314 @@ import (
 	"github.com/vistasecurity/vistaplatform-agents/shared/redact"
 )
 
-// DatabaseInterrogator interrogates PostgreSQL and MySQL instances for their
-// in-transit (TLS) and at-rest encryption posture plus password-hashing method.
-// It is the shared core of the former in-cluster
-// device-interrogation-service's database interrogation: the service wrapper
-// keeps the persistence side (writing to the database_encryption_states table),
-// while the connection-string construction, the per-engine SELECT/SHOW
-// interrogation, and the risk scoring all live here so the customer-deployed
-// Interrogation Agent can carry the same capability.
-//
-// Entitlement gating happens at the wrapper, not here.
+// DatabaseInterrogator collects facts about the SQL session and selected
+// server settings. Policy judgment belongs to Vista Platform.
 type DatabaseInterrogator struct{}
 
-// SupportedDeviceTypes implements DeviceInterrogator.
-func (*DatabaseInterrogator) SupportedDeviceTypes() []string {
-	return []string{"postgresql", "mysql"}
+func (*DatabaseInterrogator) SupportedDeviceTypes() []string { return []string{"postgresql", "mysql"} }
+
+// DatabaseMeasurementState distinguishes an observed false or empty value from
+// evidence the collector could not obtain.
+type DatabaseMeasurementState string
+
+const (
+	DatabaseMeasured    DatabaseMeasurementState = "measured"
+	DatabaseUnknown     DatabaseMeasurementState = "unknown"
+	DatabaseQueryError  DatabaseMeasurementState = "query_error"
+	DatabaseUnsupported DatabaseMeasurementState = "unsupported"
+)
+
+type DatabaseBoolObservation struct {
+	State DatabaseMeasurementState `json:"state"`
+	Value *bool                    `json:"value,omitempty"`
 }
 
-// DatabaseEncryptionFinding represents the encryption state of a database. It is
-// exported so the service wrapper can read it and persist it to the
-// database_encryption_states table (persistence stays in the wrapper).
-type DatabaseEncryptionFinding struct {
-	Engine   string
-	Version  string
-	Hostname string
-	Port     int
-
-	// TLS / in-transit
-	SSLEnabled  bool
-	SSLVersion  string
-	SSLCipher   string
-	SSLEnforced bool
-
-	// At-rest
-	EncryptionAtRestEnabled bool
-	EncryptionMethod        string
-	EncryptionAlgorithm     string
-
-	// Password hashing
-	PasswordEncryptionMethod string
-
-	// RiskScore is the computed 0-100 severity of this finding. The wrapper
-	// persists it verbatim; it is computed here (rather than in the wrapper's
-	// store path) so the standalone agent gets the same score.
-	RiskScore int
-
-	// Raw settings for reference
-	RawConfig map[string]interface{}
+type DatabaseStringObservation struct {
+	State DatabaseMeasurementState `json:"state"`
+	Value *string                  `json:"value,omitempty"`
 }
 
-// dbInterrogatePostgres and dbInterrogateMy are the per-engine interrogations,
-// behind vars so a test can drive [InterrogateDatabase] end to end without a
-// live engine.
-//
-// That seam exists for one assertion in particular: that the REDACTION at the
-// tail of InterrogateDatabase actually runs. Calling redact.Map in a test
-// proves redact.Map works; it proves nothing about whether this function calls
-// it, and "the helper is tested, the call site is not" is how a fix ships
-// inert.
+// DatabaseObservation is the typed managed result. Engine and port are target
+// assertions only; the platform binds them to the authenticated job.
+type DatabaseObservation struct {
+	Engine       string `json:"engine"`
+	Port         int    `json:"port"`
+	Hostname     string `json:"hostname,omitempty"`
+	InstanceName string `json:"instance_name,omitempty"`
+
+	ServerVersion             DatabaseStringObservation `json:"server_version"`
+	SessionTLSInUse           DatabaseBoolObservation   `json:"session_tls_in_use"`
+	SessionTLSVersion         DatabaseStringObservation `json:"session_tls_version"`
+	SessionTLSCipher          DatabaseStringObservation `json:"session_tls_cipher"`
+	TLSEnforced               DatabaseBoolObservation   `json:"tls_enforced"`
+	EncryptionAtRestEnabled   DatabaseBoolObservation   `json:"encryption_at_rest_enabled"`
+	EncryptionMethod          DatabaseStringObservation `json:"encryption_method"`
+	EncryptionAlgorithm       DatabaseStringObservation `json:"encryption_algorithm"`
+	PasswordEncryptionDefault DatabaseStringObservation `json:"password_encryption_default"`
+	RawConfig                 map[string]interface{}    `json:"raw_config,omitempty"`
+
+	Warnings []CollectionWarning `json:"-"`
+}
+
+func boolMeasured(v bool) DatabaseBoolObservation {
+	return DatabaseBoolObservation{State: DatabaseMeasured, Value: &v}
+}
+func stringMeasured(v string) DatabaseStringObservation {
+	return DatabaseStringObservation{State: DatabaseMeasured, Value: &v}
+}
+func boolState(s DatabaseMeasurementState) DatabaseBoolObservation {
+	return DatabaseBoolObservation{State: s}
+}
+func stringState(s DatabaseMeasurementState) DatabaseStringObservation {
+	return DatabaseStringObservation{State: s}
+}
+
 var (
 	dbInterrogatePostgres = dbInterrogatePostgreSQL
 	dbInterrogateMy       = dbInterrogateMySQL
+	dbOpenMySQL           = func(cfg *mysql.Config) (*sql.DB, error) {
+		connector, err := mysql.NewConnector(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return sql.OpenDB(connector), nil
+	}
 )
 
-// InterrogateDatabase builds a DSN from the (already-decrypted, plaintext)
-// device credentials, dispatches on device.DeviceType to the per-engine
-// interrogation, computes the risk score, and returns the finding with
-// Hostname/Port set. Credentials are plaintext here — no encryption service is
-// involved (the wrapper decrypts before calling).
-func InterrogateDatabase(ctx context.Context, device DeviceInfo, creds Credentials) (*DatabaseEncryptionFinding, error) {
+func InterrogateDatabase(ctx context.Context, device DeviceInfo, creds Credentials) (*DatabaseObservation, error) {
 	connStr, port, err := dbBuildConnStr(device, creds)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build connection string: %w", err)
 	}
-
-	var finding *DatabaseEncryptionFinding
+	var observation *DatabaseObservation
 	switch device.DeviceType {
 	case "postgresql":
-		finding, err = dbInterrogatePostgres(ctx, connStr)
+		observation, err = dbInterrogatePostgres(ctx, connStr)
 	case "mysql":
-		finding, err = dbInterrogateMy(ctx, connStr)
+		observation, err = dbInterrogateMy(ctx, connStr)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", device.DeviceType)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database interrogation failed: %w", err)
 	}
-
-	// Set hostname/port from the device record. dbBuildConnStr above already
-	// resolved the same host successfully, so this cannot fail here.
-	finding.Hostname, _ = deviceHost(device)
-	finding.Port = port
-
-	finding.RiskScore = dbCalculateRiskScore(finding)
-
-	// REDACT before returning, not at the Registry.
-	//
-	// Every other collector's output is scrubbed by the sanitizing wrapper
-	// Registry.Get returns, which walks an *InterrogateResult. This function
-	// returns a TYPED finding instead, and the service wrapper persists that
-	// finding's RawConfig straight into `database_encryption_states.raw_config`
-	// without ever building an InterrogateResult — so the wrapper could not
-	// reach it and nothing scrubbed it. RawConfig is an engine's whole settings
-	// bag (`SHOW VARIABLES`, `pg_settings`), which on MySQL includes
-	// `master_ssl_*` and on PostgreSQL the `ssl_key_file` path and anything an
-	// operator added: exactly the "collect posture, never key material" rule.
-	//
-	// Doing it HERE rather than in the caller is what makes it unskippable:
-	// the standalone Interrogation Agent calls this function too.
-	finding.RawConfig = redact.Map(finding.RawConfig)
-
-	return finding, nil
+	observation.Hostname, _ = deviceHost(device)
+	observation.Port = port
+	observation.RawConfig = redact.Map(observation.RawConfig)
+	if err := ValidateDatabaseObservation(*observation); err != nil {
+		return nil, fmt.Errorf("invalid database observation: %w", err)
+	}
+	return observation, nil
 }
 
-// Interrogate implements DeviceInterrogator. It runs InterrogateDatabase and
-// converts the finding into a single database CryptoAsset.
+var databaseRawKeys = map[string]map[string]bool{
+	"postgresql": {
+		"version": true, "session_tls_in_use": true, "session_tls_version": true,
+		"session_tls_cipher": true, "ssl": true, "ssl_min_protocol_version": true,
+		"ssl_max_protocol_version": true, "ssl_ciphers": true,
+		"ssl_prefer_server_ciphers": true, "password_encryption": true,
+	},
+	"mysql": {
+		"version": true, "session_tls_in_use": true, "session_tls_version": true,
+		"session_tls_cipher": true, "have_ssl": true, "have_openssl": true,
+		"tls_version": true, "tls_ciphersuites": true, "require_secure_transport": true,
+		"default_table_encryption": true, "innodb_encrypt_tables": true,
+		"binlog_encryption": true, "table_encryption_privilege_check": true,
+	},
+}
+
+// ValidateDatabaseObservation enforces the same bounded fact contract as the
+// managed JSON schema. It is exported for the paired Platform ingest boundary.
+func ValidateDatabaseObservation(o DatabaseObservation) error {
+	allowed, ok := databaseRawKeys[o.Engine]
+	if !ok {
+		return fmt.Errorf("unsupported engine")
+	}
+	if o.Port < 1 || o.Port > 65535 {
+		return fmt.Errorf("invalid port")
+	}
+	if len(o.Hostname) > 255 || len(o.InstanceName) > 255 {
+		return fmt.Errorf("database identity exceeds bound")
+	}
+	stringsToCheck := []struct {
+		v   DatabaseStringObservation
+		max int
+	}{
+		{o.ServerVersion, 512}, {o.SessionTLSVersion, 64}, {o.SessionTLSCipher, 255},
+		{o.EncryptionMethod, 255}, {o.EncryptionAlgorithm, 255}, {o.PasswordEncryptionDefault, 100},
+	}
+	for _, item := range stringsToCheck {
+		if err := validateStringObservation(item.v, item.max); err != nil {
+			return err
+		}
+	}
+	for _, value := range []DatabaseBoolObservation{o.SessionTLSInUse, o.TLSEnforced, o.EncryptionAtRestEnabled} {
+		if err := validateBoolObservation(value); err != nil {
+			return err
+		}
+	}
+	for key, value := range o.RawConfig {
+		if !allowed[key] {
+			return fmt.Errorf("raw setting is not allowlisted")
+		}
+		switch v := value.(type) {
+		case string:
+			if len(v) > 2048 {
+				return fmt.Errorf("raw setting exceeds bound")
+			}
+		case bool, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		default:
+			return fmt.Errorf("raw setting has unsupported type")
+		}
+	}
+	encoded, err := json.Marshal(o.RawConfig)
+	if err != nil || len(encoded) > 16*1024 {
+		return fmt.Errorf("raw settings exceed bound")
+	}
+	return nil
+}
+
+func validateBoolObservation(value DatabaseBoolObservation) error {
+	switch value.State {
+	case DatabaseMeasured:
+		if value.Value == nil {
+			return fmt.Errorf("measured boolean lacks value")
+		}
+	case DatabaseUnknown, DatabaseQueryError, DatabaseUnsupported:
+		if value.Value != nil {
+			return fmt.Errorf("non-measured boolean carries value")
+		}
+	default:
+		return fmt.Errorf("invalid measurement state")
+	}
+	return nil
+}
+
+func validateStringObservation(value DatabaseStringObservation, max int) error {
+	switch value.State {
+	case DatabaseMeasured:
+		if value.Value == nil || *value.Value == "" {
+			return fmt.Errorf("measured string lacks value")
+		}
+		if len(*value.Value) > max {
+			return fmt.Errorf("measured string exceeds bound")
+		}
+	case DatabaseUnknown, DatabaseQueryError, DatabaseUnsupported:
+		if value.Value != nil {
+			return fmt.Errorf("non-measured string carries value")
+		}
+	default:
+		return fmt.Errorf("invalid measurement state")
+	}
+	return nil
+}
+
 func (*DatabaseInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
-	finding, err := InterrogateDatabase(ctx, device, creds)
+	observation, err := InterrogateDatabase(ctx, device, creds)
 	if err != nil {
 		return nil, err
 	}
-
-	protocol := "TLS"
-	if !finding.SSLEnabled {
-		protocol = "NONE"
+	var assets []CryptoAsset
+	if observation.SessionTLSInUse.State == DatabaseMeasured && observation.SessionTLSInUse.Value != nil && *observation.SessionTLSInUse.Value {
+		asset := CryptoAsset{
+			Hostname: observation.Hostname, IPAddress: device.IPAddress, Port: observation.Port,
+			Protocol: "TLS", AssetType: "database",
+			Metadata: map[string]interface{}{
+				"db_engine": observation.Engine, "db_version": observation.ServerVersion,
+				"session_tls_in_use":          observation.SessionTLSInUse,
+				"session_tls_cipher":          observation.SessionTLSCipher,
+				"session_tls_version":         observation.SessionTLSVersion,
+				"tls_enforced":                observation.TLSEnforced,
+				"encryption_at_rest_enabled":  observation.EncryptionAtRestEnabled,
+				"password_encryption_default": observation.PasswordEncryptionDefault,
+				"raw_config":                  observation.RawConfig,
+			},
+		}
+		if observation.SessionTLSVersion.State == DatabaseMeasured && observation.SessionTLSVersion.Value != nil {
+			asset.ProtocolVersion = observation.SessionTLSVersion.Value
+		}
+		if observation.SessionTLSCipher.State == DatabaseMeasured && observation.SessionTLSCipher.Value != nil {
+			asset.CipherSuite = observation.SessionTLSCipher.Value
+		}
+		assets = append(assets, asset)
 	}
-
-	asset := CryptoAsset{
-		Hostname:  finding.Hostname,
-		IPAddress: device.IPAddress,
-		Port:      finding.Port,
-		Protocol:  protocol,
-		AssetType: "database",
-		Metadata: map[string]interface{}{
-			"db_engine":                  finding.Engine,
-			"db_version":                 finding.Version,
-			"ssl_enabled":                finding.SSLEnabled,
-			"ssl_cipher":                 finding.SSLCipher,
-			"ssl_version":                finding.SSLVersion,
-			"encryption_at_rest":         finding.EncryptionAtRestEnabled,
-			"password_encryption_method": finding.PasswordEncryptionMethod,
-			"risk_score":                 finding.RiskScore,
-			"raw_config":                 finding.RawConfig,
-		},
-	}
-
-	// Only populate optional crypto fields when genuinely known — never
-	// fabricate a default.
-	if finding.SSLVersion != "" {
-		asset.ProtocolVersion = strPtr(finding.SSLVersion)
-	}
-	if finding.SSLCipher != "" {
-		asset.CipherSuite = strPtr(finding.SSLCipher)
-	}
-
 	return &InterrogateResult{
-		Assets: []CryptoAsset{asset},
+		Assets: assets,
 		DeviceInfo: map[string]interface{}{
-			"db_engine":                  finding.Engine,
-			"db_version":                 finding.Version,
-			"ssl_enabled":                finding.SSLEnabled,
-			"ssl_cipher":                 finding.SSLCipher,
-			"ssl_version":                finding.SSLVersion,
-			"encryption_at_rest":         finding.EncryptionAtRestEnabled,
-			"password_encryption_method": finding.PasswordEncryptionMethod,
-			"risk_score":                 finding.RiskScore,
-			"raw_config":                 finding.RawConfig,
+			"db_engine": observation.Engine, "db_version": observation.ServerVersion,
+			"session_tls_in_use":          observation.SessionTLSInUse,
+			"session_tls_cipher":          observation.SessionTLSCipher,
+			"session_tls_version":         observation.SessionTLSVersion,
+			"tls_enforced":                observation.TLSEnforced,
+			"encryption_at_rest_enabled":  observation.EncryptionAtRestEnabled,
+			"password_encryption_default": observation.PasswordEncryptionDefault,
+			"raw_config":                  observation.RawConfig,
 		},
+		DatabaseObservations: []DatabaseObservation{*observation},
+		Warnings:             observation.Warnings,
+		collector:            databaseCollector,
 	}, nil
 }
 
-// dbBuildConnStr constructs a DSN from plaintext credentials and the device
-// record. It returns the DSN and the engine's default port.
 func dbBuildConnStr(device DeviceInfo, creds Credentials) (string, int, error) {
-	username := creds.Username
-	password := creds.Password
-	// deviceHost errors rather than defaulting to localhost — a DSN built
-	// against the interrogating host is a scan of the wrong machine, not a
-	// degraded scan of the right one.
 	host, err := deviceHost(device)
 	if err != nil {
 		return "", 0, err
 	}
-
+	port := device.Port
 	switch device.DeviceType {
 	case "postgresql":
-		port := 5432
-		return fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=prefer", username, password, host, port), port, nil
+		if port == 0 {
+			port = 5432
+		}
+		if port < 1 || port > 65535 {
+			return "", 0, fmt.Errorf("invalid database port")
+		}
+		dsn := &url.URL{
+			Scheme: "postgres",
+			User:   url.UserPassword(creds.Username, creds.Password),
+			Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+			Path:   "/postgres",
+		}
+		query := dsn.Query()
+		query.Set("sslmode", "prefer")
+		dsn.RawQuery = query.Encode()
+		return dsn.String(), port, nil
 	case "mysql":
-		port := 3306
-		// Built by the driver rather than by Sprintf: FormatDSN is the one
-		// encoder guaranteed to round-trip through the driver's own parser,
-		// whatever the password contains.
+		if port == 0 {
+			port = 3306
+		}
+		if port < 1 || port > 65535 {
+			return "", 0, fmt.Errorf("invalid database port")
+		}
 		cfg := mysql.NewConfig()
-		cfg.User = username
-		cfg.Passwd = password
-		cfg.Net = "tcp"
-		cfg.Addr = net.JoinHostPort(host, strconv.Itoa(port))
-		// "preferred" is MySQL's sslmode=prefer: TLS whenever the server
-		// offers it. The driver's default is no TLS at all, which on a
-		// caching_sha2_password account sends the password under a server
-		// public key the driver fetched unauthenticated.
-		cfg.TLSConfig = "preferred"
+		cfg.User, cfg.Passwd, cfg.Net = creds.Username, creds.Password, "tcp"
+		cfg.Addr, cfg.TLSConfig = net.JoinHostPort(host, strconv.Itoa(port)), "preferred"
 		return cfg.FormatDSN(), port, nil
 	default:
 		return "", 0, fmt.Errorf("unsupported database type: %s", device.DeviceType)
 	}
 }
 
-// dbInterrogatePostgreSQL queries a PostgreSQL instance for its encryption settings.
-func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
+func newDatabaseObservation(engine string) *DatabaseObservation {
+	return &DatabaseObservation{
+		Engine: engine, RawConfig: make(map[string]interface{}),
+		ServerVersion: stringState(DatabaseUnknown), SessionTLSInUse: boolState(DatabaseUnknown),
+		SessionTLSVersion: stringState(DatabaseUnknown), SessionTLSCipher: stringState(DatabaseUnknown),
+		TLSEnforced: boolState(DatabaseUnknown), EncryptionAtRestEnabled: boolState(DatabaseUnknown),
+		EncryptionMethod: stringState(DatabaseUnknown), EncryptionAlgorithm: stringState(DatabaseUnknown),
+		PasswordEncryptionDefault: stringState(DatabaseUnknown),
+	}
+}
+
+func (o *DatabaseObservation) warning(endpoint string, err error, effect string) {
+	o.Warnings = appendWarning(o.Warnings, sanitizeWarning(CollectionWarning{
+		Collector: databaseCollector, Endpoint: endpoint, Reason: ClassifyWarningReason(err),
+		Effect: effect, Detail: "database measurement failed",
+	}))
+}
+
+func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseObservation, error) {
 	connector, err := pq.NewConnector(connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
@@ -233,290 +333,207 @@ func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseEncr
 	connector.Dialer(guardedPostgresDialer{})
 	targetDB := sql.OpenDB(connector)
 	defer func() { _ = targetDB.Close() }()
-
-	// Set a timeout for the connection
 	targetDB.SetConnMaxLifetime(30 * time.Second)
 	if err := targetDB.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping PostgreSQL: %w", err)
 	}
 
-	finding := &DatabaseEncryptionFinding{
-		Engine:    "postgresql",
-		RawConfig: make(map[string]interface{}),
-	}
-
-	// Get version
+	o := newDatabaseObservation("postgresql")
 	var version string
-	if err := targetDB.QueryRowContext(ctx, "SELECT version()").Scan(&version); err == nil {
-		finding.Version = version
-		finding.RawConfig["version"] = version
+	if err := targetDB.QueryRowContext(ctx, "SELECT version()").Scan(&version); err != nil {
+		o.ServerVersion = stringState(DatabaseQueryError)
+		o.warning("server-version", err, "server version not collected")
+	} else {
+		o.ServerVersion = stringMeasured(version)
+		o.RawConfig["version"] = version
 	}
 
-	// Get SSL status from connection
-	var sslInUse bool
-	if err := targetDB.QueryRowContext(ctx, "SELECT ssl_is_used()").Scan(&sslInUse); err == nil {
-		finding.SSLEnabled = sslInUse
-		finding.RawConfig["ssl_is_used"] = sslInUse
-	}
-
-	// Get SSL cipher and protocol from current connection
-	if sslInUse {
-		var cipher sql.NullString
-		row := targetDB.QueryRowContext(ctx,
-			"SELECT ssl_cipher(), version()")
-		if err := row.Scan(&cipher, &version); err == nil {
-			if cipher.Valid {
-				finding.SSLCipher = cipher.String
-				finding.RawConfig["ssl_cipher"] = cipher.String
-			}
+	var tls bool
+	var tlsVersion, cipher sql.NullString
+	if err := targetDB.QueryRowContext(ctx, "SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&tls, &tlsVersion, &cipher); err != nil {
+		o.SessionTLSInUse = boolState(DatabaseQueryError)
+		o.SessionTLSVersion, o.SessionTLSCipher = stringState(DatabaseQueryError), stringState(DatabaseQueryError)
+		o.warning("session-tls", err, "current SQL session TLS facts not collected")
+	} else {
+		o.SessionTLSInUse = boolMeasured(tls)
+		o.RawConfig["session_tls_in_use"] = tls
+		if tls && tlsVersion.Valid {
+			o.SessionTLSVersion = stringMeasured(tlsVersion.String)
+			o.RawConfig["session_tls_version"] = tlsVersion.String
+		}
+		if tls && cipher.Valid {
+			o.SessionTLSCipher = stringMeasured(cipher.String)
+			o.RawConfig["session_tls_cipher"] = cipher.String
 		}
 	}
 
-	// Get SSL-related settings from pg_settings
-	sslSettings := []string{
-		"ssl", "ssl_min_protocol_version", "ssl_max_protocol_version",
-		"ssl_ciphers", "ssl_prefer_server_ciphers",
-		"password_encryption",
-	}
-	for _, setting := range sslSettings {
-		var name, settingValue string
-		err := targetDB.QueryRowContext(ctx,
-			"SELECT name, setting FROM pg_settings WHERE name = $1", setting,
-		).Scan(&name, &settingValue)
-		if err == nil {
-			finding.RawConfig[name] = settingValue
-
-			switch name {
-			case "ssl":
-				finding.SSLEnabled = finding.SSLEnabled || settingValue == "on"
-			case "ssl_min_protocol_version":
-				finding.SSLVersion = settingValue
-			case "password_encryption":
-				finding.PasswordEncryptionMethod = settingValue
+	for _, setting := range []string{"ssl", "ssl_min_protocol_version", "ssl_max_protocol_version", "ssl_ciphers", "ssl_prefer_server_ciphers", "password_encryption"} {
+		var name, value string
+		err := targetDB.QueryRowContext(ctx, "SELECT name, setting FROM pg_settings WHERE name = $1", setting).Scan(&name, &value)
+		if err != nil {
+			if setting == "password_encryption" {
+				o.PasswordEncryptionDefault = stringState(DatabaseQueryError)
 			}
+			o.warning("setting/"+setting, err, "database setting not collected")
+			continue
+		}
+		o.RawConfig[name] = value
+		if name == "password_encryption" {
+			o.PasswordEncryptionDefault = stringMeasured(value)
 		}
 	}
-
-	// Check if SSL is required (pg_hba.conf hostssl entries)
-	// We can infer from ssl setting being 'on' and check if there are hostnossl entries
-	var sslSetting string
-	if err := targetDB.QueryRowContext(ctx,
-		"SELECT setting FROM pg_settings WHERE name = 'ssl'",
-	).Scan(&sslSetting); err == nil {
-		finding.RawConfig["ssl_setting"] = sslSetting
-	}
-
-	return finding, nil
+	o.TLSEnforced = boolState(DatabaseUnsupported)
+	o.EncryptionAtRestEnabled = boolState(DatabaseUnsupported)
+	o.EncryptionMethod, o.EncryptionAlgorithm = stringState(DatabaseUnsupported), stringState(DatabaseUnsupported)
+	return o, nil
 }
 
-// mysqlRetainedVariables is the set of MySQL server variables worth recording
-// for a crypto posture assessment. The ssl_* path variables (ssl_ca, ssl_cert,
-// ssl_key …) are filesystem paths rather than material, but they describe the
-// server's deployment rather than its cryptography and nothing reads them, so
-// they are left out too.
 var mysqlRetainedVariables = map[string]bool{
-	"have_ssl":                         true,
-	"have_openssl":                     true,
-	"ssl_cipher":                       true,
-	"tls_version":                      true,
-	"tls_ciphersuites":                 true,
-	"require_secure_transport":         true,
-	"default_table_encryption":         true,
-	"innodb_encrypt_tables":            true,
-	"binlog_encryption":                true,
-	"table_encryption_privilege_check": true,
+	"have_ssl": true, "have_openssl": true, "tls_version": true,
+	"tls_ciphersuites": true, "require_secure_transport": true,
+	"default_table_encryption": true, "innodb_encrypt_tables": true,
+	"binlog_encryption": true, "table_encryption_privilege_check": true,
 }
 
-// mysqlConfig parses a go-sql-driver DSN (`user:pass@tcp(host:port)/`) and
-// silences the driver's logger.
-//
-// The driver's default logger writes to stderr — "packets.go: unexpected EOF"
-// and the like — and nothing in this package may report there (see
-// stdout_guard_test.go). The logger is set per connector rather than with the
-// process-wide mysql.SetLogger so importing this package changes nothing else
-// in the binary.
 func mysqlConfig(connStr string) (*mysql.Config, error) {
 	cfg, err := mysql.ParseDSN(connStr)
 	if err != nil {
 		return nil, err
 	}
 	cfg.Logger = &mysql.NopLogger{}
-	// The driver's own resolver/dialer would bypass the appliance guard. Its
-	// context already carries Config.Timeout, so the guard needs no second
-	// timeout here; it still runs after DNS resolution on every candidate IP.
 	cfg.DialFunc = dialguard.Dial(0)
 	return cfg, nil
 }
 
-// guardedPostgresDialer adapts the shared context-aware appliance guard to
-// lib/pq's dialer seam. Implement all three methods because pq prefers
-// DialContext when available but retains the older Dial/DialTimeout paths.
 type guardedPostgresDialer struct{}
 
 func (guardedPostgresDialer) Dial(network, address string) (net.Conn, error) {
 	return dialguard.Dial(0)(context.Background(), network, address)
 }
-
 func (guardedPostgresDialer) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
 	return dialguard.Dial(timeout)(context.Background(), network, address)
 }
-
 func (guardedPostgresDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return dialguard.Dial(0)(ctx, network, address)
 }
 
-// dbInterrogateMySQL queries a MySQL instance for its encryption settings.
-func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
+const mysqlSettingsQuery = "SHOW VARIABLES WHERE Variable_name IN ('have_ssl','have_openssl','tls_version','tls_ciphersuites','require_secure_transport','default_table_encryption','innodb_encrypt_tables','binlog_encryption','table_encryption_privilege_check')"
+
+func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseObservation, error) {
 	cfg, err := mysqlConfig(connStr)
 	if err != nil {
-		// ParseDSN's error does not echo the DSN, so it cannot leak the password.
 		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
 	}
-	connector, err := mysql.NewConnector(cfg)
+	targetDB, err := dbOpenMySQL(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
 	}
-	targetDB := sql.OpenDB(connector)
 	defer func() { _ = targetDB.Close() }()
-
 	targetDB.SetConnMaxLifetime(30 * time.Second)
 	if err := targetDB.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping MySQL: %w", err)
 	}
-
-	finding := &DatabaseEncryptionFinding{
-		Engine:    "mysql",
-		RawConfig: make(map[string]interface{}),
-	}
-
-	// Get version
+	o := newDatabaseObservation("mysql")
 	var version string
-	if err := targetDB.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err == nil {
-		finding.Version = version
-		finding.RawConfig["version"] = version
+	if err := targetDB.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		o.ServerVersion = stringState(DatabaseQueryError)
+		o.warning("server-version", err, "server version not collected")
+	} else {
+		o.ServerVersion = stringMeasured(version)
+		o.RawConfig["version"] = version
 	}
 
-	// Query SSL-related variables.
-	//
-	// The LIKE patterns are how we ASK, but they are not what we KEEP: a pattern
-	// cannot say what it will match on a MySQL version or fork we have not seen,
-	// and `%encrypt%` in particular is an open door onto whatever keyring
-	// variables a future release adds. The Postgres path above enumerates its
-	// settings; this one filters the response against mysqlRetainedVariables so
-	// both engines have a bounded, reviewable set.
-	rows, err := targetDB.QueryContext(ctx,
-		"SHOW VARIABLES WHERE Variable_name LIKE '%ssl%' OR Variable_name LIKE '%tls%' OR Variable_name LIKE '%encrypt%'")
-	if err == nil {
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var name, value string
-			if err := rows.Scan(&name, &value); err == nil {
-				if mysqlRetainedVariables[strings.ToLower(name)] {
-					finding.RawConfig[name] = value
-				}
-
-				switch strings.ToLower(name) {
-				case "have_ssl", "have_openssl":
-					finding.SSLEnabled = finding.SSLEnabled || strings.ToUpper(value) == "YES"
-				case "ssl_cipher":
-					finding.SSLCipher = value
-				case "tls_version":
-					finding.SSLVersion = value
-				case "default_table_encryption":
-					finding.EncryptionAtRestEnabled = strings.ToUpper(value) == "ON"
-				case "require_secure_transport":
-					finding.SSLEnforced = strings.ToUpper(value) == "ON"
-				}
+	rows, err := targetDB.QueryContext(ctx, "SHOW SESSION STATUS WHERE Variable_name IN ('Ssl_cipher','Ssl_version')")
+	if err != nil {
+		o.SessionTLSInUse = boolState(DatabaseQueryError)
+		o.SessionTLSVersion, o.SessionTLSCipher = stringState(DatabaseQueryError), stringState(DatabaseQueryError)
+		o.warning("session-tls", err, "current SQL session TLS facts not collected")
+	} else {
+		values, readErr := readMySQLRows(rows)
+		_ = rows.Close()
+		if readErr != nil {
+			o.SessionTLSInUse = boolState(DatabaseQueryError)
+			o.SessionTLSVersion, o.SessionTLSCipher = stringState(DatabaseQueryError), stringState(DatabaseQueryError)
+			o.warning("session-tls", readErr, "current SQL session TLS facts not collected")
+		} else if cipher, present := values["ssl_cipher"]; present {
+			o.SessionTLSInUse = boolMeasured(cipher != "")
+			o.RawConfig["session_tls_in_use"] = cipher != ""
+			if cipher != "" {
+				o.SessionTLSCipher = stringMeasured(cipher)
+				o.RawConfig["session_tls_cipher"] = cipher
+			}
+			if tlsVersion, present := values["ssl_version"]; present && tlsVersion != "" {
+				o.SessionTLSVersion = stringMeasured(tlsVersion)
+				o.RawConfig["session_tls_version"] = tlsVersion
 			}
 		}
 	}
 
-	// Check InnoDB encryption status
-	var innodbEncryption string
-	if err := targetDB.QueryRowContext(ctx,
-		"SELECT @@innodb_encrypt_tables",
-	).Scan(&innodbEncryption); err == nil {
-		finding.RawConfig["innodb_encrypt_tables"] = innodbEncryption
-		if strings.ToUpper(innodbEncryption) == "ON" || strings.ToUpper(innodbEncryption) == "FORCE" {
-			finding.EncryptionAtRestEnabled = true
-			finding.EncryptionMethod = "InnoDB tablespace encryption"
+	rows, err = targetDB.QueryContext(ctx, mysqlSettingsQuery)
+	if err != nil {
+		o.TLSEnforced = boolState(DatabaseQueryError)
+		o.warning("server-settings", err, "database settings not collected")
+	} else {
+		values, readErr := readMySQLRows(rows)
+		_ = rows.Close()
+		if readErr != nil {
+			o.TLSEnforced = boolState(DatabaseQueryError)
+			o.warning("server-settings", readErr, "database settings not collected")
+		} else {
+			for name, value := range values {
+				if mysqlRetainedVariables[name] {
+					o.RawConfig[name] = value
+				}
+			}
+			if value, present := values["require_secure_transport"]; present {
+				switch strings.ToUpper(strings.TrimSpace(value)) {
+				case "ON":
+					o.TLSEnforced = boolMeasured(true)
+				case "OFF":
+					o.TLSEnforced = boolMeasured(false)
+				default:
+					o.TLSEnforced = boolState(DatabaseUnknown)
+					o.warning("setting/require_secure_transport", fmt.Errorf("unrecognized boolean setting"), "TLS enforcement not determined")
+				}
+			}
 		}
 	}
-
-	return finding, nil
+	o.EncryptionAtRestEnabled = boolState(DatabaseUnknown)
+	o.EncryptionMethod, o.EncryptionAlgorithm = stringState(DatabaseUnknown), stringState(DatabaseUnknown)
+	o.PasswordEncryptionDefault = stringState(DatabaseUnsupported)
+	return o, nil
 }
 
-// InterrogatePostgreSQLConn interrogates a PostgreSQL instance reachable via the
-// given connection string. Exposed for callers (e.g. the experimental
-// connection tester) that already have a DSN rather than a device record.
-func InterrogatePostgreSQLConn(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
+type databaseRows interface {
+	Next() bool
+	Scan(...interface{}) error
+	Err() error
+}
+
+func readMySQLRows(rows databaseRows) (map[string]string, error) {
+	values := make(map[string]string)
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		values[strings.ToLower(name)] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func InterrogatePostgreSQLConn(ctx context.Context, connStr string) (*DatabaseObservation, error) {
 	return redactedFinding(dbInterrogatePostgres(ctx, connStr))
 }
-
-// InterrogateMySQLConn interrogates a MySQL instance reachable via the given
-// connection string.
-func InterrogateMySQLConn(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
+func InterrogateMySQLConn(ctx context.Context, connStr string) (*DatabaseObservation, error) {
 	return redactedFinding(dbInterrogateMy(ctx, connStr))
 }
-
-// redactedFinding applies to a finding the scrub InterrogateDatabase applies to
-// its own: RawConfig is an engine's whole settings bag, and it must not reach
-// storage unredacted by whichever exported entry point produced it. The two
-// ...Conn entry points call the per-engine interrogations directly, below the
-// redaction in InterrogateDatabase, and one of them is wired to a tenant-
-// reachable endpoint that persists RawConfig as-is; routing both through here
-// is what makes "redacted before it is returned" true of every way in.
-func redactedFinding(finding *DatabaseEncryptionFinding, err error) (*DatabaseEncryptionFinding, error) {
+func redactedFinding(finding *DatabaseObservation, err error) (*DatabaseObservation, error) {
 	if finding != nil {
 		finding.RawConfig = redact.Map(finding.RawConfig)
 	}
 	return finding, err
-}
-
-// CalculateDatabaseRiskScore computes the 0-100 risk score for a database
-// encryption finding. Exported so a wrapper can reuse the single scoring
-// implementation rather than re-deriving it.
-func CalculateDatabaseRiskScore(finding *DatabaseEncryptionFinding) int {
-	return dbCalculateRiskScore(finding)
-}
-
-// dbCalculateRiskScore computes a 0-100 risk score for a database encryption
-// finding. Ported verbatim from the service's calculateRiskScore (minus the
-// log line, which depended on the service's logger).
-func dbCalculateRiskScore(finding *DatabaseEncryptionFinding) int {
-	score := 50 // Baseline
-
-	// SSL disabled is high risk
-	if !finding.SSLEnabled {
-		score += 30
-	}
-
-	// SSL not enforced is moderate risk
-	if finding.SSLEnabled && !finding.SSLEnforced {
-		score += 10
-	}
-
-	// Weak password hashing
-	if finding.PasswordEncryptionMethod == "md5" {
-		score += 20
-	}
-
-	// No encryption at rest (informational, depends on context)
-	if !finding.EncryptionAtRestEnabled {
-		score += 10
-	}
-
-	// TLS version check
-	if finding.SSLVersion != "" {
-		ver := strings.ToLower(finding.SSLVersion)
-		if strings.Contains(ver, "tlsv1.0") || strings.Contains(ver, "tlsv1.1") {
-			score += 15
-		}
-	}
-
-	if score > 100 {
-		score = 100
-	}
-
-	return score
 }

@@ -60,6 +60,15 @@ func Sanitize(result *InterrogateResult) {
 		return
 	}
 	result.DeviceInfo = redact.Map(result.DeviceInfo)
+	for i := range result.DatabaseObservations {
+		result.DatabaseObservations[i].RawConfig = redact.Map(result.DatabaseObservations[i].RawConfig)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].ServerVersion)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].SessionTLSVersion)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].SessionTLSCipher)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].EncryptionMethod)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].EncryptionAlgorithm)
+		sanitizeDatabaseString(&result.DatabaseObservations[i].PasswordEncryptionDefault)
+	}
 	for i := range result.Assets {
 		result.Assets[i].Metadata = redact.Map(result.Assets[i].Metadata)
 		sanitizeServiceHints(result.Assets[i].ServiceHints)
@@ -84,6 +93,14 @@ func Sanitize(result *InterrogateResult) {
 	// error body, a Go *url.Error carrying the request URL. Their fields have
 	// innocent names, so the value-shaped rules apply (see SanitizeWarnings).
 	result.Warnings = SanitizeWarnings(result.Warnings)
+}
+
+func sanitizeDatabaseString(value *DatabaseStringObservation) {
+	if value == nil || value.Value == nil {
+		return
+	}
+	clean := redact.TextPEM(*value.Value)
+	value.Value = &clean
 }
 
 // sanitizePeer masks PEM private-key blocks in a peer reference's free-text
