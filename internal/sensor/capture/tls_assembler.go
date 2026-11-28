@@ -329,26 +329,6 @@ func (f *TLSStreamFactory) emitDiscovery(state *tlsSessionState, skipDedup bool)
 	if state.serverPort == 853 {
 		metadata["service_hint"] = "dns-over-tls"
 	}
-	// IEC 62351-3 classification on energy-relevant ports — applies to
-	// TLS-wrapped MMS/ICCP (102), DNP3/TLS (20000), CIM (4712), and HMI/EMS
-	// web traffic (443, 8443). Returns nil on unrelated ports.
-	//
-	// Only on NEGOTIATED parameters: a ClientHello with no ServerHello has no
-	// version or suite at all, and classifying it reported "unknown" as
-	// "noncompliant: version+cipher+cert".
-	if state.serverPort != 0 && state.version != "" && state.cipherSuite != "" {
-		var keyAlg string
-		var keyBits int
-		if len(state.certificates) > 0 {
-			keyAlg = state.certificates[0].KeyAlgorithm
-			keyBits = state.certificates[0].KeySize
-		}
-		if cls := ClassifyIEC62351(state.serverPort, state.version, state.cipherSuite, keyAlg, keyBits); cls != nil {
-			for k, v := range cls.ToMetadata() {
-				metadata[k] = v
-			}
-		}
-	}
 	// mTLS detection — client certificate was presented
 	if len(state.clientCertificates) > 0 {
 		metadata["mtls_detected"] = true

@@ -123,12 +123,13 @@ check it fails when you break the thing it guards.
 ## Changing things
 
 **A decoder or collector gains a field.** It appears in standalone output
-automatically, under `data`. If the field is a judgement (a compliance result,
-a "weak" label, a score) rather than an observation, add its key to
-`VerdictKeys` in `shared/agentoutput/verdicts.go`, add it to the test, and
-list it in the "No verdicts" section of `standalone-output.md`. If it could
-carry a secret, it must not exist at all: see the projection and redaction
-rules in the device interrogation code.
+automatically, under `data`. Add observations only: carry the exact protocol,
+algorithm, key size or mechanism and let Platform policy judge it. Do not add a
+compliance result, a weak/strong label or a score. `VerdictKeys` in
+`shared/agentoutput/verdicts.go` is a defensive transition guard for retired
+fields, not a route for new judgments. If a field could carry a secret, it
+must not exist at all: see the projection and redaction rules in the device
+interrogation code.
 
 **A new device type.** Registering it in the collector registry makes it a
 `collect --type` value; `--help` lists the registry, so nothing else changes.

@@ -257,15 +257,14 @@ CSV; use `json` or `jsonl` for them.
 
 ## No verdicts
 
-Standalone output holds observations only. The decoders and collectors are
-shared with managed mode, where a few of them label what they saw for the
-platform: a compliance result against IEC 62351, a "weak" signature or key, a
-risk score. Standalone output removes those labels from every record (the keys
-`iec62351_*`, `cert_weak_signature`, `cert_weak_public_key`, `risk_score`,
-`risk_level`, `risk_factors`, `highest_risk` and `compliance_status`; an OT
-`security` value of `weak` is written as `present`). The facts they were
-derived from stay: the version, the suite, the signature algorithm, the key
-size, the OPC UA policy, the DNP3 MAC. Deciding what is weak is yours.
+Standalone output holds observations only, matching the fact-only managed
+producer shape. The writer defensively removes retired judgment keys when
+legacy or mixed-version data reaches it: certificate weakness labels, numeric
+risk fields, exact IEC 62351 compliance fields, `compliance_status`, and a
+legacy OT `security` value of `weak`. It does not replace a removed verdict
+with a guessed strength. The facts stay: version, suite, signature algorithm,
+key size, full OPC UA policy URI, DNP3 SA version and MAC, and the factual
+`iec62351_applicable` marker when an MMS/ICCP decoder establishes it.
 
 What does stay are checks that are measurements, not opinions:
 `cert_validation_status` (did the chain verify against this machine's trust

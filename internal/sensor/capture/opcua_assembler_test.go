@@ -34,29 +34,6 @@ func TestOPCUAPolicyShortName(t *testing.T) {
 	}
 }
 
-func TestIsOPCUANonePolicy(t *testing.T) {
-	t.Parallel()
-	if !isOPCUANonePolicy("http://opcfoundation.org/UA/SecurityPolicy#None") {
-		t.Error("expected None policy detected")
-	}
-	if isOPCUANonePolicy("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256") {
-		t.Error("Basic256Sha256 wrongly classified as None")
-	}
-}
-
-func TestIsOPCUADeprecatedPolicy(t *testing.T) {
-	t.Parallel()
-	if !isOPCUADeprecatedPolicy("http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15") {
-		t.Error("Basic128Rsa15 should be deprecated")
-	}
-	if !isOPCUADeprecatedPolicy("http://opcfoundation.org/UA/SecurityPolicy#Basic256") {
-		t.Error("Basic256 should be deprecated")
-	}
-	if isOPCUADeprecatedPolicy("http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256") {
-		t.Error("Basic256Sha256 wrongly classified as deprecated")
-	}
-}
-
 func TestOPCUAParseSecurityPolicyURI(t *testing.T) {
 	t.Parallel()
 	// Build a synthetic OPN message body.
@@ -224,15 +201,18 @@ func TestOPCUAAssembler_OPNExtractsSecurityPolicy(t *testing.T) {
 		if d.RawMetadata["security_policy_short"] != "Basic256Sha256" {
 			t.Errorf("security_policy_short=%v", d.RawMetadata["security_policy_short"])
 		}
-		if d.RawMetadata["security"] != "present" {
-			t.Errorf("security=%v, want present", d.RawMetadata["security"])
+		if d.RawMetadata["security_policy"] != "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256" {
+			t.Errorf("security_policy=%v", d.RawMetadata["security_policy"])
+		}
+		if value, ok := d.RawMetadata["security"]; ok {
+			t.Errorf("generic security verdict present: %v", value)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected OPN-driven discovery")
 	}
 }
 
-func TestOPCUAAssembler_OPNNonePolicyClassifiedAsNoCrypto(t *testing.T) {
+func TestOPCUAAssembler_OPNNonePolicyIsFactOnly(t *testing.T) {
 	t.Parallel()
 	factory, ch := newTestOPCUAFactory(t)
 	stream, _ := preOPCUAStream(factory)
@@ -241,15 +221,21 @@ func TestOPCUAAssembler_OPNNonePolicyClassifiedAsNoCrypto(t *testing.T) {
 
 	select {
 	case d := <-ch:
-		if d.RawMetadata["security"] != "none" {
-			t.Errorf("security=%v, want none", d.RawMetadata["security"])
+		if d.RawMetadata["security_policy"] != "http://opcfoundation.org/UA/SecurityPolicy#None" {
+			t.Errorf("security_policy=%v", d.RawMetadata["security_policy"])
+		}
+		if d.RawMetadata["security_policy_short"] != "None" {
+			t.Errorf("security_policy_short=%v, want None", d.RawMetadata["security_policy_short"])
+		}
+		if value, ok := d.RawMetadata["security"]; ok {
+			t.Errorf("generic security verdict present: %v", value)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected None-policy discovery")
 	}
 }
 
-func TestOPCUAAssembler_OPNDeprecatedPolicyClassifiedAsWeak(t *testing.T) {
+func TestOPCUAAssembler_OPNBasic128Rsa15PolicyIsFactOnly(t *testing.T) {
 	t.Parallel()
 	factory, ch := newTestOPCUAFactory(t)
 	stream, _ := preOPCUAStream(factory)
@@ -258,8 +244,14 @@ func TestOPCUAAssembler_OPNDeprecatedPolicyClassifiedAsWeak(t *testing.T) {
 
 	select {
 	case d := <-ch:
-		if d.RawMetadata["security"] != "weak" {
-			t.Errorf("security=%v, want weak", d.RawMetadata["security"])
+		if d.RawMetadata["security_policy"] != "http://opcfoundation.org/UA/SecurityPolicy#Basic128Rsa15" {
+			t.Errorf("security_policy=%v", d.RawMetadata["security_policy"])
+		}
+		if d.RawMetadata["security_policy_short"] != "Basic128Rsa15" {
+			t.Errorf("security_policy_short=%v, want Basic128Rsa15", d.RawMetadata["security_policy_short"])
+		}
+		if value, ok := d.RawMetadata["security"]; ok {
+			t.Errorf("generic security verdict present: %v", value)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected Basic128Rsa15 discovery")

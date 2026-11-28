@@ -160,16 +160,16 @@ envelope is held by `schemas/output/v1/record.schema.json`.
 
 ### No verdicts in the output
 
-Some decoders and collectors shared with managed mode label what they saw for
-the platform: an IEC 62351 compliance result on passive TLS, a "weak"
-certificate signature or key from the active TLS probe, a "weak" OT security
-mechanism, a risk score from the database collector. Those are assessments, so
-the output writer removes them from every standalone record
-(`shared/agentoutput/verdicts.go`, which names each key) and keeps the facts
-they were derived from. Measurements that are not opinions stay: whether a
-certificate chain verified against the local trust store, whether a server
-accepted a hybrid post-quantum group. A new judgement a decoder learns to make
-is added to that list in the same change.
+Producers emit observed facts so managed and standalone records share the same
+fact-only shape. The output writer still removes exact retired verdict keys
+defensively when legacy or mixed-version data reaches it
+(`shared/agentoutput/verdicts.go`). It preserves the factual
+`iec62351_applicable` marker used by decoded MMS/ICCP observations. It also
+removes a legacy `security: "weak"` value instead of replacing it with an
+invented strength. Measurements stay: whether a certificate chain verified
+against the local trust store, whether a server accepted a hybrid
+post-quantum group, and the exact protocol, algorithm, key-size and OT
+mechanism facts.
 
 ### Formats
 
